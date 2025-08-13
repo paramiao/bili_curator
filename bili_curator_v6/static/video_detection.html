@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>视频检测服务 - Bilibili Curator V6</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            padding: 30px;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+            color: #333;
+        }
+        .status-card {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            border-left: 4px solid #007bff;
+        }
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        .status-running { background-color: #28a745; }
+        .status-stopped { background-color: #dc3545; }
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.3s;
+        }
+        .btn-primary { background: #007bff; color: white; }
+        .btn-success { background: #28a745; color: white; }
+        .btn-danger { background: #dc3545; color: white; }
+        .btn-warning { background: #ffc107; color: #212529; }
+        .btn:hover { opacity: 0.8; transform: translateY(-1px); }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .config-section {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+        }
+        .form-group input {
+            width: 200px;
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        .log-section {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            margin-top: 20px;
+        }
+        .log-content {
+            background: #1e1e1e;
+            color: #fff;
+            padding: 15px;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .stat-card {
+            background: #fff;
+            border: 1px solid #e9ecef;
+            border-radius: 8px;
+            padding: 15px;
+            text-align: center;
+        }
+        .stat-number {
+            font-size: 24px;
+            font-weight: bold;
+            color: #007bff;
+        }
+        .stat-label {
+            font-size: 12px;
+            color: #6c757d;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎬 视频检测服务管理</h1>
+            <p>自动扫描和导入已有视频文件的标准服务</p>
+        </div>
+
+        <!-- 服务状态 -->
+        <div class="status-card">
+            <h3>服务状态</h3>
+            <div id="serviceStatus">
+                <span class="status-indicator status-stopped"></span>
+                <span>正在获取状态...</span>
+            </div>
+            <div style="margin-top: 10px;">
+                <small id="lastScanTime">最后扫描时间: 未知</small>
+            </div>
+        </div>
+
+        <!-- 控制按钮 -->
+        <div class="controls">
+            <button id="startBtn" class="btn btn-success">启动服务</button>
+            <button id="stopBtn" class="btn btn-danger">停止服务</button>
+            <button id="fullScanBtn" class="btn btn-primary">完整扫描</button>
+            <button id="incrementalScanBtn" class="btn btn-warning">增量扫描</button>
+            <button id="refreshBtn" class="btn btn-primary">刷新状态</button>
+        </div>
+
+        <!-- 统计信息 -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-number" id="totalVideos">-</div>
+                <div class="stat-label">总视频数</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number" id="scanInterval">-</div>
+                <div class="stat-label">扫描间隔(秒)</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number" id="downloadPath">-</div>
+                <div class="stat-label">下载目录</div>
+            </div>
+        </div>
+
+        <!-- 配置设置 -->
+        <div class="config-section">
+            <h3>配置设置</h3>
+            <div class="form-group">
+                <label for="scanIntervalInput">扫描间隔 (秒):</label>
+                <input type="number" id="scanIntervalInput" min="60" value="300">
+                <button id="updateConfigBtn" class="btn btn-primary">更新配置</button>
+            </div>
+        </div>
+
+        <!-- 操作日志 -->
+        <div class="log-section">
+            <h3>操作日志</h3>
+            <div class="log-content" id="logContent">
+                等待操作日志...
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 全局状态
+        let serviceRunning = false;
+        
+        // DOM元素
+        const serviceStatus = document.getElementById('serviceStatus');
+        const lastScanTime = document.getElementById('lastScanTime');
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const fullScanBtn = document.getElementById('fullScanBtn');
+        const incrementalScanBtn = document.getElementById('incrementalScanBtn');
+        const refreshBtn = document.getElementById('refreshBtn');
+        const updateConfigBtn = document.getElementById('updateConfigBtn');
+        const scanIntervalInput = document.getElementById('scanIntervalInput');
+        const logContent = document.getElementById('logContent');
+        const totalVideos = document.getElementById('totalVideos');
+        const scanInterval = document.getElementById('scanInterval');
+        const downloadPath = document.getElementById('downloadPath');
+
+        // 日志函数
+        function addLog(message, type = 'info') {
+            const timestamp = new Date().toLocaleTimeString();
+            const logEntry = `[${timestamp}] ${message}\n`;
+            logContent.textContent += logEntry;
+            logContent.scrollTop = logContent.scrollHeight;
+        }
+
+        // API调用函数
+        async function apiCall(url, method = 'GET', data = null) {
+            try {
+                const options = {
+                    method,
+                    headers: {
+                        'Content-Type': 'application/json',
+                    }
+                };
+                
+                if (data) {
+                    options.body = JSON.stringify(data);
+                }
+                
+                const response = await fetch(url, options);
+                const result = await response.json();
+                
+                if (!response.ok) {
+                    throw new Error(result.detail || '请求失败');
+                }
+                
+                return result;
+            } catch (error) {
+                addLog(`API调用失败: ${error.message}`, 'error');
+                throw error;
+            }
+        }
+
+        // 更新服务状态显示
+        function updateServiceStatus(status) {
+            const indicator = serviceStatus.querySelector('.status-indicator');
+            const text = serviceStatus.querySelector('span:last-child');
+            
+            if (status.is_running) {
+                indicator.className = 'status-indicator status-running';
+                text.textContent = '服务运行中';
+                serviceRunning = true;
+            } else {
+                indicator.className = 'status-indicator status-stopped';
+                text.textContent = '服务已停止';
+                serviceRunning = false;
+            }
+            
+            // 更新按钮状态
+            startBtn.disabled = serviceRunning;
+            stopBtn.disabled = !serviceRunning;
+            
+            // 更新其他信息
+            if (status.last_scan_time) {
+                lastScanTime.textContent = `最后扫描时间: ${new Date(status.last_scan_time).toLocaleString()}`;
+            }
+            
+            scanInterval.textContent = status.scan_interval || '-';
+            downloadPath.textContent = status.download_path || '-';
+            scanIntervalInput.value = status.scan_interval || 300;
+        }
+
+        // 获取服务状态
+        async function getServiceStatus() {
+            try {
+                const result = await apiCall('/api/video-detection/status');
+                updateServiceStatus(result.data);
+                addLog('状态更新成功');
+            } catch (error) {
+                addLog(`获取状态失败: ${error.message}`, 'error');
+            }
+        }
+
+        // 获取视频总数
+        async function getVideoCount() {
+            try {
+                const result = await apiCall('/api/videos?page=1&size=1');
+                totalVideos.textContent = result.total || 0;
+            } catch (error) {
+                addLog(`获取视频数量失败: ${error.message}`, 'error');
+            }
+        }
+
+        // 事件监听器
+        startBtn.addEventListener('click', async () => {
+            try {
+                await apiCall('/api/video-detection/start', 'POST');
+                addLog('视频检测服务启动成功');
+                await getServiceStatus();
+            } catch (error) {
+                addLog(`启动服务失败: ${error.message}`, 'error');
+            }
+        });
+
+        stopBtn.addEventListener('click', async () => {
+            try {
+                await apiCall('/api/video-detection/stop', 'POST');
+                addLog('视频检测服务停止成功');
+                await getServiceStatus();
+            } catch (error) {
+                addLog(`停止服务失败: ${error.message}`, 'error');
+            }
+        });
+
+        fullScanBtn.addEventListener('click', async () => {
+            try {
+                await apiCall('/api/video-detection/scan/full', 'POST');
+                addLog('完整扫描任务已启动');
+            } catch (error) {
+                addLog(`启动完整扫描失败: ${error.message}`, 'error');
+            }
+        });
+
+        incrementalScanBtn.addEventListener('click', async () => {
+            try {
+                await apiCall('/api/video-detection/scan/incremental', 'POST');
+                addLog('增量扫描任务已启动');
+            } catch (error) {
+                addLog(`启动增量扫描失败: ${error.message}`, 'error');
+            }
+        });
+
+        refreshBtn.addEventListener('click', async () => {
+            await getServiceStatus();
+            await getVideoCount();
+        });
+
+        updateConfigBtn.addEventListener('click', async () => {
+            const interval = parseInt(scanIntervalInput.value);
+            if (interval < 60) {
+                addLog('扫描间隔不能少于60秒', 'error');
+                return;
+            }
+            
+            try {
+                await apiCall(`/api/video-detection/config?scan_interval=${interval}`, 'PUT');
+                addLog(`扫描间隔已更新为${interval}秒`);
+                await getServiceStatus();
+            } catch (error) {
+                addLog(`更新配置失败: ${error.message}`, 'error');
+            }
+        });
+
+        // 初始化
+        document.addEventListener('DOMContentLoaded', async () => {
+            addLog('视频检测服务管理界面已加载');
+            await getServiceStatus();
+            await getVideoCount();
+            
+            // 定期刷新状态
+            setInterval(async () => {
+                await getServiceStatus();
+                await getVideoCount();
+            }, 10000); // 每10秒刷新一次
+        });
+    </script>
+</body>
+</html>

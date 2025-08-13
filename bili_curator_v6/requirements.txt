@@ -1,0 +1,23 @@
+# FastAPI Web框架
+fastapi>=0.100.0
+uvicorn>=0.20.0
+
+# 数据库
+sqlalchemy>=1.4.0
+
+# 定时任务
+apscheduler>=3.9.0
+
+# HTTP请求
+httpx>=0.24.0
+aiofiles>=0.8.0
+
+# 视频下载 (基于V5)
+yt-dlp>=2023.7.0
+
+# 工具库
+pydantic>=1.10.0
+python-multipart>=0.0.5
+
+# 日志和配置
+loguru>=0.6.0

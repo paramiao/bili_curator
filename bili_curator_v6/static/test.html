@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>API测试页面</title>
+</head>
+<body>
+    <h1>V6 API测试</h1>
+    <p>视频总数: <span id="videoCount">加载中...</span></p>
+    <button onclick="testAPI()">测试API</button>
+    
+    <script>
+        async function testAPI() {
+            try {
+                const response = await fetch('/api/videos?page=1&size=1');
+                const data = await response.json();
+                document.getElementById('videoCount').textContent = data.total || '未知';
+                console.log('API响应:', data);
+            } catch (error) {
+                document.getElementById('videoCount').textContent = '错误: ' + error.message;
+                console.error('API错误:', error);
+            }
+        }
+        
+        // 页面加载时自动测试
+        testAPI();
+    </script>
+</body>
+</html>

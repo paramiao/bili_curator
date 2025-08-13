@@ -1,0 +1,1121 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>bili_curator V6</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; }
+        .header { background: #00a1d6; color: white; padding: 1rem; text-align: center; }
+        .container { max-width: 1200px; margin: 2rem auto; padding: 0 1rem; }
+        .card { background: white; border-radius: 8px; padding: 1.5rem; margin-bottom: 1rem; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .tabs { display: flex; border-bottom: 1px solid #ddd; margin-bottom: 1rem; }
+        .tab { padding: 0.5rem 1rem; cursor: pointer; border-bottom: 2px solid transparent; }
+        .tab.active { border-bottom-color: #00a1d6; color: #00a1d6; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .btn { background: #00a1d6; color: white; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; }
+        .btn:hover { background: #0084b4; }
+        .form-group { margin-bottom: 1rem; }
+        .form-group label { display: block; margin-bottom: 0.5rem; font-weight: bold; }
+        .form-group input, .form-group select, .form-group textarea {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+
+        /* 任务管理样式 */
+        .task-item {
+            background: #f8f9fa;
+            border: 1px solid #e9ecef;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 12px;
+            transition: all 0.3s ease;
+        }
+
+        .task-item:hover {
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+
+        .task-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .task-header h4 {
+            margin: 0;
+            color: #333;
+        }
+
+        .task-controls {
+            display: flex;
+            gap: 8px;
+        }
+
+        .task-info {
+            display: flex;
+            gap: 16px;
+            margin-bottom: 12px;
+            font-size: 14px;
+        }
+
+        .task-status {
+            font-weight: 600;
+            padding: 4px 8px;
+            border-radius: 4px;
+            color: white;
+        }
+
+        .status-pending .task-status { background-color: #6c757d; }
+        .status-checking .task-status { background-color: #17a2b8; }
+        .status-downloading .task-status { background-color: #007bff; }
+        .status-paused .task-status { background-color: #ffc107; color: #000; }
+        .status-completed .task-status { background-color: #28a745; }
+        .status-failed .task-status { background-color: #dc3545; }
+        .status-cancelled .task-status { background-color: #6c757d; }
+
+        .task-progress {
+            color: #666;
+        }
+
+        .current-video {
+            color: #007bff;
+            font-style: italic;
+        }
+
+        .progress-bar {
+            position: relative;
+            background-color: #e9ecef;
+            border-radius: 4px;
+            height: 20px;
+            margin-bottom: 12px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            background-color: #007bff;
+            height: 100%;
+            transition: width 0.3s ease;
+        }
+
+        .progress-text {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 12px;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .error-message {
+            background-color: #f8d7da;
+            color: #721c24;
+            padding: 8px;
+            border-radius: 4px;
+            margin-bottom: 12px;
+            font-size: 14px;
+        }
+
+        .task-logs {
+            margin-top: 12px;
+        }
+
+        .logs-content {
+            background-color: #f1f3f4;
+            border: 1px solid #e1e3e4;
+            border-radius: 4px;
+            padding: 12px;
+            margin-top: 8px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .log-entry {
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            color: #333;
+            margin-bottom: 4px;
+            white-space: pre-wrap;
+        }
+
+        .btn-small {
+            padding: 4px 8px;
+            font-size: 12px;
+        }
+
+        .btn-warning {
+            background-color: #ffc107;
+            color: #000;
+        }
+
+        .btn-warning:hover {
+            background-color: #e0a800;
+        }
+
+        .btn-success {
+            background-color: #28a745;
+            color: white;
+        }
+
+        .btn-success:hover {
+            background-color: #218838;
+        }
+
+        .btn-danger {
+            background-color: #dc3545;
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background-color: #c82333;
+        }
+
+        .btn-info {
+            background-color: #17a2b8;
+            color: white;
+        }
+
+        .btn-info:hover {
+            background-color: #138496;
+        }
+
+        .btn-secondary {
+            background-color: #6c757d;
+            color: white;
+        }
+
+        .btn-secondary:hover {
+            background-color: #545b62;
+        }
+
+        .btn-outline {
+            background-color: transparent;
+            border: 1px solid #6c757d;
+            color: #6c757d;
+        }
+
+        .btn-outline:hover {
+            background-color: #6c757d;
+            color: white;
+        }
+
+        /* 表单增强样式 */
+        .form-section {
+            margin-top: 20px;
+            padding: 16px;
+            background-color: #f8f9fa;
+            border-radius: 8px;
+            border: 1px solid #e9ecef;
+        }
+
+        .form-section h4 {
+            margin: 0 0 16px 0;
+            color: #495057;
+            font-size: 16px;
+        }
+
+        .form-row {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+
+        .half-width {
+            flex: 1;
+        }
+
+        .third-width {
+            flex: 1;
+        }
+
+        .help-text {
+            font-size: 12px;
+            color: #6c757d;
+            font-weight: normal;
+        }
+
+        /* 订阅统计样式 */
+        .subscription-stats {
+            display: flex;
+            gap: 16px;
+            margin-top: 8px;
+            font-size: 14px;
+        }
+
+        .stat-item {
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-weight: 600;
+        }
+
+        .stat-total {
+            background-color: #e3f2fd;
+            color: #1976d2;
+        }
+
+        .stat-downloaded {
+            background-color: #e8f5e8;
+            color: #2e7d32;
+        }
+
+        .stat-pending {
+            background-color: #fff3e0;
+            color: #f57c00;
+        }
+
+        .subscription-item {
+            border: 1px solid #e9ecef;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 12px;
+            background-color: #fff;
+        }
+
+        .subscription-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .subscription-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #333;
+            margin: 0;
+        }
+
+        .subscription-type {
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 600;
+            color: white;
+        }
+
+        .type-collection {
+            background-color: #007bff;
+        }
+
+        .type-uploader {
+            background-color: #28a745;
+        }
+
+        .type-keyword {
+            background-color: #ffc107;
+            color: #000;
+        }
+
+        .type-specific-urls {
+            background-color: #6f42c1;
+        }
+
+        .subscription-controls {
+            display: flex;
+            gap: 8px;
+        }
+
+        .subscription-filters {
+            margin-top: 8px;
+            font-size: 12px;
+            color: #6c757d;
+        }
+
+        .filter-tag {
+            display: inline-block;
+            background-color: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            padding: 2px 6px;
+            margin-right: 6px;
+            margin-bottom: 4px;
+        }
+
+        .status { padding: 0.5rem; border-radius: 4px; margin-bottom: 1rem; }
+        .status.success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .status.error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .list-item { padding: 0.75rem; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; }
+        .list-item:last-child { border-bottom: none; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🎬 bili_curator V6</h1>
+        <p>B站视频下载管理系统 - 家用简化版</p>
+    </div>
+
+    <div class="container">
+        <div class="card">
+            <div class="tabs">
+                <div class="tab active" onclick="showTab('dashboard')">仪表板</div>
+                <div class="tab" onclick="showTab('subscriptions')">订阅管理</div>
+                <div class="tab" onclick="showTab('tasks')">下载任务</div>
+                <div class="tab" onclick="showTab('videos')">视频管理</div>
+                <div class="tab" onclick="showTab('cookies')">Cookie管理</div>
+                <div class="tab" onclick="showTab('settings')">系统设置</div>
+            </div>
+
+            <!-- 仪表板 -->
+            <div id="dashboard" class="tab-content active">
+                <h2>系统状态</h2>
+                <div id="system-status">加载中...</div>
+            </div>
+
+            <!-- 订阅管理 -->
+            <div id="subscriptions" class="tab-content">
+                <div class="section-header">
+                    <h2>订阅管理</h2>
+                    <button onclick="showAddSubscription()" class="btn btn-primary">添加订阅</button>
+                </div>
+                <div id="subscription-list"></div>
+            </div>
+            
+            <!-- 下载任务 -->
+            <div id="tasks" class="tab-content">
+                <div class="section-header">
+                    <h2>下载任务</h2>
+                    <button onclick="refreshTasks()" class="btn btn-secondary">刷新</button>
+                    <button onclick="clearCompletedTasks()" class="btn btn-outline">清理完成任务</button>
+                </div>
+                <div id="task-list">加载中...</div>
+            </div>    
+                <div id="add-subscription" style="display:none; margin-top:1rem;">
+                    <h3>添加新订阅</h3>
+                    <div class="form-group">
+                        <label>订阅类型</label>
+                        <select id="sub-type" onchange="toggleSubFields()">
+                            <option value="collection">合集订阅</option>
+                            <option value="uploader">UP主订阅</option>
+                            <option value="keyword">关键词订阅</option>
+                            <option value="specific-urls">特定视频订阅</option>
+                        </select>
+                    </div>
+                    
+                    <!-- 合集订阅字段 -->
+                    <div class="form-group" id="collection-fields">
+                        <label>合集URL <span class="help-text">粘贴B站合集链接，系统会自动识别名称</span></label>
+                        <input type="text" id="sub-url" placeholder="https://space.bilibili.com/xxx/channel/collectiondetail?sid=xxx" onblur="autoFillCollectionName()">
+                    </div>
+                    
+                    <!-- UP主订阅字段 -->
+                    <div class="form-group" id="uploader-fields" style="display:none;">
+                        <label>UP主ID或名称 <span class="help-text">输入UP主的ID或用户名</span></label>
+                        <input type="text" id="sub-uploader" placeholder="UP主ID或用户名">
+                    </div>
+                    
+                    <!-- 关键词订阅字段 -->
+                    <div class="form-group" id="keyword-fields" style="display:none;">
+                        <label>搜索关键词 <span class="help-text">输入要搜索的关键词</span></label>
+                        <input type="text" id="sub-keyword" placeholder="搜索关键词">
+                    </div>
+                    
+                    <!-- 特定URL字段 -->
+                    <div class="form-group" id="specific-urls-fields" style="display:none;">
+                        <label>特定视频URL <span class="help-text">每行一个视频链接</span></label>
+                        <textarea id="sub-specific-urls" rows="4" placeholder="https://www.bilibili.com/video/BVxxx&#10;https://www.bilibili.com/video/BVyyy"></textarea>
+                    </div>
+                    
+                    <!-- 筛选条件 -->
+                    <div class="form-section">
+                        <h4>筛选条件 <span class="help-text">可选，用于过滤下载的视频</span></h4>
+                        
+                        <div class="form-row">
+                            <div class="form-group half-width">
+                                <label>开始日期</label>
+                                <input type="date" id="sub-date-after">
+                            </div>
+                            <div class="form-group half-width">
+                                <label>结束日期</label>
+                                <input type="date" id="sub-date-before">
+                            </div>
+                        </div>
+                        
+                        <div class="form-row">
+                            <div class="form-group third-width">
+                                <label>最小点赞数</label>
+                                <input type="number" id="sub-min-likes" placeholder="0" min="0">
+                            </div>
+                            <div class="form-group third-width">
+                                <label>最小收藏数</label>
+                                <input type="number" id="sub-min-favorites" placeholder="0" min="0">
+                            </div>
+                            <div class="form-group third-width">
+                                <label>最小播放数</label>
+                                <input type="number" id="sub-min-views" placeholder="0" min="0">
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>订阅名称</label>
+                        <input type="text" id="sub-name" placeholder="自动识别或手动输入">
+                        <small style="color:#666;">合集订阅会自动识别为"UP主名：合集名"</small>
+                    </div>
+                    
+                    <button class="btn" onclick="addSubscription()">添加订阅</button>
+                    <button class="btn" onclick="hideAddSubscription()" style="background:#666;">取消</button>
+                </div>
+            </div>
+
+            <!-- 视频管理 -->
+            <div id="videos" class="tab-content">
+                <h2>视频管理</h2>
+                <div id="video-list">加载中...</div>
+            </div>
+
+            <!-- Cookie管理 -->
+            <div id="cookies" class="tab-content">
+                <h2>Cookie管理</h2>
+                <button class="btn" onclick="showAddCookie()">添加Cookie</button>
+                <div id="cookie-list">加载中...</div>
+                
+                <div id="add-cookie" style="display:none; margin-top:1rem;">
+                    <h3>添加新Cookie</h3>
+                    <div class="form-group">
+                        <label>Cookie名称</label>
+                        <input type="text" id="cookie-name" placeholder="输入Cookie名称">
+                    </div>
+                    <div class="form-group">
+                        <label>SESSDATA</label>
+                        <input type="text" id="cookie-sessdata" placeholder="输入SESSDATA值">
+                    </div>
+                    <div class="form-group">
+                        <label>bili_jct</label>
+                        <input type="text" id="cookie-jct" placeholder="输入bili_jct值">
+                    </div>
+                    <div class="form-group">
+                        <label>DedeUserID</label>
+                        <input type="text" id="cookie-userid" placeholder="输入DedeUserID值">
+                    </div>
+                    <button class="btn" onclick="addCookie()">添加</button>
+                    <button class="btn" onclick="hideAddCookie()" style="background:#666;">取消</button>
+                </div>
+            </div>
+
+            <!-- 系统设置 -->
+            <div id="settings" class="tab-content">
+                <h2>系统设置</h2>
+                <div id="settings-list">加载中...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 标签页切换
+        function showTab(tabName) {
+            document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+            
+            event.target.classList.add('active');
+            document.getElementById(tabName).classList.add('active');
+            
+            // 加载对应数据
+            loadTabData(tabName);
+        }
+
+        // 加载标签页数据
+        function loadTabData(tabName) {
+            switch(tabName) {
+                case 'dashboard': loadDashboard(); break;
+                case 'subscriptions': loadSubscriptions(); break;
+                case 'videos': loadVideos(); break;
+                case 'cookies': loadCookies(); break;
+                case 'settings': loadSettings(); break;
+            }
+        }
+
+        // API请求封装
+        async function apiRequest(url, options = {}) {
+            try {
+                const response = await fetch(url, {
+                    headers: { 'Content-Type': 'application/json', ...options.headers },
+                    ...options
+                });
+                return await response.json();
+            } catch (error) {
+                console.error('API请求失败:', error);
+                return { error: error.message };
+            }
+        }
+
+        // 加载仪表板
+        async function loadDashboard() {
+            const data = await apiRequest('/api/status');
+            const html = `
+                <div class="status success">
+                    <strong>系统运行正常</strong> - 版本: ${data.version || '6.0.0'}
+                </div>
+                <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap:1rem;">
+                    <div class="card">
+                        <h3>订阅统计</h3>
+                        <p>总订阅: ${data.statistics?.total_subscriptions || 0}</p>
+                        <p>活跃订阅: ${data.statistics?.active_subscriptions || 0}</p>
+                    </div>
+                    <div class="card">
+                        <h3>视频统计</h3>
+                        <p>总视频: ${data.statistics?.total_videos || 0}</p>
+                        <p>已下载: ${data.statistics?.downloaded_videos || 0}</p>
+                    </div>
+                    <div class="card">
+                        <h3>Cookie状态</h3>
+                        <p>可用Cookie: ${data.statistics?.active_cookies || 0}</p>
+                    </div>
+                </div>
+            `;
+            document.getElementById('system-status').innerHTML = html;
+        }
+
+        // 加载订阅列表
+        async function loadSubscriptions() {
+            const result = await apiRequest('/api/subscriptions');
+            if (result.error) {
+                document.getElementById('subscription-list').innerHTML = `<p class="error">加载失败: ${result.error}</p>`;
+                return;
+            }
+            
+            let html = '';
+            result.forEach(sub => {
+                const statusClass = sub.is_active ? 'success' : 'error';
+                const statusText = sub.is_active ? '活跃' : '暂停';
+                const lastCheck = sub.last_check ? new Date(sub.last_check).toLocaleString() : '从未';
+                
+                // 统计信息
+                const totalVideos = sub.total_videos || 0;
+                const downloadedVideos = sub.downloaded_videos || 0;
+                const pendingVideos = totalVideos - downloadedVideos;
+                
+                // 订阅类型显示
+                const typeTexts = {
+                    'collection': '合集订阅',
+                    'uploader': 'UP主订阅', 
+                    'keyword': '关键词订阅',
+                    'specific-urls': '特定视频订阅'
+                };
+                const typeText = typeTexts[sub.type] || sub.type;
+                
+                // 筛选条件显示
+                let filtersHtml = '';
+                const filters = [];
+                if (sub.date_after) filters.push(`开始日期: ${sub.date_after}`);
+                if (sub.date_before) filters.push(`结束日期: ${sub.date_before}`);
+                if (sub.min_likes) filters.push(`最小点赞: ${sub.min_likes}`);
+                if (sub.min_favorites) filters.push(`最小收藏: ${sub.min_favorites}`);
+                if (sub.min_views) filters.push(`最小播放: ${sub.min_views}`);
+                
+                if (filters.length > 0) {
+                    filtersHtml = `
+                        <div class="subscription-filters">
+                            筛选条件: ${filters.map(f => `<span class="filter-tag">${f}</span>`).join('')}
+                        </div>
+                    `;
+                }
+                
+                html += `
+                    <div class="subscription-item">
+                        <div class="subscription-header">
+                            <div>
+                                <h3 class="subscription-title">${sub.name}</h3>
+                                <span class="subscription-type type-${sub.type}">${typeText}</span>
+                            </div>
+                            <div class="subscription-controls">
+                                <button onclick="downloadSubscription(${sub.id})" class="btn btn-primary">开始下载</button>
+                                <button onclick="viewSubscription(${sub.id})" class="btn btn-info">查看详情</button>
+                                <button onclick="editSubscription(${sub.id})" class="btn btn-secondary">编辑</button>
+                                <button onclick="toggleSubscription(${sub.id}, ${sub.is_active})" class="btn ${sub.is_active ? 'btn-warning' : 'btn-success'}">
+                                    ${sub.is_active ? '暂停' : '启用'}
+                                </button>
+                                <button onclick="deleteSubscription(${sub.id})" class="btn btn-danger">删除</button>
+                            </div>
+                        </div>
+                        
+                        <div class="subscription-stats">
+                            <span class="stat-item stat-total">总计: ${totalVideos}</span>
+                            <span class="stat-item stat-downloaded">已下载: ${downloadedVideos}</span>
+                            <span class="stat-item stat-pending">待下载: ${pendingVideos}</span>
+                        </div>
+                        
+                        <div style="margin-top: 8px; font-size: 14px; color: #666;">
+                            状态: ${statusText} | 最后检查: ${lastCheck}
+                        </div>
+                        
+                        ${filtersHtml}
+                    </div>
+                `;
+            });
+            
+            document.getElementById('subscription-list').innerHTML = html || '<p>暂无订阅</p>';
+        }
+        
+        // 切换订阅状态
+        async function toggleSubscription(subscriptionId, currentStatus) {
+            const newStatus = !currentStatus;
+            const result = await apiRequest(`/api/subscriptions/${subscriptionId}`, {
+                method: 'PUT',
+                body: JSON.stringify({ is_active: newStatus })
+            });
+            
+            if (result.error) {
+                alert('操作失败: ' + result.error);
+            } else {
+                loadSubscriptions();
+            }
+        }
+
+        // 切换订阅类型字段
+        function toggleSubFields() {
+            const type = document.getElementById('sub-type').value;
+            
+            // 隐藏所有字段
+            document.getElementById('collection-fields').style.display = 'none';
+            document.getElementById('uploader-fields').style.display = 'none';
+            document.getElementById('keyword-fields').style.display = 'none';
+            document.getElementById('specific-urls-fields').style.display = 'none';
+            
+            // 显示对应字段
+            if (type === 'collection') {
+                document.getElementById('collection-fields').style.display = 'block';
+            } else if (type === 'uploader') {
+                document.getElementById('uploader-fields').style.display = 'block';
+            } else if (type === 'keyword') {
+                document.getElementById('keyword-fields').style.display = 'block';
+            } else if (type === 'specific-urls') {
+                document.getElementById('specific-urls-fields').style.display = 'block';
+            }
+            
+            // 清空订阅名称
+            document.getElementById('sub-name').value = '';
+        }
+
+        // 自动识别合集名称
+        async function autoFillCollectionName() {
+            const url = document.getElementById('sub-url').value;
+            if (!url) return;
+            
+            try {
+                // 调用后端API获取合集信息
+                const result = await apiRequest('/api/subscriptions/parse-collection', {
+                    method: 'POST',
+                    body: JSON.stringify({ url })
+                });
+                
+                if (result.name) {
+                    document.getElementById('sub-name').value = result.name;
+                } else if (result.error) {
+                    console.warn('无法自动识别合集名称:', result.error);
+                }
+            } catch (error) {
+                console.warn('自动识别合集名称失败:', error);
+            }
+        }
+
+        // 显示/隐藏添加订阅表单
+        function showAddSubscription() {
+            document.getElementById('add-subscription').style.display = 'block';
+            toggleSubFields(); // 初始化字段显示
+        }
+        
+        function hideAddSubscription() {
+            document.getElementById('add-subscription').style.display = 'none';
+            // 清空表单
+            document.getElementById('sub-name').value = '';
+            document.getElementById('sub-url').value = '';
+            document.getElementById('sub-uploader').value = '';
+            document.getElementById('sub-keyword').value = '';
+        }
+
+        // 添加订阅
+        async function addSubscription() {
+            const type = document.getElementById('sub-type').value;
+            let name = document.getElementById('sub-name').value;
+            
+            // 根据类型获取相应的值
+            let data = { type };
+            
+            if (type === 'collection') {
+                const url = document.getElementById('sub-url').value;
+                if (!url) {
+                    alert('请输入合集URL');
+                    return;
+                }
+                data.url = url;
+                
+                // 如果没有名称，尝试自动生成
+                if (!name) {
+                    name = '合集订阅 - ' + new Date().toLocaleString();
+                }
+                
+            } else if (type === 'uploader') {
+                const uploader = document.getElementById('sub-uploader').value;
+                if (!uploader) {
+                    alert('请输入UP主ID或名称');
+                    return;
+                }
+                data.uploader_id = uploader;
+                
+                // 如果没有名称，使用UP主信息
+                if (!name) {
+                    name = 'UP主订阅 - ' + uploader;
+                }
+                
+            } else if (type === 'keyword') {
+                const keyword = document.getElementById('sub-keyword').value;
+                if (!keyword) {
+                    alert('请输入搜索关键词');
+                    return;
+                }
+                data.keyword = keyword;
+                
+                // 如果没有名称，使用关键词
+                if (!name) {
+                    name = '关键词订阅 - ' + keyword;
+                }
+                
+            } else if (type === 'specific-urls') {
+                const specificUrls = document.getElementById('sub-specific-urls').value;
+                if (!specificUrls.trim()) {
+                    alert('请输入至少一个视频URL');
+                    return;
+                }
+                
+                // 解析URL列表
+                const urls = specificUrls.split('\n').map(url => url.trim()).filter(url => url);
+                if (urls.length === 0) {
+                    alert('请输入有效的视频URL');
+                    return;
+                }
+                
+                data.specific_urls = JSON.stringify(urls);
+                
+                // 如果没有名称，使用URL数量
+                if (!name) {
+                    name = `特定视频订阅 - ${urls.length}个视频`;
+                }
+            }
+            
+            // 获取筛选条件
+            const dateAfter = document.getElementById('sub-date-after').value;
+            const dateBefore = document.getElementById('sub-date-before').value;
+            const minLikes = document.getElementById('sub-min-likes').value;
+            const minFavorites = document.getElementById('sub-min-favorites').value;
+            const minViews = document.getElementById('sub-min-views').value;
+            
+            if (dateAfter) data.date_after = dateAfter;
+            if (dateBefore) data.date_before = dateBefore;
+            if (minLikes && parseInt(minLikes) > 0) data.min_likes = parseInt(minLikes);
+            if (minFavorites && parseInt(minFavorites) > 0) data.min_favorites = parseInt(minFavorites);
+            if (minViews && parseInt(minViews) > 0) data.min_views = parseInt(minViews);
+            
+            data.name = name;
+            
+            const result = await apiRequest('/api/subscriptions', {
+                method: 'POST',
+                body: JSON.stringify(data)
+            });
+            
+            if (result.error) {
+                alert('添加失败: ' + result.error);
+            } else {
+                alert('添加成功');
+                hideAddSubscription();
+                loadSubscriptions();
+            }
+        }
+
+        // 下载订阅
+        async function downloadSubscription(id) {
+            const result = await apiRequest(`/api/subscriptions/${id}/download`, { method: 'POST' });
+            if (result.error) {
+                alert('启动下载失败: ' + result.error);
+            } else {
+                alert('下载任务已启动');
+            }
+        }
+
+        // 查看订阅详情
+        async function viewSubscription(id) {
+            const result = await apiRequest(`/api/subscriptions/${id}`);
+            if (result.error) {
+                alert('获取订阅详情失败: ' + result.error);
+                return;
+            }
+            
+            const sub = result;
+            const typeTexts = {
+                'collection': '合集订阅',
+                'uploader': 'UP主订阅', 
+                'keyword': '关键词订阅',
+                'specific-urls': '特定视频订阅'
+            };
+            
+            let detailsHtml = `
+                <h3>订阅详情</h3>
+                <p><strong>名称:</strong> ${sub.name}</p>
+                <p><strong>类型:</strong> ${typeTexts[sub.type] || sub.type}</p>
+                <p><strong>URL:</strong> ${sub.url}</p>
+                <p><strong>状态:</strong> ${sub.is_active ? '活跃' : '暂停'}</p>
+                <p><strong>创建时间:</strong> ${new Date(sub.created_at).toLocaleString()}</p>
+                <p><strong>最后检查:</strong> ${sub.last_check ? new Date(sub.last_check).toLocaleString() : '从未'}</p>
+            `;
+            
+            if (sub.date_after || sub.date_before || sub.min_likes || sub.min_favorites || sub.min_views) {
+                detailsHtml += '<h4>筛选条件:</h4>';
+                if (sub.date_after) detailsHtml += `<p>开始日期: ${sub.date_after}</p>`;
+                if (sub.date_before) detailsHtml += `<p>结束日期: ${sub.date_before}</p>`;
+                if (sub.min_likes) detailsHtml += `<p>最小点赞: ${sub.min_likes}</p>`;
+                if (sub.min_favorites) detailsHtml += `<p>最小收藏: ${sub.min_favorites}</p>`;
+                if (sub.min_views) detailsHtml += `<p>最小播放: ${sub.min_views}</p>`;
+            }
+            
+            // 创建模态框显示详情
+            const modal = document.createElement('div');
+            modal.style.cssText = `
+                position: fixed; top: 0; left: 0; width: 100%; height: 100%; 
+                background: rgba(0,0,0,0.5); display: flex; align-items: center; 
+                justify-content: center; z-index: 1000;
+            `;
+            modal.innerHTML = `
+                <div style="background: white; padding: 2rem; border-radius: 8px; max-width: 600px; width: 90%;">
+                    ${detailsHtml}
+                    <button onclick="this.closest('div[style*=\"position: fixed\"]').remove()" class="btn" style="margin-top: 1rem;">关闭</button>
+                </div>
+            `;
+            document.body.appendChild(modal);
+        }
+
+        // 编辑订阅
+        async function editSubscription(id) {
+            const result = await apiRequest(`/api/subscriptions/${id}`);
+            if (result.error) {
+                alert('获取订阅信息失败: ' + result.error);
+                return;
+            }
+            
+            const sub = result;
+            
+            // 创建编辑表单模态框
+            const modal = document.createElement('div');
+            modal.style.cssText = `
+                position: fixed; top: 0; left: 0; width: 100%; height: 100%; 
+                background: rgba(0,0,0,0.5); display: flex; align-items: center; 
+                justify-content: center; z-index: 1000; overflow-y: auto;
+            `;
+            modal.innerHTML = `
+                <div style="background: white; padding: 2rem; border-radius: 8px; max-width: 600px; width: 90%; margin: 2rem;">
+                    <h3>编辑订阅</h3>
+                    <form id="edit-subscription-form">
+                        <div class="form-group">
+                            <label>订阅名称</label>
+                            <input type="text" id="edit-name" value="${sub.name}" required>
+                        </div>
+                        <div class="form-group">
+                            <label>订阅URL</label>
+                            <input type="url" id="edit-url" value="${sub.url}" required>
+                        </div>
+                        <div class="form-group">
+                            <label>状态</label>
+                            <select id="edit-active">
+                                <option value="true" ${sub.is_active ? 'selected' : ''}>活跃</option>
+                                <option value="false" ${!sub.is_active ? 'selected' : ''}>暂停</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>开始日期 (可选)</label>
+                            <input type="date" id="edit-date-after" value="${sub.date_after || ''}">
+                        </div>
+                        <div class="form-group">
+                            <label>结束日期 (可选)</label>
+                            <input type="date" id="edit-date-before" value="${sub.date_before || ''}">
+                        </div>
+                        <div class="form-group">
+                            <label>最小点赞数 (可选)</label>
+                            <input type="number" id="edit-min-likes" value="${sub.min_likes || ''}" min="0">
+                        </div>
+                        <div class="form-group">
+                            <label>最小收藏数 (可选)</label>
+                            <input type="number" id="edit-min-favorites" value="${sub.min_favorites || ''}" min="0">
+                        </div>
+                        <div class="form-group">
+                            <label>最小播放数 (可选)</label>
+                            <input type="number" id="edit-min-views" value="${sub.min_views || ''}" min="0">
+                        </div>
+                        <div style="margin-top: 1rem;">
+                            <button type="button" onclick="updateSubscription(${id})" class="btn btn-primary">保存</button>
+                            <button type="button" onclick="this.closest('div[style*=\"position: fixed\"]').remove()" class="btn btn-secondary" style="margin-left: 0.5rem;">取消</button>
+                        </div>
+                    </form>
+                </div>
+            `;
+            document.body.appendChild(modal);
+        }
+
+        // 更新订阅
+        async function updateSubscription(id) {
+            const formData = {
+                name: document.getElementById('edit-name').value,
+                url: document.getElementById('edit-url').value,
+                is_active: document.getElementById('edit-active').value === 'true',
+                date_after: document.getElementById('edit-date-after').value || null,
+                date_before: document.getElementById('edit-date-before').value || null,
+                min_likes: parseInt(document.getElementById('edit-min-likes').value) || null,
+                min_favorites: parseInt(document.getElementById('edit-min-favorites').value) || null,
+                min_views: parseInt(document.getElementById('edit-min-views').value) || null
+            };
+            
+            const result = await apiRequest(`/api/subscriptions/${id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(formData)
+            });
+            
+            if (result.error) {
+                alert('更新订阅失败: ' + result.error);
+            } else {
+                alert('订阅更新成功');
+                document.querySelector('div[style*="position: fixed"]').remove();
+                loadSubscriptions();
+            }
+        }
+
+        // 删除订阅
+        async function deleteSubscription(id) {
+            if (!confirm('确定要删除这个订阅吗？')) return;
+            
+            const result = await apiRequest(`/api/subscriptions/${id}`, { method: 'DELETE' });
+            if (result.error) {
+                alert('删除失败: ' + result.error);
+            } else {
+                alert('删除成功');
+                loadSubscriptions();
+            }
+        }
+
+        // 加载视频列表
+        async function loadVideos() {
+            const data = await apiRequest('/api/videos');
+            const html = data.videos?.map(video => `
+                <div class="list-item">
+                    <div>
+                        <strong>${video.title}</strong>
+                        <br><small>UP主: ${video.uploader} | 时长: ${video.duration}s</small>
+                    </div>
+                    <div>
+                        <span style="color: ${video.downloaded ? 'green' : 'orange'}">
+                            ${video.downloaded ? '已下载' : '未下载'}
+                        </span>
+                    </div>
+                </div>
+            `).join('') || '<p>暂无视频</p>';
+            document.getElementById('video-list').innerHTML = html;
+        }
+
+        // 加载Cookie列表
+        async function loadCookies() {
+            const data = await apiRequest('/api/cookies');
+            const html = data.map(cookie => `
+                <div class="list-item">
+                    <div>
+                        <strong>${cookie.name}</strong>
+                        <br><small>使用次数: ${cookie.usage_count} | 状态: ${cookie.active ? '活跃' : '禁用'}</small>
+                    </div>
+                    <div>
+                        <button class="btn" onclick="validateCookie(${cookie.id})">验证</button>
+                        <button class="btn" onclick="deleteCookie(${cookie.id})" style="background:#dc3545;">删除</button>
+                    </div>
+                </div>
+            `).join('');
+            document.getElementById('cookie-list').innerHTML = html || '<p>暂无Cookie</p>';
+        }
+
+        // 显示/隐藏添加Cookie表单
+        function showAddCookie() {
+            document.getElementById('add-cookie').style.display = 'block';
+        }
+        function hideAddCookie() {
+            document.getElementById('add-cookie').style.display = 'none';
+        }
+
+        // 添加Cookie
+        async function addCookie() {
+            const name = document.getElementById('cookie-name').value;
+            const sessdata = document.getElementById('cookie-sessdata').value;
+            const bili_jct = document.getElementById('cookie-jct').value;
+            const dedeuserid = document.getElementById('cookie-userid').value;
+            
+            if (!name || !sessdata) {
+                alert('请输入Cookie名称和SESSDATA');
+                return;
+            }
+            
+            const data = { name, sessdata, bili_jct, dedeuserid };
+            const result = await apiRequest('/api/cookies', {
+                method: 'POST',
+                body: JSON.stringify(data)
+            });
+            
+            if (result.error) {
+                alert('添加失败: ' + result.error);
+            } else {
+                alert('添加成功');
+                hideAddCookie();
+                loadCookies();
+            }
+        }
+
+        // 验证Cookie
+        async function validateCookie(id) {
+            const result = await apiRequest(`/api/cookies/${id}/validate`, { method: 'POST' });
+            alert(result.valid ? 'Cookie有效' : 'Cookie无效');
+            loadCookies();
+        }
+
+        // 删除Cookie
+        async function deleteCookie(id) {
+            if (!confirm('确定要删除这个Cookie吗？')) return;
+            
+            const result = await apiRequest(`/api/cookies/${id}`, { method: 'DELETE' });
+            if (result.error) {
+                alert('删除失败: ' + result.error);
+            } else {
+                alert('删除成功');
+                loadCookies();
+            }
+        }
+
+        // 加载系统设置
+        async function loadSettings() {
+            const data = await apiRequest('/api/settings');
+            const html = Object.entries(data).map(([key, setting]) => `
+                <div class="form-group">
+                    <label>${setting.description}</label>
+                    <input type="text" value="${setting.value}" onchange="updateSetting('${key}', this.value)">
+                </div>
+            `).join('');
+            document.getElementById('settings-list').innerHTML = html;
+        }
+
+        // 更新设置
+        async function updateSetting(key, value) {
+            const result = await apiRequest(`/api/settings/${key}`, {
+                method: 'PUT',
+                body: JSON.stringify({ value })
+            });
+            
+            if (result.error) {
+                alert('更新失败: ' + result.error);
+            }
+        }
+
+        // 页面加载完成后初始化
+        document.addEventListener('DOMContentLoaded', function() {
+            loadDashboard();
+        });
+    </script>
+</body>
+</html>

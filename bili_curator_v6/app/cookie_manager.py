@@ -1,0 +1,183 @@
+"""
+简化版Cookie管理器
+"""
+import random
+import time
+from datetime import datetime, timedelta
+from typing import Optional, Dict, Any
+from sqlalchemy.orm import Session
+from .models import Cookie, get_db
+import httpx
+import asyncio
+from loguru import logger
+
+class SimpleCookieManager:
+    def __init__(self):
+        self.current_cookie_id = None
+        self.last_switch_time = 0
+        self.min_switch_interval = 300  # 5分钟最小切换间隔
+    
+    def get_available_cookie(self, db: Session) -> Optional[Cookie]:
+        """获取可用的Cookie"""
+        # 获取所有活跃的Cookie
+        active_cookies = db.query(Cookie).filter(Cookie.is_active == True).all()
+        
+        if not active_cookies:
+            logger.warning("没有可用的Cookie")
+            return None
+        
+        # 如果当前没有Cookie或需要切换
+        if (self.current_cookie_id is None or 
+            time.time() - self.last_switch_time > self.min_switch_interval):
+            
+            # 选择使用次数最少的Cookie
+            cookie = min(active_cookies, key=lambda c: c.usage_count)
+            self.current_cookie_id = cookie.id
+            self.last_switch_time = time.time()
+            
+            logger.info(f"切换到Cookie: {cookie.name}")
+            return cookie
+        
+        # 返回当前Cookie
+        current_cookie = db.query(Cookie).filter(Cookie.id == self.current_cookie_id).first()
+        if current_cookie and current_cookie.is_active:
+            return current_cookie
+        
+        # 当前Cookie不可用，重新选择
+        self.current_cookie_id = None
+        return self.get_available_cookie(db)
+    
+    def update_cookie_usage(self, db: Session, cookie_id: int):
+        """更新Cookie使用统计"""
+        cookie = db.query(Cookie).filter(Cookie.id == cookie_id).first()
+        if cookie:
+            cookie.usage_count += 1
+            cookie.last_used = datetime.now()
+            db.commit()
+    
+    def mark_cookie_banned(self, db: Session, cookie_id: int, reason: str = ""):
+        """标记Cookie为被封禁"""
+        cookie = db.query(Cookie).filter(Cookie.id == cookie_id).first()
+        if cookie:
+            cookie.is_active = False
+            db.commit()
+            logger.warning(f"Cookie {cookie.name} 被标记为不可用: {reason}")
+            
+            # 强制切换到其他Cookie
+            self.current_cookie_id = None
+    
+    async def validate_cookie(self, cookie: Cookie) -> bool:
+        """验证Cookie是否有效"""
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+                'Cookie': f'SESSDATA={cookie.sessdata}; bili_jct={cookie.bili_jct}; DedeUserID={cookie.dedeuserid}'
+            }
+            
+            # 测试访问用户信息接口
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    'https://api.bilibili.com/x/web-interface/nav',
+                    headers=headers,
+                    timeout=10
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get('code') == 0:
+                        logger.debug(f"Cookie {cookie.name} 验证成功")
+                        return True
+                    else:
+                        logger.warning(f"Cookie {cookie.name} 验证失败: {data.get('message')}")
+                        return False
+                else:
+                    logger.warning(f"Cookie {cookie.name} 验证失败: HTTP {response.status_code}")
+                    return False
+                    
+        except Exception as e:
+            logger.error(f"Cookie {cookie.name} 验证异常: {e}")
+            return False
+    
+    def get_cookie_headers(self, cookie: Cookie) -> Dict[str, str]:
+        """获取Cookie请求头"""
+        return {
+            'User-Agent': self._get_random_user_agent(),
+            'Cookie': f'SESSDATA={cookie.sessdata}; bili_jct={cookie.bili_jct}; DedeUserID={cookie.dedeuserid}',
+            'Referer': 'https://www.bilibili.com/'
+        }
+    
+    def _get_random_user_agent(self) -> str:
+        """获取随机User-Agent"""
+        user_agents = [
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0'
+        ]
+        return random.choice(user_agents)
+    
+    async def batch_validate_cookies(self, db: Session):
+        """批量验证所有Cookie"""
+        cookies = db.query(Cookie).filter(Cookie.is_active == True).all()
+        
+        for cookie in cookies:
+            try:
+                is_valid = await self.validate_cookie(cookie)
+                if not is_valid:
+                    self.mark_cookie_banned(db, cookie.id, "验证失败")
+                await asyncio.sleep(random.uniform(2, 5))  # 避免请求过快
+            except Exception as e:
+                logger.error(f"验证Cookie {cookie.name} 时出错: {e}")
+
+# 全局Cookie管理器实例
+cookie_manager = SimpleCookieManager()
+
+class RateLimiter:
+    """简单的请求频率限制器"""
+    def __init__(self, min_interval: int = 5, max_interval: int = 15):
+        self.min_interval = min_interval
+        self.max_interval = max_interval
+        self.last_request = 0
+    
+    async def wait(self):
+        """智能等待，避免请求过于频繁"""
+        now = time.time()
+        elapsed = now - self.last_request
+        
+        if elapsed < self.min_interval:
+            wait_time = random.uniform(
+                self.min_interval - elapsed,
+                self.max_interval - elapsed
+            )
+            logger.debug(f"请求限速等待 {wait_time:.1f} 秒")
+            await asyncio.sleep(wait_time)
+        
+        self.last_request = time.time()
+
+# 全局限速器实例
+rate_limiter = RateLimiter()
+
+def simple_retry(max_retries: int = 3, base_delay: int = 10):
+    """简单的重试装饰器"""
+    def decorator(func):
+        async def wrapper(*args, **kwargs):
+            last_exception = None
+            
+            for attempt in range(max_retries):
+                try:
+                    return await func(*args, **kwargs)
+                except Exception as e:
+                    last_exception = e
+                    if attempt == max_retries - 1:
+                        logger.error(f"重试 {max_retries} 次后仍然失败: {e}")
+                        raise e
+                    
+                    # 指数退避
+                    delay = base_delay * (2 ** attempt) + random.uniform(0, 5)
+                    logger.warning(f"第 {attempt + 1} 次尝试失败: {e}, {delay:.1f}秒后重试")
+                    await asyncio.sleep(delay)
+            
+            raise last_exception
+        return wrapper
+    return decorator

@@ -1,0 +1,36 @@
+services:
+  bili-curator:
+    build: .
+    container_name: bili_curator_v6
+    ports:
+      - "8080:8080"
+    volumes:
+      # 下载目录绑定到Emby bilibili目录
+      - /Volumes/nas-mk/xiaoya_emby/xiaoya/bilibili:/app/downloads
+      # 配置目录绑定到用户家目录
+      - ~/bilibili_config:/app/data
+      # 日志目录
+      - ~/bilibili_config/logs:/app/logs
+      # 静态文件目录挂载（确保前端页面持久化）
+      - ./static:/app/static:ro
+      # Web前端文件挂载（确保前端界面更新）
+      - ./web:/app/web:ro
+      # 应用代码挂载（确保API和服务代码持久化）
+      - ./app:/app/app:ro
+      # 导入脚本直接挂载（只读，防止容器内意外修改）
+      - ./import_existing_videos.py:/app/import_existing_videos.py:ro
+      # 主应用文件挂载
+      - ./main.py:/app/main.py:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+      # 设置下载路径为挂载的目录
+      - DOWNLOAD_PATH=/app/downloads
+      # 设置时区为上海时区
+      - TZ=Asia/Shanghai
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
