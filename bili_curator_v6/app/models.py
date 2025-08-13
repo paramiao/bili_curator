@@ -145,6 +145,9 @@ class DownloadTask(Base):
     __tablename__ = 'download_tasks'
     
     id = Column(Integer, primary_key=True)
+    # legacy 兼容列：旧库存在 NOT NULL download_tasks.video_id 约束
+    # 为兼容旧数据流，保留该列（可空），新代码统一使用 bilibili_id
+    video_id = Column(String(50), nullable=True)
     bilibili_id = Column(String(50), nullable=False)  # 统一使用bilibili_id
     subscription_id = Column(Integer)
     status = Column(String(50), default='pending')  # pending, downloading, completed, failed
@@ -217,6 +220,16 @@ class Database:
             # cookies 表缺失列
             if not has_column('cookies', 'updated_at'):
                 conn.exec_driver_sql("ALTER TABLE cookies ADD COLUMN updated_at DATETIME")
+
+            # download_tasks 表：新增 bilibili_id，并从旧的 video_id 迁移数据
+            if not has_column('download_tasks', 'bilibili_id'):
+                conn.exec_driver_sql("ALTER TABLE download_tasks ADD COLUMN bilibili_id VARCHAR(50)")
+                # 如果存在旧列 video_id，将其数据迁移到 bilibili_id
+                if has_column('download_tasks', 'video_id'):
+                    try:
+                        conn.exec_driver_sql("UPDATE download_tasks SET bilibili_id = video_id WHERE bilibili_id IS NULL")
+                    except Exception as ee:
+                        print(f"迁移download_tasks.video_id到bilibili_id失败: {ee}")
 
         except Exception as e:
             print(f"数据库迁移失败: {e}")

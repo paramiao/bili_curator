@@ -7,6 +7,9 @@ import os
 import re
 import subprocess
 from datetime import datetime
+import tempfile
+import os
+from sqlalchemy.exc import IntegrityError
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from sqlalchemy.orm import Session
@@ -74,196 +77,49 @@ class BilibiliDownloaderV6:
             'download_results': download_results
         }
     
-    @simple_retry(max_retries=3)
-    def _scan_existing_files(self, db: Session) -> Dict[str, Dict]:
-        """扫描现有文件，返回已下载视频的映射"""
-        existing_videos = {}
-        
-        # 从数据库中获取已有视频
-        videos = db.query(Video).all()
-        for video in videos:
-            if video.video_path and os.path.exists(video.video_path):
-                existing_videos[video.bilibili_id] = {
-                    'video_path': video.video_path,
-                    'title': video.title,
-                    'duration': video.duration
-                }
-        
-        return existing_videos
-    
-    async def _download_single_video(self, video_info: Dict, subscription_id: int, db: Session) -> Dict:
-        """下载单个视频"""
-        try:
-            video_id = video_info.get('id')
-            video_title = video_info.get('title', 'Unknown')
-            video_url = video_info.get('url', video_info.get('webpage_url'))
-            
-            if not video_url:
-                return {'success': False, 'error': '视频URL为空'}
-            
-            # 检查视频是否已存在
-            existing_video = db.query(Video).filter(Video.bilibili_id == video_id).first()
-            if existing_video and existing_video.video_path and os.path.exists(existing_video.video_path):
-                return {'success': True, 'message': '视频已存在，跳过下载'}
-            
-            # 获取可用Cookie
-            cookie = cookie_manager.get_available_cookie(db)
-            if not cookie:
-                return {'success': False, 'error': '没有可用的Cookie'}
-            
-            # 获取订阅信息，创建订阅目录
-            subscription = db.query(Subscription).filter(Subscription.id == subscription_id).first()
-            if not subscription:
-                return {'success': False, 'error': '订阅不存在'}
-            
-            # 创建订阅目录
-            subscription_dir = self._create_subscription_directory(subscription)
-            
-            # 设置输出路径（在订阅目录下）
-            safe_title = self._sanitize_filename(video_title)
-            output_template = os.path.join(subscription_dir, f"{safe_title}.%(ext)s")
-            
-            # 构建yt-dlp命令
-            cmd = [
-                'yt-dlp',
-                '--format', 'best[height<=1080]',
-                '--output', output_template,
-                '--write-info-json',
-                '--write-thumbnail',
-                '--convert-thumbnails', 'jpg',
-                video_url
-            ]
-            
-            # 添加Cookie
-            cookie_str = f"SESSDATA={cookie.sessdata}; bili_jct={cookie.bili_jct}; DedeUserID={cookie.dedeuserid}"
-            cmd.extend(['--add-header', f'Cookie:{cookie_str}'])
-            
-            # 执行下载
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            
-            stdout, stderr = await process.communicate()
-            
-            if process.returncode != 0:
-                error_msg = stderr.decode('utf-8', errors='ignore')
-                cookie_manager.handle_download_error(db, cookie.id, error_msg)
-                return {'success': False, 'error': f'下载失败: {error_msg}'}
-            
-            # 查找下载的文件（在订阅目录下）
-            video_path = None
-            json_path = None
-            thumbnail_path = None
-            
-            for ext in ['.mp4', '.mkv', '.webm']:
-                potential_path = os.path.join(subscription_dir, f"{safe_title}{ext}")
-                if os.path.exists(potential_path):
-                    video_path = potential_path
-                    break
-            
-            json_path = os.path.join(subscription_dir, f"{safe_title}.info.json")
-            thumbnail_path = os.path.join(subscription_dir, f"{safe_title}.jpg")
-            
-            if not video_path or not os.path.exists(video_path):
-                return {'success': False, 'error': '下载的视频文件未找到'}
-            
-            # 读取视频信息
-            video_data = {}
-            if os.path.exists(json_path):
-                try:
-                    with open(json_path, 'r', encoding='utf-8') as f:
-                        video_data = json.load(f)
-                except Exception as e:
-                    logger.warning(f"读取视频信息文件失败: {e}")
-            
-            # 保存到数据库
-            if existing_video:
-                # 更新现有记录
-                existing_video.title = video_title
-                existing_video.video_path = video_path
-                existing_video.json_path = json_path if os.path.exists(json_path) else None
-                existing_video.thumbnail_path = thumbnail_path if os.path.exists(thumbnail_path) else None
-                existing_video.duration = video_data.get('duration', 0)
-                existing_video.view_count = video_data.get('view_count', 0)
-                existing_video.upload_date = video_data.get('upload_date', '')
-                existing_video.description = video_data.get('description', '')[:1000]  # 限制长度
-                existing_video.downloaded_at = datetime.now()
-            else:
-                # 创建新记录
-                new_video = Video(
-                    bilibili_id=video_id,
-                    title=video_title,
-                    subscription_id=subscription_id,
-                    video_path=video_path,
-                    json_path=json_path if os.path.exists(json_path) else None,
-                    thumbnail_path=thumbnail_path if os.path.exists(thumbnail_path) else None,
-                    duration=video_data.get('duration', 0),
-                    view_count=video_data.get('view_count', 0),
-                    upload_date=video_data.get('upload_date', ''),
-                    description=video_data.get('description', '')[:1000],
-                    downloaded_at=datetime.now()
-                )
-                db.add(new_video)
-            
-            # 生成NFO文件
-            nfo_path = os.path.join(self.output_dir, f"{safe_title}.nfo")
-            self._generate_nfo_file(video_data, nfo_path)
-            
-            # 更新Cookie使用统计
-            cookie_manager.update_cookie_usage(db, cookie.id)
-            
-            db.commit()
-            
-            return {
-                'success': True, 
-                'video_path': video_path,
-                'title': video_title
-            }
-            
-        except Exception as e:
-            logger.error(f"下载视频失败: {e}")
-            return {'success': False, 'error': str(e)}
 
     async def _get_collection_videos(self, collection_url: str, db: Session) -> List[Dict]:
-        """获取合集视频列表"""
+        """获取合集视频列表（使用cookies.txt，避免header方式不稳定）"""
         await rate_limiter.wait()
         
-        # 获取Cookie
         cookie = cookie_manager.get_available_cookie(db)
         if not cookie:
             raise Exception("没有可用的Cookie")
         
-        headers = cookie_manager.get_cookie_headers(cookie)
-        
+        cookies_path = None
         try:
-            # 使用yt-dlp获取视频列表
+            # 写入临时 cookies.txt (Netscape 格式)
+            fd, cookies_path = tempfile.mkstemp(prefix='cookies_', suffix='.txt')
+            os.close(fd)
+            with open(cookies_path, 'w', encoding='utf-8') as cf:
+                # Netscape cookie file header is required by yt-dlp
+                cf.write("# Netscape HTTP Cookie File\n")
+                cf.write("# This file was generated by bili_curator V6\n\n")
+                cf.writelines([
+                    f".bilibili.com\tTRUE\t/\tFALSE\t0\tSESSDATA\t{cookie.sessdata}\n",
+                    f".bilibili.com\tTRUE\t/\tFALSE\t0\tbili_jct\t{cookie.bili_jct}\n",
+                    f".bilibili.com\tTRUE\t/\tFALSE\t0\tDedeUserID\t{cookie.dedeuserid}\n",
+                ])
+            
             cmd = [
                 'yt-dlp',
                 '--dump-json',
                 '--flat-playlist',
-                collection_url
+                '--cookies', cookies_path,
+                collection_url,
             ]
-            
-            # 添加自定义cookie
-            cookie_str = f"SESSDATA={cookie.sessdata}; bili_jct={cookie.bili_jct}; DedeUserID={cookie.dedeuserid}"
-            cmd.extend(['--add-header', f'Cookie:{cookie_str}'])
             
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            
             stdout, stderr = await process.communicate()
-            
             if process.returncode != 0:
                 error_msg = stderr.decode('utf-8', errors='ignore')
                 logger.error(f"yt-dlp获取视频列表失败: {error_msg}")
                 raise Exception(f"获取视频列表失败: {error_msg}")
             
-            # 解析输出
             video_list = []
             for line in stdout.decode('utf-8', errors='ignore').strip().split('\n'):
                 if line.strip():
@@ -272,19 +128,20 @@ class BilibiliDownloaderV6:
                         video_list.append(video_info)
                     except json.JSONDecodeError:
                         continue
-            
-            # 更新Cookie使用统计
             cookie_manager.update_cookie_usage(db, cookie.id)
-            
             logger.info(f"获取到 {len(video_list)} 个视频")
             return video_list
-            
         except Exception as e:
             logger.error(f"获取合集视频列表失败: {e}")
-            # 如果是认证错误，标记Cookie为不可用
             if "403" in str(e) or "401" in str(e):
                 cookie_manager.mark_cookie_banned(db, cookie.id, str(e))
             raise
+        finally:
+            if cookies_path and os.path.exists(cookies_path):
+                try:
+                    os.remove(cookies_path)
+                except Exception:
+                    pass
     
     def _scan_existing_files(self, db: Session) -> Dict[str, str]:
         """扫描已有文件，构建视频ID映射"""
@@ -295,16 +152,28 @@ class BilibiliDownloaderV6:
         for video in downloaded_videos:
             existing_videos[video.bilibili_id] = video.video_path
         
-        # 同时扫描文件系统中的JSON文件（兼容V5格式）
-        for json_file in self.output_dir.glob("*.json"):
+        # 同时扫描文件系统中的JSON文件（兼容V5格式），递归子目录，支持 *.json 与 *.info.json
+        scanned = set()
+        for json_file in list(self.output_dir.rglob("*.json")) + list(self.output_dir.rglob("*.info.json")):
+            # 避免重复处理相同路径
+            if json_file in scanned:
+                continue
+            scanned.add(json_file)
             try:
                 with open(json_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     video_id = data.get('id')
                     if video_id and video_id not in existing_videos:
-                        # 检查对应的视频文件是否存在
-                        base_name = json_file.stem
-                        video_file = self.output_dir / f"{base_name}.mp4"
+                        # 计算可能的mp4文件名
+                        name = json_file.name
+                        if name.endswith('.info.json'):
+                            base_name = name[:-10]
+                        elif name.endswith('.json'):
+                            base_name = name[:-5]
+                        else:
+                            base_name = json_file.stem
+                        # 假设视频文件与json同目录
+                        video_file = json_file.parent / f"{base_name}.mp4"
                         if video_file.exists():
                             existing_videos[video_id] = str(video_file)
             except Exception as e:
@@ -323,7 +192,8 @@ class BilibiliDownloaderV6:
             
             # 创建下载任务记录
             task = DownloadTask(
-                video_id=video_id,
+                video_id=video_id,  # 兼容旧库的 NOT NULL 约束
+                bilibili_id=video_id,
                 subscription_id=subscription_id,
                 status='downloading',
                 started_at=datetime.now()
@@ -343,21 +213,64 @@ class BilibiliDownloaderV6:
                 safe_title = self._sanitize_filename(title)
                 base_filename = f"{safe_title}"
                 
+                # 标题重名冲突处理：若同名文件存在且其JSON的id与当前不同，则回退为“标题 - BV号”
+                subscription = db.query(Subscription).filter(Subscription.id == subscription_id).first()
+                if not subscription:
+                    raise Exception("订阅不存在")
+                subscription_dir = Path(self._create_subscription_directory(subscription))
+                existing_base = None
+                for ext in ['.mp4', '.mkv', '.webm']:
+                    p = subscription_dir / f"{base_filename}{ext}"
+                    if p.exists():
+                        existing_base = p.with_suffix('')
+                        break
+                if existing_base:
+                    info_path = existing_base.with_suffix('.info.json')
+                    try:
+                        if info_path.exists():
+                            with open(info_path, 'r', encoding='utf-8') as f:
+                                data = json.load(f)
+                                if data.get('id') and data.get('id') != video_id:
+                                    base_filename = f"{safe_title} - {video_id}"
+                    except Exception:
+                        # 无法读取则保守地回退加上BV号
+                        base_filename = f"{safe_title} - {video_id}"
+                
                 # 下载视频
                 video_path = await self._download_with_ytdlp(
                     video_info.get('url', f"https://www.bilibili.com/video/{video_id}"),
                     base_filename,
+                    subscription_dir,
                     cookie,
                     task.id,
                     db
                 )
                 
                 # 创建NFO文件
-                await self._create_nfo_file(video_info, base_filename)
+                await self._create_nfo_file(video_info, base_filename, subscription_dir)
                 
-                # 保存视频信息到数据库
+                # 保存视频信息到数据库（查重避免唯一键冲突）
+                existing = db.query(Video).filter_by(bilibili_id=video_id).first()
+                if existing:
+                    # 已存在：标记任务完成并返回现有路径
+                    task.status = 'completed'
+                    task.progress = 100.0
+                    task.completed_at = datetime.now()
+                    db.commit()
+                    logger.info(f"已存在，跳过入库: {title} ({video_id})")
+                    return {
+                        'video_id': video_id,
+                        'title': title,
+                        'success': True,
+                        'video_path': existing.video_path
+                    }
+
+                # 计算JSON与缩略图路径
+                json_path = subscription_dir / f"{base_filename}.info.json"
+                thumbnail_path = subscription_dir / f"{base_filename}.jpg"
+
                 video = Video(
-                    video_id=video_id,
+                    bilibili_id=video_id,
                     title=title,
                     uploader=video_info.get('uploader', ''),
                     uploader_id=video_info.get('uploader_id', ''),
@@ -365,6 +278,8 @@ class BilibiliDownloaderV6:
                     upload_date=self._parse_upload_date(video_info.get('upload_date')),
                     description=video_info.get('description', ''),
                     video_path=str(video_path),
+                    json_path=str(json_path) if json_path.exists() else None,
+                    thumbnail_path=str(thumbnail_path) if thumbnail_path.exists() else None,
                     downloaded=True,
                     subscription_id=subscription_id
                 )
@@ -387,6 +302,20 @@ class BilibiliDownloaderV6:
                     'video_path': str(video_path)
                 }
                 
+            except IntegrityError as e:
+                # 唯一键或约束异常处理
+                db.rollback()
+                task.status = 'failed'
+                task.error_message = str(e)
+                task.completed_at = datetime.now()
+                db.commit()
+                logger.error(f"下载失败(数据库约束): {title} - {e}")
+                return {
+                    'video_id': video_id,
+                    'title': title,
+                    'success': False,
+                    'error': str(e)
+                }
             except Exception as e:
                 logger.error(f"下载失败: {title} - {e}")
                 
@@ -408,42 +337,66 @@ class BilibiliDownloaderV6:
                     'error': str(e)
                 }
     
-    async def _download_with_ytdlp(self, url: str, base_filename: str, cookie, task_id: int, db: Session) -> Path:
-        """使用yt-dlp下载视频"""
-        output_template = str(self.output_dir / f"{base_filename}.%(ext)s")
+    async def _download_with_ytdlp(self, url: str, base_filename: str, subscription_dir: Path, cookie, task_id: int, db: Session) -> Path:
+        """使用yt-dlp下载视频（输出到订阅目录）"""
+        output_template = str(subscription_dir / f"{base_filename}.%(ext)s")
+
+        # 写入临时 cookies.txt（Netscape 格式最简行）
+        cookies_path = None
+        try:
+            fd, cookies_path = tempfile.mkstemp(prefix='cookies_', suffix='.txt')
+            os.close(fd)
+            with open(cookies_path, 'w', encoding='utf-8') as cf:
+                # Netscape cookie file header is required by yt-dlp
+                cf.write("# Netscape HTTP Cookie File\n")
+                cf.write("# This file was generated by bili_curator V6\n\n")
+                # domain, include_subdomains, path, secure, expires, name, value
+                lines = [
+                    f".bilibili.com\tTRUE\t/\tFALSE\t0\tSESSDATA\t{cookie.sessdata}\n",
+                    f".bilibili.com\tTRUE\t/\tFALSE\t0\tbili_jct\t{cookie.bili_jct}\n",
+                    f".bilibili.com\tTRUE\t/\tFALSE\t0\tDedeUserID\t{cookie.dedeuserid}\n",
+                ]
+                cf.writelines(lines)
+
+            async def run_yt_dlp(format_str: str):
+                cmd = [
+                    'yt-dlp',
+                    '--format', format_str,
+                    '--output', output_template,
+                    '--write-info-json',
+                    '--write-thumbnail',
+                    '--convert-thumbnails', 'jpg',
+                    '--cookies', cookies_path,
+                    url
+                ]
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                out, err = await proc.communicate()
+                return proc.returncode, out, err
+
+            # 首选 1080 限制，失败则回退到通用最佳
+            ret, out, err = await run_yt_dlp('bestvideo*[height<=1080]+bestaudio/best')
+            if ret != 0 and b'Requested format is not available' in err:
+                ret, out, err = await run_yt_dlp('bv+ba/b')
+            if ret != 0:
+                error_msg = (err or b'').decode('utf-8', errors='ignore')
+                raise Exception(f"yt-dlp下载失败: {error_msg}")
+        finally:
+            if cookies_path and os.path.exists(cookies_path):
+                try:
+                    os.remove(cookies_path)
+                except Exception:
+                    pass
         
-        cmd = [
-            'yt-dlp',
-            '--format', 'best[height<=1080]',
-            '--output', output_template,
-            '--write-info-json',
-            '--write-thumbnail',
-            '--convert-thumbnails', 'jpg',
-            url
-        ]
-        
-        # 添加Cookie
-        cookie_str = f"SESSDATA={cookie.sessdata}; bili_jct={cookie.bili_jct}; DedeUserID={cookie.dedeuserid}"
-        cmd.extend(['--add-header', f'Cookie:{cookie_str}'])
-        
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        
-        stdout, stderr = await process.communicate()
-        
-        if process.returncode != 0:
-            error_msg = stderr.decode('utf-8', errors='ignore')
-            raise Exception(f"yt-dlp下载失败: {error_msg}")
-        
-        # 查找下载的视频文件
-        video_file = self.output_dir / f"{base_filename}.mp4"
+        # 查找下载的视频文件（在订阅目录下）
+        video_file = subscription_dir / f"{base_filename}.mp4"
         if not video_file.exists():
             # 尝试其他可能的扩展名
             for ext in ['.webm', '.mkv', '.flv']:
-                alt_file = self.output_dir / f"{base_filename}{ext}"
+                alt_file = subscription_dir / f"{base_filename}{ext}"
                 if alt_file.exists():
                     video_file = alt_file
                     break
@@ -453,26 +406,69 @@ class BilibiliDownloaderV6:
         
         return video_file
     
-    async def _create_nfo_file(self, video_info: Dict[str, Any], base_filename: str):
-        """创建NFO文件"""
-        nfo_path = self.output_dir / f"{base_filename}.nfo"
-        
-        nfo_content = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<movie>
-    <title>{self._escape_xml(video_info.get('title', ''))}</title>
-    <originaltitle>{self._escape_xml(video_info.get('title', ''))}</originaltitle>
-    <plot>{self._escape_xml(video_info.get('description', ''))}</plot>
-    <year>{self._extract_year(video_info.get('upload_date'))}</year>
-    <premiered>{self._format_date(video_info.get('upload_date'))}</premiered>
-    <studio>Bilibili</studio>
-    <director>{self._escape_xml(video_info.get('uploader', ''))}</director>
-    <runtime>{video_info.get('duration', 0)}</runtime>
-    <id>{video_info.get('id', '')}</id>
-    <uniqueid type="bilibili">{video_info.get('id', '')}</uniqueid>
-</movie>"""
-        
+    async def _create_nfo_file(self, video_info: Dict[str, Any], base_filename: str, subscription_dir: Path):
+        """创建增强版NFO文件（与V5一致）"""
+        nfo_path = subscription_dir / f"{base_filename}.nfo"
+        title = video_info.get('title', 'Unknown')
+        video_id = video_info.get('id', '')
+        uploader = video_info.get('uploader', '')
+        upload_date = video_info.get('upload_date', '')
+        duration = video_info.get('duration', 0) or 0
+        description = video_info.get('description', '') or ''
+        tags = video_info.get('tags', []) or []
+        view_count = video_info.get('view_count', 0) or 0
+        like_count = video_info.get('like_count', 0) or 0
+        webpage_url = video_info.get('webpage_url', video_info.get('url', ''))
+
+        # 格式化
+        formatted_date = self._format_date(upload_date)
+        runtime_minutes = duration // 60 if duration else 0
+        clean_desc = self._escape_xml(description)
+        if len(clean_desc) > 500:
+            clean_desc = clean_desc[:500] + '...'
+
+        lines = [
+            '<?xml version="1.0" encoding="utf-8" standalone="yes"?>',
+            '<movie>',
+            f'  <title>{self._escape_xml(title)}</title>',
+            f'  <sorttitle>{self._escape_xml(title)}</sorttitle>',
+            f'  <plot>{clean_desc}</plot>',
+            f'  <outline>{clean_desc}</outline>',
+            f'  <runtime>{runtime_minutes}</runtime>',
+            f'  <year>{upload_date[:4] if upload_date else ""}</year>',
+            f'  <studio>{self._escape_xml(uploader)}</studio>',
+            f'  <director>{self._escape_xml(uploader)}</director>',
+            f'  <credits>{self._escape_xml(uploader)}</credits>',
+            f'  <uniqueid type="bilibili">{self._escape_xml(video_id)}</uniqueid>',
+            f'  <dateadded>{formatted_date} 00:00:00</dateadded>',
+            f'  <premiered>{formatted_date}</premiered>',
+            f'  <playcount>{view_count}</playcount>',
+            f'  <userrating>{min(10, like_count // 1000) if like_count else 0}</userrating>',
+            f'  <trailer>{self._escape_xml(webpage_url)}</trailer>',
+        ]
+        for tag in tags[:10]:
+            lines.append(f'  <tag>{self._escape_xml(tag)}</tag>')
+        lines.extend([
+            '  <fileinfo>',
+            '    <streamdetails>',
+            '      <video>',
+            '        <codec>h264</codec>',
+            '        <aspect>16:9</aspect>',
+            '        <width>1920</width>',
+            '        <height>1080</height>',
+            '      </video>',
+            '      <audio>',
+            '        <codec>aac</codec>',
+            '        <language>zh</language>',
+            '        <channels>2</channels>',
+            '      </audio>',
+            '    </streamdetails>',
+            '  </fileinfo>',
+            '</movie>'
+        ])
+
         with open(nfo_path, 'w', encoding='utf-8') as f:
-            f.write(nfo_content)
+            f.write('\n'.join(lines))
     
     def _create_subscription_directory(self, subscription: Subscription) -> str:
         """创建订阅目录，返回目录路径"""

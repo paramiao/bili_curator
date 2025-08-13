@@ -522,9 +522,14 @@
 
         // 加载标签页数据
         function loadTabData(tabName) {
+            // 切换到非任务标签时停止轮询
+            if (tabName !== 'tasks') {
+                stopTasksPolling();
+            }
             switch(tabName) {
                 case 'dashboard': loadDashboard(); break;
                 case 'subscriptions': loadSubscriptions(); break;
+                case 'tasks': startTasksPolling(); break;
                 case 'videos': loadVideos(); break;
                 case 'cookies': loadCookies(); break;
                 case 'settings': loadSettings(); break;
@@ -835,7 +840,111 @@
                 alert('启动下载失败: ' + result.error);
             } else {
                 alert('下载任务已启动');
+                // 切换到下载任务标签并开始轮询
+                const tasksTab = Array.from(document.querySelectorAll('.tab')).find(t => t.textContent.includes('下载任务'));
+                if (tasksTab) {
+                    tasksTab.click();
+                } else {
+                    loadTabData('tasks');
+                }
             }
+        }
+
+        // 任务轮询与渲染
+        let tasksPollTimer = null;
+
+        function startTasksPolling() {
+            refreshTasks();
+            stopTasksPolling();
+            tasksPollTimer = setInterval(refreshTasks, 2000);
+        }
+
+        function stopTasksPolling() {
+            if (tasksPollTimer) {
+                clearInterval(tasksPollTimer);
+                tasksPollTimer = null;
+            }
+        }
+
+        async function refreshTasks() {
+            const data = await apiRequest('/api/tasks');
+            if (data.error) {
+                document.getElementById('task-list').innerHTML = `<p class="error">加载失败: ${data.error}</p>`;
+                return;
+            }
+            renderTasks(data);
+        }
+
+        function renderTasks(tasks) {
+            if (!tasks || tasks.length === 0) {
+                document.getElementById('task-list').innerHTML = '<p>暂无任务</p>';
+                return;
+            }
+            const statusText = {
+                'pending': '排队中',
+                'downloading': '下载中',
+                'completed': '已完成',
+                'failed': '失败',
+                'paused': '已暂停',
+                'cancelled': '已取消'
+            };
+            const html = tasks.map(t => {
+                const progress = typeof t.progress === 'number' ? Math.max(0, Math.min(100, t.progress)) : 0;
+                const barClass = t.status === 'completed' ? 'success' : (t.status === 'failed' ? 'error' : '');
+                const controls = renderTaskControls(t);
+                return `
+                    <div class="card" style="margin-bottom:8px;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
+                            <div>
+                                <strong>任务#${t.id}</strong>
+                                <span style="margin-left:8px;color:#666;">${statusText[t.status] || t.status}</span>
+                            </div>
+                            <div>${controls}</div>
+                        </div>
+                        <div class="progress-bar">
+                            <div class="progress ${barClass}" style="width:${progress}%"></div>
+                        </div>
+                        ${t.error_message ? `<div class="error">${t.error_message}</div>` : ''}
+                        <div style="font-size:12px;color:#666;margin-top:4px;">
+                            开始: ${t.started_at || '-'} | 结束: ${t.completed_at || '-'}
+                        </div>
+                    </div>`;
+            }).join('');
+            document.getElementById('task-list').innerHTML = html;
+        }
+
+        function renderTaskControls(t) {
+            const buttons = [];
+            if (t.status === 'downloading') {
+                buttons.push(`<button class="btn btn-warning" onclick="pauseTask('${t.id}')">暂停</button>`);
+                buttons.push(`<button class="btn btn-danger" onclick="cancelTask('${t.id}')">取消</button>`);
+            } else if (t.status === 'paused') {
+                buttons.push(`<button class="btn btn-success" onclick="resumeTask('${t.id}')">恢复</button>`);
+                buttons.push(`<button class="btn btn-danger" onclick="cancelTask('${t.id}')">取消</button>`);
+            }
+            return buttons.join(' ');
+        }
+
+        async function pauseTask(taskId) {
+            const res = await apiRequest(`/api/tasks/${taskId}/pause`, { method: 'POST' });
+            if (res.error) return alert('暂停失败: ' + res.error);
+            refreshTasks();
+        }
+        async function resumeTask(taskId) {
+            const res = await apiRequest(`/api/tasks/${taskId}/resume`, { method: 'POST' });
+            if (res.error) return alert('恢复失败: ' + res.error);
+            refreshTasks();
+        }
+        async function cancelTask(taskId) {
+            const res = await apiRequest(`/api/tasks/${taskId}/cancel`, { method: 'POST' });
+            if (res.error) return alert('取消失败: ' + res.error);
+            refreshTasks();
+        }
+
+        async function clearCompletedTasks() {
+            const res = await apiRequest('/api/tasks/clear-completed', { method: 'POST' });
+            if (res.error) return alert('清理失败: ' + res.error);
+            refreshTasks();
         }
 
         // 查看订阅详情

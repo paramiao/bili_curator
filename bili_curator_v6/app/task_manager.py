@@ -134,7 +134,7 @@ class EnhancedTaskManager:
                 if video_id not in existing_videos:
                     new_videos.append(video_info)
                 else:
-                    await self._update_task_log(task_id, f"跳过重复视频: {video_info.get('title', video_id)}")
+                    await self._update_task_log(task_id, f"跳过重复视频: {video_info.get('title', video_id)} ({video_id})")
             
             task_progress.new_videos = len(new_videos)
             await self._update_task_log(task_id, f"需要下载 {len(new_videos)} 个新视频")
