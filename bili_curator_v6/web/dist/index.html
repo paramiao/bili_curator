@@ -872,7 +872,9 @@
                 document.getElementById('task-list').innerHTML = `<p class="error">加载失败: ${data.error}</p>`;
                 return;
             }
-            renderTasks(data);
+            // 兼容后端返回对象（以 task_id 为键）或数组
+            const tasksArr = Array.isArray(data) ? data : Object.values(data || {});
+            renderTasks(tasksArr);
         }
 
         function renderTasks(tasks) {
@@ -889,14 +891,14 @@
                 'cancelled': '已取消'
             };
             const html = tasks.map(t => {
-                const progress = typeof t.progress === 'number' ? Math.max(0, Math.min(100, t.progress)) : 0;
+                const progress = typeof t.progress_percent === 'number' ? Math.max(0, Math.min(100, t.progress_percent)) : 0;
                 const barClass = t.status === 'completed' ? 'success' : (t.status === 'failed' ? 'error' : '');
                 const controls = renderTaskControls(t);
                 return `
                     <div class="card" style="margin-bottom:8px;">
                         <div style="display:flex;justify-content:space-between;align-items:center;">
                             <div>
-                                <strong>任务#${t.id}</strong>
+                                <strong>任务#${t.task_id || t.id || '-'}</strong>
                                 <span style="margin-left:8px;color:#666;">${statusText[t.status] || t.status}</span>
                             </div>
                             <div>${controls}</div>
@@ -916,11 +918,11 @@
         function renderTaskControls(t) {
             const buttons = [];
             if (t.status === 'downloading') {
-                buttons.push(`<button class="btn btn-warning" onclick="pauseTask('${t.id}')">暂停</button>`);
-                buttons.push(`<button class="btn btn-danger" onclick="cancelTask('${t.id}')">取消</button>`);
+                buttons.push(`<button class="btn btn-warning" onclick=\"pauseTask('${t.task_id || t.id}')\">暂停</button>`);
+                buttons.push(`<button class="btn btn-danger" onclick=\"cancelTask('${t.task_id || t.id}')\">取消</button>`);
             } else if (t.status === 'paused') {
-                buttons.push(`<button class="btn btn-success" onclick="resumeTask('${t.id}')">恢复</button>`);
-                buttons.push(`<button class="btn btn-danger" onclick="cancelTask('${t.id}')">取消</button>`);
+                buttons.push(`<button class="btn btn-success" onclick=\"resumeTask('${t.task_id || t.id}')\">恢复</button>`);
+                buttons.push(`<button class="btn btn-danger" onclick=\"cancelTask('${t.task_id || t.id}')\">取消</button>`);
             }
             return buttons.join(' ');
         }
