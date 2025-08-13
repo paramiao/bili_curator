@@ -1,7 +1,7 @@
 """
 SQLite数据模型定义 - V6简化版
 """
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, Text, Date, Float, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, Text, Date, Float, ForeignKey, text
 from sqlalchemy.orm import relationship, sessionmaker
 try:
     from sqlalchemy.orm import declarative_base
@@ -91,6 +91,7 @@ class Cookie(Base):
     usage_count = Column(Integer, default=0)
     last_used = Column(DateTime)
     created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 class Settings(Base):
     """系统设置表"""
@@ -102,6 +103,42 @@ class Settings(Base):
     description = Column(Text)
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+# Pydantic models for API validation
+from pydantic import BaseModel
+from typing import Optional, List
+from datetime import date
+
+class SubscriptionUpdate(BaseModel):
+    name: Optional[str] = None
+    type: Optional[str] = None
+    url: Optional[str] = None
+    uploader_id: Optional[str] = None
+    keyword: Optional[str] = None
+    is_active: Optional[bool] = None
+    date_after: Optional[date] = None
+    date_before: Optional[date] = None
+    min_likes: Optional[int] = None
+    min_favorites: Optional[int] = None
+    min_views: Optional[int] = None
+    specific_urls: Optional[str] = None
+
+class CookieCreate(BaseModel):
+    name: str
+    sessdata: str
+    bili_jct: str
+    dedeuserid: str
+    is_active: Optional[bool] = True
+
+class CookieUpdate(BaseModel):
+    name: Optional[str] = None
+    sessdata: Optional[str] = None
+    bili_jct: Optional[str] = None
+    dedeuserid: Optional[str] = None
+    is_active: Optional[bool] = None
+
+class SettingUpdate(BaseModel):
+    value: str
 
 class DownloadTask(Base):
     """下载任务表"""
@@ -129,7 +166,10 @@ class Database:
         
         # 创建所有表
         Base.metadata.create_all(self.engine)
-        
+
+        # 迁移旧表结构，补齐缺失列
+        self._migrate_schema()
+
         # 初始化默认设置
         self._init_default_settings()
     
@@ -155,6 +195,33 @@ class Database:
             print(f"初始化默认设置失败: {e}")
         finally:
             session.close()
+
+    def _migrate_schema(self):
+        """轻量级迁移：为旧SQLite数据库补齐缺失的列"""
+        conn = self.engine.connect()
+        try:
+            # 查询表结构辅助函数
+            def has_column(table: str, col: str) -> bool:
+                rows = conn.exec_driver_sql(f"PRAGMA table_info('{table}')").fetchall()
+                cols = {r[1] for r in rows}
+                return col in cols
+
+            # subscriptions 表缺失列
+            if not has_column('subscriptions', 'updated_at'):
+                conn.exec_driver_sql("ALTER TABLE subscriptions ADD COLUMN updated_at DATETIME")
+            if not has_column('subscriptions', 'total_videos'):
+                conn.exec_driver_sql("ALTER TABLE subscriptions ADD COLUMN total_videos INTEGER DEFAULT 0")
+            if not has_column('subscriptions', 'downloaded_videos'):
+                conn.exec_driver_sql("ALTER TABLE subscriptions ADD COLUMN downloaded_videos INTEGER DEFAULT 0")
+
+            # cookies 表缺失列
+            if not has_column('cookies', 'updated_at'):
+                conn.exec_driver_sql("ALTER TABLE cookies ADD COLUMN updated_at DATETIME")
+
+        except Exception as e:
+            print(f"数据库迁移失败: {e}")
+        finally:
+            conn.close()
     
     def get_session(self):
         """获取数据库会话"""

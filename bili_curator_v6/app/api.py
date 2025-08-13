@@ -11,7 +11,7 @@ from datetime import datetime
 import json
 
 from .models import (
-    Subscription, Video, DownloadTask, Cookie, Settings,
+    Subscription, Video, DownloadTask, Cookie, Settings, SubscriptionUpdate, CookieCreate, CookieUpdate, SettingUpdate,
     get_db
 )
 from .scheduler import scheduler, task_manager
@@ -88,7 +88,7 @@ async def get_system_status(db: Session = Depends(get_db)):
     total_subscriptions = db.query(Subscription).count()
     active_subscriptions = db.query(Subscription).filter(Subscription.is_active == True).count()
     total_videos = db.query(Video).count()
-    downloaded_videos = db.query(Video).filter(Video.downloaded == True).count()
+    downloaded_videos = db.query(Video).filter(Video.video_path.isnot(None)).count()
     active_cookies = db.query(Cookie).filter(Cookie.is_active == True).count()
     
     return {
@@ -143,7 +143,8 @@ async def get_subscriptions(db: Session = Depends(get_db)):
             "downloaded_videos": downloaded_videos,
             "is_active": sub.is_active,
             "last_check": sub.last_check.isoformat() if sub.last_check else None,
-            "created_at": sub.created_at.isoformat() if sub.created_at else None
+            "created_at": sub.created_at.isoformat() if sub.created_at else None,
+            "updated_at": sub.updated_at.isoformat() if sub.updated_at else None
         })
     
     db.commit()
@@ -220,21 +221,33 @@ async def get_subscription(subscription_id: int, db: Session = Depends(get_db)):
     subscription = db.query(Subscription).filter(Subscription.id == subscription_id).first()
     if not subscription:
         raise HTTPException(status_code=404, detail="订阅不存在")
-    
+
+    # Calculate statistics
+    total_videos = db.query(Video).filter(Video.subscription_id == subscription.id).count()
+    downloaded_videos = db.query(Video).filter(
+        Video.subscription_id == subscription.id,
+        Video.video_path.isnot(None)
+    ).count()
+
     return {
         "id": subscription.id,
         "name": subscription.name,
         "type": subscription.type,
         "url": subscription.url,
-        "is_active": subscription.is_active,
-        "created_at": subscription.created_at,
-        "last_check": subscription.last_check,
-        "date_after": subscription.date_after,
-        "date_before": subscription.date_before,
+        "uploader_id": subscription.uploader_id,
+        "keyword": subscription.keyword,
+        "specific_urls": subscription.specific_urls,
+        "date_after": subscription.date_after.isoformat() if subscription.date_after else None,
+        "date_before": subscription.date_before.isoformat() if subscription.date_before else None,
         "min_likes": subscription.min_likes,
         "min_favorites": subscription.min_favorites,
         "min_views": subscription.min_views,
-        "specific_urls": subscription.specific_urls
+        "total_videos": total_videos,
+        "downloaded_videos": downloaded_videos,
+        "is_active": subscription.is_active,
+        "last_check": subscription.last_check.isoformat() if subscription.last_check else None,
+        "created_at": subscription.created_at.isoformat() if subscription.created_at else None,
+        "updated_at": subscription.updated_at.isoformat() if subscription.updated_at else None
     }
 
 @app.put("/api/subscriptions/{subscription_id}")
@@ -520,13 +533,37 @@ async def get_cookies(db: Session = Depends(get_db)):
         {
             "id": cookie.id,
             "name": cookie.name,
-            "active": cookie.is_active,
+            "sessdata": cookie.sessdata,
+            "bili_jct": cookie.bili_jct,
+            "dedeuserid": cookie.dedeuserid,
+            "is_active": cookie.is_active,
             "usage_count": cookie.usage_count,
             "last_used": cookie.last_used.isoformat() if cookie.last_used else None,
-            "created_at": cookie.created_at.isoformat() if cookie.created_at else None
+            "created_at": cookie.created_at.isoformat() if cookie.created_at else None,
+            "updated_at": cookie.updated_at.isoformat() if cookie.updated_at else None
         }
         for cookie in cookies
     ]
+
+@app.get("/api/cookies/{cookie_id}")
+async def get_cookie(cookie_id: int, db: Session = Depends(get_db)):
+    """获取单个Cookie详情"""
+    cookie = db.query(Cookie).filter(Cookie.id == cookie_id).first()
+    if not cookie:
+        raise HTTPException(status_code=404, detail="Cookie不存在")
+    
+    return {
+        "id": cookie.id,
+        "name": cookie.name,
+        "sessdata": cookie.sessdata,
+        "bili_jct": cookie.bili_jct,
+        "dedeuserid": cookie.dedeuserid,
+        "is_active": cookie.is_active,
+        "usage_count": cookie.usage_count,
+        "last_used": cookie.last_used.isoformat() if cookie.last_used else None,
+        "created_at": cookie.created_at.isoformat() if cookie.created_at else None,
+        "updated_at": cookie.updated_at.isoformat() if cookie.updated_at else None
+    }
 
 @app.post("/api/cookies")
 async def create_cookie(cookie: CookieCreate, db: Session = Depends(get_db)):
