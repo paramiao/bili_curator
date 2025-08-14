@@ -9,14 +9,18 @@
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; }
         .header { background: #00a1d6; color: white; padding: 1rem; text-align: center; }
         .container { max-width: 1200px; margin: 2rem auto; padding: 0 1rem; }
-        .card { background: white; border-radius: 8px; padding: 1.5rem; margin-bottom: 1rem; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .card { background: white; border-radius: 10px; padding: 1.25rem 1.5rem; margin-bottom: 1.25rem; box-shadow: 0 2px 10px rgba(0,0,0,0.06); border: 1px solid #eef2f7; }
+        .card h3 { margin-bottom: 0.5rem; font-size: 1.1rem; color: #333; }
         .tabs { display: flex; border-bottom: 1px solid #ddd; margin-bottom: 1rem; }
         .tab { padding: 0.5rem 1rem; cursor: pointer; border-bottom: 2px solid transparent; }
         .tab.active { border-bottom-color: #00a1d6; color: #00a1d6; }
         .tab-content { display: none; }
         .tab-content.active { display: block; }
-        .btn { background: #00a1d6; color: white; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; }
+        .btn { background: #00a1d6; color: white; border: none; padding: 0.45rem 0.8rem; border-radius: 6px; cursor: pointer; }
         .btn:hover { background: #0084b4; }
+        .btn-outline { background: #fff; color: #007fa6; border: 1px solid #cde8f3; }
+        .btn-outline:hover { background: #f2fbff; }
+        .btn-small { padding: 0.25rem 0.5rem; font-size: 12px; }
         .form-group { margin-bottom: 1rem; }
         .form-group label { display: block; margin-bottom: 0.5rem; font-weight: bold; }
         .form-group input, .form-group select, .form-group textarea {
@@ -52,6 +56,24 @@
             margin: 0;
             color: #333;
         }
+
+        /* 统计小胶囊 */
+        .subscription-stats .stat-item { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 999px; background: #f6f8fa; border: 1px solid #eef2f7; color: #333; }
+        .stat-total { background: #eef7ff; color: #0b5cab; border-color: #d9ecff; }
+        .stat-downloaded { background: #e9f9ef; color: #1e7e34; border-color: #d6f5df; }
+        .stat-pending { background: #fff7e6; color: #b26a00; border-color: #ffe7ba; }
+
+        /* 表格统一样式（视频管理） */
+        .table-wrap { overflow: auto; }
+        table.data { width: 100%; border-collapse: collapse; font-size: 14px; }
+        table.data thead th { position: sticky; top: 0; background: #f9fbfd; color: #445; text-align: left; border-bottom: 1px solid #eef2f7; padding: 10px 12px; }
+        table.data tbody td { border-bottom: 1px solid #f0f3f7; padding: 10px 12px; color: #333; }
+        table.data tbody tr:nth-child(even) { background: #fcfdff; }
+        table.data tbody tr:hover { background: #f0f7ff; }
+        .pager { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+
+        /* 卡片内分节标题行 */
+        .card .section-header { display:flex; justify-content:space-between; align-items:center; margin-bottom: 8px; }
 
         .task-controls {
             display: flex;
@@ -354,18 +376,61 @@
     <div class="container">
         <div class="card">
             <div class="tabs">
-                <div class="tab active" onclick="showTab('dashboard')">仪表板</div>
-                <div class="tab" onclick="showTab('subscriptions')">订阅管理</div>
-                <div class="tab" onclick="showTab('tasks')">下载任务</div>
-                <div class="tab" onclick="showTab('videos')">视频管理</div>
-                <div class="tab" onclick="showTab('cookies')">Cookie管理</div>
-                <div class="tab" onclick="showTab('settings')">系统设置</div>
+                <div class="tab active" onclick="showTab(this,'dashboard')">总览</div>
+                <div class="tab" onclick="showTab(this,'subscriptions')">订阅管理</div>
+                <div class="tab" onclick="showTab(this,'tasks')">下载任务</div>
+                <div class="tab" onclick="showTab(this,'cookies')">Cookie管理</div>
+                <div class="tab" onclick="showTab(this,'settings')">系统设置</div>
             </div>
 
-            <!-- 仪表板 -->
+            <!-- 总览（合并仪表盘 + 视频管理） -->
             <div id="dashboard" class="tab-content active">
-                <h2>系统状态</h2>
-                <div id="system-status">加载中...</div>
+                <div class="card">
+                    <h2>系统状态</h2>
+                    <div id="system-status">加载中...</div>
+                </div>
+
+                <div id="media-overview" class="card" style="margin-top:8px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <h3>媒体总览</h3>
+                        <div>
+                            <button class="btn btn-outline" onclick="loadMediaOverview(false)">刷新</button>
+                            <button class="btn" onclick="loadMediaOverview(true)">扫描磁盘</button>
+                        </div>
+                    </div>
+                    <div id="media-overview-content" style="margin-top:8px;">加载中...</div>
+                </div>
+
+                <div id="media-sub-stats" class="card">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <h3>订阅统计</h3>
+                        <input id="sub-filter" type="text" placeholder="搜索订阅名称..." oninput="renderSubscriptionStats()" style="padding:6px; border:1px solid #ddd; border-radius:4px;">
+                    </div>
+                    <div id="media-sub-stats-content" style="margin-top:8px;">加载中...</div>
+                </div>
+
+                <div id="media-dir-stats" class="card">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <h3>目录统计</h3>
+                    </div>
+                    <div id="media-dir-stats-content" style="margin-top:8px;">加载中...</div>
+                </div>
+
+                <div id="media-sub-detail" class="card" style="display:none;">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <h3 id="media-sub-detail-title">订阅明细</h3>
+                        <button class="btn btn-outline" onclick="hideSubscriptionDetail()">返回统计</button>
+                    </div>
+                    <div id="media-sub-detail-content" style="margin-top:8px;">加载中...</div>
+                </div>
+
+                <div id="media-dir-detail" class="card" style="display:none;">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <h3 id="media-dir-detail-title">目录明细</h3>
+                        <button class="btn btn-outline" onclick="hideDirectoryDetail()">返回统计</button>
+                    </div>
+                    <div id="media-dir-detail-content" style="margin-top:8px;">加载中...</div>
+                </div>
             </div>
 
             <!-- 订阅管理 -->
@@ -469,11 +534,6 @@
                 </div>
             </div>
 
-            <!-- 视频管理 -->
-            <div id="videos" class="tab-content">
-                <h2>视频管理</h2>
-                <div id="video-list">加载中...</div>
-            </div>
 
             <!-- Cookie管理 -->
             <div id="cookies" class="tab-content">
@@ -514,13 +574,23 @@
 
     <script>
         // 标签页切换
-        function showTab(tabName) {
+        function showTab(el, tabName) {
+            // 兼容旧调用签名：showTab('videos')
+            if (typeof el === 'string' && !tabName) {
+                tabName = el;
+                el = null;
+            }
             document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
-            
-            event.target.classList.add('active');
-            document.getElementById(tabName).classList.add('active');
-            
+            if (el && el.classList) {
+                el.classList.add('active');
+            } else {
+                // 无 el 时，激活与 tabName 对应的 tab
+                const candidate = Array.from(document.querySelectorAll('.tab')).find(t => (t.getAttribute('onclick') || '').includes(`'${tabName}'`));
+                if (candidate) candidate.classList.add('active');
+            }
+            const pane = document.getElementById(tabName);
+            if (pane) pane.classList.add('active');
             // 加载对应数据
             loadTabData(tabName);
         }
@@ -532,12 +602,23 @@
                 stopTasksPolling();
             }
             switch(tabName) {
-                case 'dashboard': loadDashboard(); break;
-                case 'subscriptions': loadSubscriptions(); break;
-                case 'tasks': startTasksPolling(); break;
-                case 'videos': loadVideos(); break;
-                case 'cookies': loadCookies(); break;
-                case 'settings': loadSettings(); break;
+                case 'dashboard':
+                    // 合并后的总览：系统状态 + 媒体概览
+                    loadDashboard();
+                    loadVideos();
+                    break;
+                case 'subscriptions':
+                    loadSubscriptions();
+                    break;
+                case 'tasks':
+                    startTasksPolling();
+                    break;
+                case 'cookies':
+                    loadCookies();
+                    break;
+                case 'settings':
+                    loadSettings();
+                    break;
             }
         }
 
@@ -548,22 +629,72 @@
                     headers: { 'Content-Type': 'application/json', ...options.headers },
                     ...options
                 });
-                return await response.json();
+                const ct = (response.headers.get('content-type') || '').toLowerCase();
+                let payload;
+                if (ct.includes('application/json')) {
+                    payload = await response.json().catch(() => null);
+                } else {
+                    const text = await response.text().catch(() => '');
+                    payload = text ? { message: text } : null;
+                }
+                if (!response.ok) {
+                    const msg = (payload && (payload.error || payload.message)) || `HTTP ${response.status}`;
+                    return { error: msg, status: response.status };
+                }
+                return payload ?? {};
             } catch (error) {
                 console.error('API请求失败:', error);
                 return { error: error.message };
             }
         }
 
-        // 刷新并显示合集的远端总数
-        async function refreshExpected(subscriptionId) {
+        // 刷新并显示合集的远端总数（1小时缓存，localStorage 持久化）
+        const __expectedCache = {};
+        function getExpectedCache(id) {
+            try {
+                const k = `expectedCache:${id}`;
+                const s = localStorage.getItem(k);
+                if (!s) return null;
+                const obj = JSON.parse(s);
+                if (!obj || typeof obj.at !== 'number') return null;
+                return obj;
+            } catch (_) { return null; }
+        }
+        function setExpectedCache(id, value) {
+            const obj = { value, at: Date.now() };
+            __expectedCache[id] = obj;
+            try { localStorage.setItem(`expectedCache:${id}`, JSON.stringify(obj)); } catch (_) {}
+            return obj;
+        }
+        async function refreshExpected(subscriptionId, force = false) {
             const el = document.getElementById(`expected-${subscriptionId}`);
             if (!el) return;
             const countEl = el.querySelector('.expected-count');
+            // 命中缓存且未过期（1小时）且非强制刷新
+            const now = Date.now();
+            const c = __expectedCache[subscriptionId] || getExpectedCache(subscriptionId);
+            const notExpired = c && (now - c.at < 3600 * 1000);
+            if (!force && notExpired) {
+                if (countEl) countEl.textContent = String(c.value);
+                return;
+            }
             if (countEl) countEl.textContent = '加载中...';
             const data = await apiRequest(`/api/subscriptions/${subscriptionId}/expected-total`);
             if (data && typeof data.expected_total_videos === 'number') {
                 if (countEl) countEl.textContent = String(data.expected_total_videos);
+                setExpectedCache(subscriptionId, data.expected_total_videos);
+                // 同步更新待下载展示（优先远端）
+                try {
+                    const subEl = document.getElementById(`sub-${subscriptionId}`);
+                    if (subEl) {
+                        const downloaded = parseInt(subEl.getAttribute('data-downloaded') || '0', 10);
+                        const pending = Math.max((data.expected_total_videos - downloaded), 0);
+                        const pEl = document.getElementById(`pending-${subscriptionId}`);
+                        const sEl = document.getElementById(`pending-src-${subscriptionId}`);
+                        if (pEl) pEl.textContent = String(pending);
+                        if (sEl) sEl.textContent = '(远端)';
+                    }
+                } catch (_) {}
             } else {
                 if (countEl) countEl.textContent = '获取失败';
             }
@@ -613,7 +744,7 @@
                 // 统计信息
                 const totalVideos = sub.total_videos || 0;
                 const downloadedVideos = sub.downloaded_videos || 0;
-                const pendingVideos = totalVideos - downloadedVideos;
+                const localPending = Math.max((totalVideos - downloadedVideos), 0);
                 
                 // 订阅类型显示
                 const typeTexts = {
@@ -641,8 +772,16 @@
                     `;
                 }
                 
+                // 预填充远端总数（若有缓存且未过期）
+                const cached = getExpectedCache(sub.id);
+                const cachedOk = cached && (Date.now() - cached.at < 3600*1000);
+                const expectedText = cachedOk ? String(cached.value) : '未获取';
+                const remotePending = cachedOk ? Math.max((cached.value - downloadedVideos), 0) : null;
+                const pendingToShow = (remotePending !== null) ? remotePending : localPending;
+                const pendingSource = (remotePending !== null) ? '远端' : '本地';
+
                 html += `
-                    <div class="subscription-item">
+                    <div class="subscription-item" id="sub-${sub.id}" data-total="${totalVideos}" data-downloaded="${downloadedVideos}">
                         <div class="subscription-header">
                             <div>
                                 <h3 class="subscription-title">${sub.name}</h3>
@@ -663,11 +802,12 @@
                         <div class="subscription-stats">
                             <span class="stat-item stat-total">总计: ${totalVideos}</span>
                             <span class="stat-item stat-downloaded">已下载: ${downloadedVideos}</span>
-                            <span class="stat-item stat-pending">待下载: ${pendingVideos}</span>
+                            <span class="stat-item stat-pending">待下载: <span id="pending-${sub.id}">${pendingToShow}</span> <small id="pending-src-${sub.id}" style="opacity:.7;">(${pendingSource})</small></span>
                             ${sub.type === 'collection' ? `
                                 <span class="stat-item" id="expected-${sub.id}" style="background-color:#f3e5f5;color:#6a1b9a;">
-                                    远端总数: <span class="expected-count">加载中...</span>
-                                    <button class="btn btn-small btn-outline" style="margin-left:6px;" onclick="refreshExpected(${sub.id})">刷新</button>
+                                    远端总数: <span class="expected-count">${expectedText}</span>
+                                    <button class="btn btn-small btn-outline" style="margin-left:6px;" onclick="refreshExpected(${sub.id})">获取</button>
+                                    <button class="btn btn-small btn-outline" style="margin-left:6px;" onclick="refreshExpected(${sub.id}, true)">刷新</button>
                                 </span>
                             ` : ''}
                         </div>
@@ -682,12 +822,7 @@
             });
             
             document.getElementById('subscription-list').innerHTML = html || '<p>暂无订阅</p>';
-            // 渲染后，自动拉取合集的远端总数
-            result.forEach(sub => {
-                if (sub.type === 'collection') {
-                    refreshExpected(sub.id);
-                }
-            });
+            // 不再自动拉取，依赖本地缓存与按钮触发，避免频繁请求
         }
         
         // 切换订阅状态
@@ -1170,23 +1305,218 @@
             }
         }
 
-        // 加载视频列表
+        // —— 视频管理（新） ——
+        let __subStatsCache = [];
+
         async function loadVideos() {
-            const data = await apiRequest('/api/videos');
-            const html = data.videos?.map(video => `
-                <div class="list-item">
-                    <div>
-                        <strong>${video.title}</strong>
-                        <br><small>UP主: ${video.uploader} | 时长: ${video.duration}s</small>
-                    </div>
-                    <div>
-                        <span style="color: ${video.downloaded ? 'green' : 'orange'}">
-                            ${video.downloaded ? '已下载' : '未下载'}
-                        </span>
-                    </div>
+            // 展示容器
+            document.getElementById('media-overview').style.display = 'block';
+            document.getElementById('media-sub-stats').style.display = 'block';
+            document.getElementById('media-sub-detail').style.display = 'none';
+
+            await loadMediaOverview(false);
+            await loadSubscriptionStats();
+            await loadDirectoryStats();
+        }
+
+        async function loadMediaOverview(scan) {
+            const content = document.getElementById('media-overview-content');
+            content.innerHTML = '加载中...';
+            const data = await apiRequest(`/api/media/overview${scan ? '?scan=true' : ''}`);
+            const totalSize = formatBytes(data.total_size || 0);
+            const diskInfo = data.scan ? ` | 文件数: ${data.files_on_disk || 0} | 磁盘占用: ${formatBytes(data.size_on_disk || 0)} | 路径: ${data.download_path || ''}` : '';
+            content.innerHTML = `
+                <div>总视频: <strong>${data.total_videos || 0}</strong> | 已下载: <strong>${data.downloaded_videos || 0}</strong> | 总容量(数据库): <strong>${totalSize}</strong> ${diskInfo}</div>
+            `;
+        }
+
+        async function loadSubscriptionStats() {
+            const content = document.getElementById('media-sub-stats-content');
+            content.innerHTML = '加载中...';
+            const data = await apiRequest('/api/media/subscription-stats');
+            if (data && data.error) {
+                content.innerHTML = `<p class="status error">订阅统计获取失败：${escapeHtml(data.error)}</p>`;
+                __subStatsCache = [];
+                return;
+            }
+            __subStatsCache = Array.isArray(data) ? data : [];
+            renderSubscriptionStats();
+        }
+
+        function renderSubscriptionStats() {
+            const content = document.getElementById('media-sub-stats-content');
+            const kw = (document.getElementById('sub-filter').value || '').toLowerCase();
+            const list = __subStatsCache.filter(x => !kw || (x.subscription_name || '').toLowerCase().includes(kw));
+            if (list.length === 0) { content.innerHTML = '<p>暂无数据</p>'; return; }
+            const rows = list.map(x => `
+                <tr>
+                    <td>${x.subscription_name || '-'}</td>
+                    <td>${x.type || '-'}</td>
+                    <td style="text-align:right;">${x.total_videos}</td>
+                    <td style="text-align:right;">${x.downloaded_videos}</td>
+                    <td style="text-align:right;">${formatBytes(x.total_size || 0)}</td>
+                    <td>${x.latest_upload ? new Date(x.latest_upload).toLocaleString() : '-'}</td>
+                    <td><button class="btn btn-small" onclick="showSubscriptionDetail(${x.subscription_id}, '${(x.subscription_name || '').replace(/'/g, "\'")}')">查看明细</button></td>
+                </tr>
+            `).join('');
+            content.innerHTML = `
+                <div style="overflow:auto;">
+                  <table style="width:100%; border-collapse: collapse;">
+                    <thead>
+                      <tr style="text-align:left; border-bottom:1px solid #eee;">
+                        <th>订阅名称</th><th>类型</th><th style="text-align:right;">总数</th><th style="text-align:right;">已下载</th><th style="text-align:right;">容量</th><th>最近上传</th><th>操作</th>
+                      </tr>
+                    </thead>
+                    <tbody>${rows}</tbody>
+                  </table>
                 </div>
-            `).join('') || '<p>暂无视频</p>';
-            document.getElementById('video-list').innerHTML = html;
+            `;
+        }
+
+        async function showSubscriptionDetail(sid, name) {
+            document.getElementById('media-overview').style.display = 'none';
+            document.getElementById('media-sub-stats').style.display = 'none';
+            document.getElementById('media-sub-detail').style.display = 'block';
+            document.getElementById('media-sub-detail-title').innerText = `订阅明细 - ${name || sid}`;
+            await loadSubscriptionDetailPage(sid, 1);
+        }
+
+        function hideSubscriptionDetail() {
+            document.getElementById('media-overview').style.display = 'block';
+            document.getElementById('media-sub-stats').style.display = 'block';
+            document.getElementById('media-sub-detail').style.display = 'none';
+        }
+
+        async function loadSubscriptionDetailPage(sid, page) {
+            const size = 20;
+            const data = await apiRequest(`/api/media/subscriptions/${sid}/videos?page=${page}&size=${size}&include_disk=true`);
+            const rows = (data.videos || []).map(v => `
+                <tr>
+                    <td>${escapeHtml(v.title || '')}</td>
+                    <td>${v.bilibili_id || ''}</td>
+                    <td>${v.upload_date ? new Date(v.upload_date).toLocaleDateString() : '-'}</td>
+                    <td style="text-align:right;">${formatBytes(v.file_size || 0)}</td>
+                    <td>${v.on_disk ? '在磁盘' : '缺文件'}</td>
+                    <td><small>${v.video_path || '-'}</small></td>
+                </tr>
+            `).join('');
+            const total = data.total || 0;
+            const totalPages = Math.max(1, Math.ceil(total / size));
+            const pager = `
+                <div style="display:flex; gap:8px; align-items:center; margin-top:8px;">
+                    <button class="btn btn-outline" ${page<=1?'disabled':''} onclick="loadSubscriptionDetailPage(${sid}, ${page-1})">上一页</button>
+                    <span>第 ${page} / ${totalPages} 页，共 ${total} 条</span>
+                    <button class="btn btn-outline" ${page>=totalPages?'disabled':''} onclick="loadSubscriptionDetailPage(${sid}, ${page+1})">下一页</button>
+                </div>`;
+            document.getElementById('media-sub-detail-content').innerHTML = `
+                <div style="overflow:auto;">
+                  <table style="width:100%; border-collapse: collapse;">
+                    <thead>
+                      <tr style="text-align:left; border-bottom:1px solid #eee;">
+                        <th>标题</th><th>BV</th><th>上传日期</th><th style="text-align:right;">大小</th><th>磁盘</th><th>路径</th>
+                      </tr>
+                    </thead>
+                    <tbody>${rows || '<tr><td colspan="6">暂无数据</td></tr>'}</tbody>
+                  </table>
+                </div>
+                ${pager}
+            `;
+        }
+
+        function formatBytes(bytes) {
+            if (!bytes || bytes <= 0) return '0 B';
+            const units = ['B','KB','MB','GB','TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(1024));
+            return (bytes / Math.pow(1024, i)).toFixed(2) + ' ' + units[i];
+        }
+
+        function escapeHtml(s) {
+            return String(s).replace(/[&<>"] /g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',' ':' ' }[c] || c));
+        }
+
+        // —— 目录统计与明细 ——
+        async function loadDirectoryStats() {
+            const wrap = document.getElementById('media-dir-stats-content');
+            if (!wrap) return;
+            wrap.innerHTML = '加载中...';
+            const data = await apiRequest('/api/media/directories');
+            if (data && data.error) {
+                wrap.innerHTML = `<p class="status error">目录统计获取失败：${escapeHtml(data.error)}</p>`;
+                return;
+            }
+            const items = (data && Array.isArray(data.items)) ? data.items : [];
+            if (items.length === 0) { wrap.innerHTML = '<p>暂无目录数据</p>'; return; }
+            const rows = items.map(d => `
+              <tr>
+                <td>${escapeHtml(d.dir)}</td>
+                <td style="text-align:right;">${d.total_videos}</td>
+                <td style="text-align:right;">${d.downloaded_videos}</td>
+                <td style="text-align:right;">${formatBytes(d.total_size || 0)}</td>
+                <td><button class="btn btn-small" onclick="showDirectoryDetail('${d.dir.replace(/'/g, "\\'")}')">查看视频</button></td>
+              </tr>`).join('');
+            wrap.innerHTML = `
+              <div class="table-wrap">
+                <table class="data">
+                  <thead>
+                    <tr style="text-align:left; border-bottom:1px solid #eee;">
+                      <th>目录</th><th style="text-align:right;">总数</th><th style="text-align:right;">已下载</th><th style="text-align:right;">容量</th><th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>${rows}</tbody>
+                </table>
+              </div>`;
+        }
+
+        async function showDirectoryDetail(dir) {
+            document.getElementById('media-overview').style.display = 'none';
+            document.getElementById('media-sub-stats').style.display = 'none';
+            document.getElementById('media-sub-detail').style.display = 'none';
+            document.getElementById('media-dir-stats').style.display = 'none';
+            const panel = document.getElementById('media-dir-detail');
+            panel.style.display = 'block';
+            document.getElementById('media-dir-detail-title').innerText = `目录明细 - ${dir}`;
+            await loadDirectoryVideosPage(dir, 1);
+        }
+
+        function hideDirectoryDetail() {
+            document.getElementById('media-overview').style.display = 'block';
+            document.getElementById('media-sub-stats').style.display = 'block';
+            document.getElementById('media-dir-stats').style.display = 'block';
+            document.getElementById('media-dir-detail').style.display = 'none';
+        }
+
+        async function loadDirectoryVideosPage(dir, page) {
+            const size = 20;
+            const data = await apiRequest(`/api/media/directory-videos?dir=${encodeURIComponent(dir)}&page=${page}&size=${size}`);
+            const rows = (data.videos || []).map(v => `
+                <tr>
+                    <td>${escapeHtml(v.title || '')}</td>
+                    <td>${v.bilibili_id || ''}</td>
+                    <td>${v.upload_date ? new Date(v.upload_date).toLocaleDateString() : '-'}</td>
+                    <td style="text-align:right;">${formatBytes(v.file_size || 0)}</td>
+                    <td><small>${v.video_path || '-'}</small></td>
+                </tr>
+            `).join('');
+            const total = data.total || 0;
+            const totalPages = Math.max(1, Math.ceil(total / size));
+            const pager = `
+                <div style="display:flex; gap:8px; align-items:center; margin-top:8px;">
+                    <button class="btn btn-outline" ${page<=1?'disabled':''} onclick="loadDirectoryVideosPage('${dir.replace(/'/g, "\\'")}', ${page-1})">上一页</button>
+                    <span>第 ${page} / ${totalPages} 页，共 ${total} 条</span>
+                    <button class="btn btn-outline" ${page>=totalPages?'disabled':''} onclick="loadDirectoryVideosPage('${dir.replace(/'/g, "\\'")}', ${page+1})">下一页</button>
+                </div>`;
+            document.getElementById('media-dir-detail-content').innerHTML = `
+                <div class="table-wrap">
+                  <table class="data">
+                    <thead>
+                      <tr style="text-align:left; border-bottom:1px solid #eee;">
+                        <th>标题</th><th>BV</th><th>上传日期</th><th style="text-align:right;">大小</th><th>路径</th>
+                      </tr>
+                    </thead>
+                    <tbody>${rows || '<tr><td colspan="5">暂无数据</td></tr>'}</tbody>
+                  </table>
+                </div>
+                ${pager}`;
         }
 
         // 加载Cookie列表
@@ -1303,7 +1633,8 @@
 
         // 页面加载完成后初始化
         document.addEventListener('DOMContentLoaded', function() {
-            loadDashboard();
+            // 合并后总览需要同时加载系统状态与媒体数据
+            loadTabData('dashboard');
         });
     </script>
 </body>

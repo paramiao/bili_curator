@@ -5,7 +5,7 @@ from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, case
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
 from datetime import datetime
@@ -961,7 +961,7 @@ async def get_subscription_stats(db: Session = Depends(get_db)):
         db.query(
             Video.subscription_id.label('sid'),
             func.count(Video.id).label('total'),
-            func.sum(func.case((Video.video_path.isnot(None), 1), else_=0)).label('downloaded'),
+            func.sum(case((Video.video_path.isnot(None), 1), else_=0)).label('downloaded'),
             func.coalesce(func.sum(Video.file_size), 0).label('size'),
             func.max(Video.upload_date).label('latest_upload')
         )
@@ -1048,6 +1048,102 @@ async def get_subscription_videos_detail(
         }
 
     return {
+        "total": total,
+        "page": page,
+        "size": size,
+        "videos": [to_item(v) for v in items],
+    }
+
+
+# —— 按下载目录聚合统计与目录视频分页 ——
+@app.get("/api/media/directories")
+async def get_directory_stats(db: Session = Depends(get_db)):
+    """按下载根目录下的一级目录聚合统计
+    - 基于 DOWNLOAD_PATH 的直接子目录进行分组
+    - 统计: total_videos、downloaded_videos、total_size
+    """
+    download_root = Path(os.getenv('DOWNLOAD_PATH', '/app/downloads')).resolve()
+    # 仅统计有文件路径的视频
+    videos = db.query(Video).filter(Video.video_path.isnot(None)).all()
+    stats: Dict[str, Dict[str, Any]] = {}
+
+    for v in videos:
+        try:
+            vp = Path(v.video_path).resolve()
+            rel = vp.relative_to(download_root)
+            first = rel.parts[0] if len(rel.parts) > 0 else ""
+        except Exception:
+            # 路径不在下载根内，归为 _others
+            first = "_others"
+        if not first:
+            first = "_root"
+        s = stats.setdefault(first, {
+            "dir": first,
+            "total_videos": 0,
+            "downloaded_videos": 0,
+            "total_size": 0,
+        })
+        s["total_videos"] += 1
+        if v.video_path:
+            s["downloaded_videos"] += 1
+        s["total_size"] += int(v.file_size or 0)
+
+    # 转列表，按大小/数量倒序
+    result = list(stats.values())
+    result.sort(key=lambda x: (x["total_size"], x["downloaded_videos"], x["total_videos"]), reverse=True)
+    return {
+        "download_path": str(download_root),
+        "items": result,
+        "total_dirs": len(result),
+    }
+
+
+@app.get("/api/media/directory-videos")
+async def get_directory_videos(dir: str, page: int = 1, size: int = 20, db: Session = Depends(get_db)):
+    """获取某一级目录下的全部视频（含子目录），分页返回
+    - 参数 dir: DOWNLOAD_PATH 下的一级目录名（与 get_directory_stats 返回的 dir 对应）
+    - 通过 SQL LIKE 前缀匹配提高效率
+    """
+    if not dir:
+        raise HTTPException(status_code=400, detail="dir 不能为空")
+    download_root = Path(os.getenv('DOWNLOAD_PATH', '/app/downloads')).resolve()
+    base = (download_root / dir).resolve()
+    # 安全校验，防止目录穿越
+    try:
+        base.relative_to(download_root)
+    except Exception:
+        raise HTTPException(status_code=400, detail="非法目录")
+
+    # SQLite 前缀匹配
+    prefix = str(base) + os.sep
+    query = db.query(Video).filter(Video.video_path.isnot(None), Video.video_path.like(f"{prefix}%"))
+    total = query.count()
+    items = (
+        query.order_by(Video.created_at.desc())
+        .offset((page - 1) * size)
+        .limit(size)
+        .all()
+    )
+
+    def to_item(v: Video) -> Dict[str, Any]:
+        return {
+            "id": v.id,
+            "bilibili_id": v.bilibili_id,
+            "title": v.title,
+            "uploader": v.uploader,
+            "duration": v.duration,
+            "upload_date": v.upload_date.isoformat() if v.upload_date else None,
+            "video_path": v.video_path,
+            "file_size": v.file_size,
+            "downloaded": v.downloaded,
+            "subscription_id": v.subscription_id,
+            "created_at": v.created_at.isoformat() if v.created_at else None,
+            "updated_at": v.updated_at.isoformat() if v.updated_at else None,
+        }
+
+    return {
+        "dir": dir,
+        "download_path": str(download_root),
         "total": total,
         "page": page,
         "size": size,
