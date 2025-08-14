@@ -19,6 +19,14 @@ V6 在保留 V5 本地增量下载能力的基础上，引入 Web 后端与订�
 - __统一字段__：全链路统一使用 `is_active`、补齐 `updated_at`、仅使用 `bilibili_id`。
 - __Cookie 兼容性__：修复 `cookies.txt` Netscape 头部问题，提升 yt-dlp 解析稳定性。
 
+### 🛡️ 风控友好策略（V6 新增）
+- __分段抓取列表__：下载器与 `expected-total` 统计均采用手动分页，`--playlist-items` 每段 100，段间随机延时 2–4s，减少一次性拉取 999 条造成的风控命中。
+- __下载节流__：默认并发=1，单个视频间随机延时 5–10s，平滑请求节奏（家用 NAS 建议保持）。
+- __统一请求参数__：yt-dlp 调用统一 UA/Referer/重试次数/轻量睡眠，减少不同链路间差异。
+- __Cookie 最小化__：支持仅 SESSDATA 的 Cookie 传入，通过 `--cookies` 统一传给 yt-dlp。
+- __本地缓存回退__：获取到的列表写入 `playlist.json`，实时拉取失败时回退使用缓存，避免重复触发远端风控。
+- __统计与下载一致__：`GET /api/subscriptions/{id}/expected-total` 与下载端同样使用分段统计，确保口径一致。
+
 ### 🚀 快速操作（Docker 部署）
 ```bash
 # 启动/重启服务
@@ -45,6 +53,23 @@ curl -s -X POST http://localhost:8080/api/subscriptions/1/download
 # 查看订阅与其任务
 curl -s http://localhost:8080/api/subscriptions | jq .
 curl -s http://localhost:8080/api/subscriptions/1/tasks | jq .
+
+# 查看容器日志（注意指定 compose 文件）
+docker compose -f bili_curator_v6/docker-compose.yml logs -f
+```
+
+### 🗝️ Cookie 管理 API（启停与最小化）
+- 列出/创建/启停：
+  - `GET /api/cookies`
+  - `POST /api/cookies`（创建）
+  - `PATCH /api/cookies/{id}`（更新 `is_active`/字段）
+- 建议：优先使用“仅 SESSDATA”，后端会生成 Netscape 格式并经 `--cookies` 注入 yt-dlp。
+
+示例（禁用某个 Cookie）：
+```bash
+curl -s -X PATCH http://localhost:8080/api/cookies/1 \
+  -H 'Content-Type: application/json' \
+  -d '{"is_active": false}'
 ```
 
 ### 🧭 使用建议（家用场景）
@@ -52,6 +77,19 @@ curl -s http://localhost:8080/api/subscriptions/1/tasks | jq .
 - 定时检查：每 6–12 小时检查一次，如有新增再下载。
 - 遇到统计不一致：先执行“扫描 + 自动关联”，再看订阅统计。
 - 若点击“开始下载”秒完成：请先升级到包含“目录内去重”修复的版本并重启容器。
+
+### 💾 运行时存储与迁移
+- 数据库路径：环境变量 `DB_PATH`（默认 `/app/data/bili_curator.db`）。应用启动时会自动创建数据目录。
+- 轻量迁移：启动时自动补齐旧库缺失列（如 `download_tasks.video_id/bilibili_id`），并将旧 `video_id` 迁移到 `bilibili_id`；需重启容器使迁移生效。
+
+### 📜 playlist.json 缓存与回退
+- 位置：订阅目录下的 `playlist.json`。
+- 写入：成功获取到合集列表后写入；下一次下载优先使用实时获取，失败时回退到缓存。
+- 覆盖策略：同名直接覆盖为最新；建议偶发风控时减少刷新频率。
+- 风险：缓存可能过期，必要时先调用 `GET /api/subscriptions/{id}/expected-total` 以刷新。
+
+### 🧩 解析端与 Cookies 一致性
+- `POST /api/subscriptions/parse-collection` 已与下载/统计端对齐，统一通过 `--cookies` 注入（不再使用 `--add-header`）。
 
 ## ✨ 核心特性
 
@@ -71,9 +109,11 @@ curl -s http://localhost:8080/api/subscriptions/1/tasks | jq .
 - **自动缩略图**：下载视频封面图片
 
 ### ⚡ 高效下载策略
-- **多线程并发**：支持多个视频同时下载
+- **并发/节流（V6 服务模式）**：默认并发=1，视频间 5–10s 随机延时；可按需调整，但建议在风控窗口内保持保守配置。
 - **智能格式回退**：自动尝试最佳视频格式
 - **Cookie认证**：支持会员专享内容下载
+
+> 注：V5 命令行模式仍保留多线程配置；V6 服务模式为风控友好与稳定优先，默认收敛并发与请求频率。
 
 ## 🚀 快速开始
 

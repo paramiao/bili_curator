@@ -1,3 +1,5 @@
+
+注：`expected-total` 与下载链路保持一致的分段统计策略，确保口径一致且更友好于风控。
 # V6 需求说明（Requirements）
 
 更新时间：2025-08-14 13:19 (Asia/Shanghai)
@@ -27,6 +29,14 @@
 - 一致性：字段统一（`is_active/updated_at/bilibili_id`）、目录与命名统一、统计一致。
 - 性能：扫描与去重限定目录范围，避免全盘扫描与跨合集误判。
 
+### 风控友好与稳定性（V6 新增）
+- 列表/统计分段：合集列表与 `expected_total` 统计均采用 `--playlist-items` 手动分页（每段100），分段间 2–4s 延时，降低一次请求规模。
+- 下载节流：并发=1；单视频间 5–10s 延时，降低短时峰值请求。
+- 统一参数：yt-dlp 调用统一 UA/Referer/重试/轻睡眠，避免链路差异导致失败。
+- Cookie 最小化：支持仅 SESSDATA 传入，通过 `--cookies` 统一注入。
+- 列表缓存回退：实时拉取失败时回退使用本地 `playlist.json`，避免重复触发风控。
+- 412/风控响应：规划为仅告警不计失败（实现中）；401/403 计失败并结合阈值禁用 Cookie（实现中，见下）。
+
 ## 5. 接口与交互（关键）
 - Auto-Import：`POST /api/auto-import/scan`、`POST /api/auto-import/associate`、`POST /api/subscriptions/{id}/associate`
 - 下载控制：`POST /api/subscriptions/{id}/download`、`GET /api/subscriptions/{id}/tasks`
@@ -40,3 +50,11 @@
 - 订阅统计真实反映目录内产物状态；远端总数可独立刷新。
 - 点击“开始下载”如有新增则进入下载流程，不再出现“秒完成未下载”。
 - 家用默认配置下载并发=1，检查间隔=6–12h；日志有提示、错误可定位。
+
+## 7. 兼容性与迁移
+- 数据库自动迁移：启动时自动补齐旧库缺失列（如 `download_tasks.video_id/bilibili_id`），并将旧 `video_id` 迁移到 `bilibili_id`；新链路统一使用 `bilibili_id`。
+- 事务一致性：创建下载任务前做防御性 `rollback()`，避免上一异常影响当前事务。
+
+## 8. 运维与日志
+- Docker 启动/构建：`docker compose -f bili_curator_v6/docker-compose.yml up -d --build`
+- 查看日志（需指定 compose 文件）：`docker compose -f bili_curator_v6/docker-compose.yml logs -f`

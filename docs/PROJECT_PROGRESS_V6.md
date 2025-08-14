@@ -35,6 +35,13 @@
 - 目录内关联（关键修复）：`auto_import.py` 的匹配逻辑仅在订阅下载目录内判断，避免跨合集误匹配。
 - Cookie 头部兼容：修复 `cookies.txt` Netscape 头，统一通过 `--cookies` 传入 yt-dlp。
 
+新增（风控友好策略，已落地）：
+- 列表分段抓取：`--playlist-items` 每段 100，段间 2–4s 延时，减少一次性大拉取；与 `expected-total` 统计一致。
+- 下载节流：并发=1，视频间 5–10s 延时；统一 UA/Referer/重试/轻睡眠。
+- 列表缓存回退：实时拉取成功即写 `playlist.json`，失败时回退使用，避免重复触发风控。
+- Cookie 最小化：支持仅 SESSDATA。
+- 模型一致：下载任务仅写 `bilibili_id`；自动迁移补齐 `download_tasks.video_id/bilibili_id` 并迁移旧数据。
+
 关键文件与函数：
 - `bili_curator_v6/app/downloader.py`：`download_collection()`、`_get_collection_videos()`、`_download_single_video()`、`_download_with_ytdlp()`、`_create_nfo_file()`。
 - `bili_curator_v6/app/api.py`：`parse_collection_info()` 统一 Cookies；顶部补充 `import asyncio`。
@@ -72,6 +79,9 @@
 - Cookie 失效：403/401 时自动禁用当前 Cookie；前端应可见并允许切换。
 - 不要单点修复：涉及字段/模型/API/目录/下载流程的变更，必须做全链路一致性检查（遵循用户全局记忆）。
  - 目录匹配口径：所有“导入/关联/查重”均以“订阅下载目录”为边界，避免跨合集误判；若历史目录名与订阅名不一致，需先对齐。
+
+> 运维提示：使用 docker compose 时，建议指定 compose 文件查看日志：
+> `docker compose -f bili_curator_v6/docker-compose.yml logs -f`
 
 ## 六、下一步执行清单（可立即动作）
 - [x] 重启容器并执行回归（解析→建订阅→下载→校验）。
