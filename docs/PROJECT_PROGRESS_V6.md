@@ -1,10 +1,10 @@
 # V6 项目过程管理与阶段进展
 
-更新时间：2025-08-13 21:35 (Asia/Shanghai)
+更新时间：2025-08-14 08:05 (Asia/Shanghai)
 
 ## 一、状态总览
 - 目标：V6 订阅/下载全链路与 V5/Emby 标准一致，支持 Web 管理与自动化服务化。
-- 当前进度：下载端已统一目录/命名/Cookie 策略；API 解析与下载一致；ID/路径入库一致；移除历史不一致实现。
+- 当前进度：端到端联调闭环已打通（解析→订阅→下载→前端轮询/控制）；下载端统一目录/命名/Cookie；API 解析与下载一致；ID/路径入库一致；历史不一致实现已清理。
 
 ## 二、已完成（Done）
 - 目录结构：按订阅/合集分目录，输出到 `DOWNLOAD_PATH/<订阅名>/`（兼容 Emby 与历史数据）。
@@ -16,18 +16,26 @@
 - ID 一致性：统一使用 `bilibili_id`，避免 `video_id/bilibili_id` 混用。
 - 旧实现清理：移除早期版本的 `/_scan_existing_files` 与 `/_download_single_video`，避免走错路径。
 
+新增（下载稳定性与产物一致性）：
+- 产物查找与命名规范化：兼容 `.fXXXXX.mp4` 等后缀，通配回退选择最大文件；将最终视频重命名为标准 `*.mp4`。
+- NFO 同步生成：在视频落盘后立即生成同名 `.nfo` 并记录日志（便于验证 Emby 识别）。
+- 日志增强：输出“产物查找回退匹配/规范化重命名/已生成NFO”，定位问题更直观。
+
+新增：
+- 前端任务页：适配 `/api/tasks` 返回对象结构，使用 `task_id`/`progress_percent` 渲染，支持暂停/恢复/取消与轮询刷新。
+- 字段一致性：输入统一 `is_active`（兼容 `active`），模型/更新路径补齐 `updated_at` 并对外返回。
+- 兼容旧库：创建 `DownloadTask` 时同步写入 `video_id` 与 `bilibili_id`，避免旧库 `NOT NULL` 约束错误。
+- 联调闭环：解析→订阅→下载→前端轮询/控制 全流程打通。
+
 关键文件与函数：
 - `bili_curator_v6/app/downloader.py`：`download_collection()`、`_get_collection_videos()`、`_download_single_video()`、`_download_with_ytdlp()`、`_create_nfo_file()`。
 - `bili_curator_v6/app/api.py`：`parse_collection_info()` 统一 Cookies；顶部补充 `import asyncio`。
 
 ## 三、待办（TODO | 按优先级）
 1) 高优先级
-- 容器重启使改动生效：`docker compose restart`（当前解析接口报错为旧进程未载入 `import asyncio`）。
-- 全链路字段一致性复核：
-  - 统一使用 `is_active`（替代历史 `active`）。
-  - 模型/API 补齐 `updated_at`，前端/后端统一引用。
-  - 全局确保 `bilibili_id` 唯一使用。
-- 前端任务进度与统计：订阅任务 Tab 轮询展示；合集总数/已入库/待下载统计。
+- 任务状态端点一致性：统一 `GET /api/tasks/{task_id}/status` 与 `/api/tasks` 的数据源/索引，避免“任务不存在”。
+- 前端源码治理：将 `web/dist/` 内逻辑迁移到 `web/src/`，建立构建流程，便于维护与扩展统计展示。
+- 下载产物抽检：目录/命名/JSON/NFO/缩略图抽样核对，确保完全符合 V5 标准。
 
 2) 中优先级
 - 自动导入与定时：Docker 启动自动扫描导入；定时任务自动更新；Cookie 轮换/禁用可视化。
@@ -45,7 +53,7 @@
   2. 解析合集名：`POST /api/subscriptions/parse-collection { url }`。
   3. 创建订阅：`POST /api/subscriptions { name, type: collection, url }`。
   4. 启动下载：`POST /api/subscriptions/{id}/download`。
-  5. 轮询任务：`GET /api/tasks` 或 `GET /api/tasks/{task_id}/status`。
+  5. 轮询任务：`GET /api/tasks`（建议优先使用聚合端点；单任务端点将统一后再启用）或 `GET /api/tasks/{task_id}/status`。
   6. 验证落盘：`DOWNLOAD_PATH/<订阅名>/` 生成四件套，命名为标题；若冲突则“标题 - BV号”。
   7. 验证入库：`video_path/json_path/thumbnail_path` 指向订阅目录；`bilibili_id` 匹配。
   8. Emby 扫描识别 NFO 元数据。
@@ -57,9 +65,12 @@
 - 不要单点修复：涉及字段/模型/API/目录/下载流程的变更，必须做全链路一致性检查（遵循用户全局记忆）。
 
 ## 六、下一步执行清单（可立即动作）
-- [ ] 重启容器并执行回归（解析→建订阅→下载→校验）。
-- [ ] 字段一致性修复（is_active/updated_at/bilibili_id）与前端联动。
-- [ ] 前端任务页轮询/统计显示完善。
+- [x] 重启容器并执行回归（解析→建订阅→下载→校验）。
+- [x] 字段一致性修复（is_active/updated_at/bilibili_id）与前后端联动（主体完成）。
+- [x] 前端任务页轮询/统计显示完善。
+- [ ] 修复 `/api/tasks/{task_id}/status` 与 `/api/tasks` 的一致性。
+- [ ] 前端迁移至 `web/src/` 并增加构建链路。
+- [ ] 下载产物抽样核对与报告。
 - [ ] 定时自动导入与更新任务串接。
 
 ---
