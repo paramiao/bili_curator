@@ -5,12 +5,15 @@ from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
 from datetime import datetime
 import logging
 import asyncio
 import json
+import os
+from pathlib import Path
 
 from .models import (
     Subscription, Video, DownloadTask, Cookie, Settings, SubscriptionUpdate, CookieCreate, CookieUpdate, SettingUpdate,
@@ -907,6 +910,148 @@ async def get_videos(
             }
             for video in videos
         ]
+    }
+
+# 媒体统计与订阅维度统计
+@app.get("/api/media/overview")
+async def get_media_overview(scan: bool = False, db: Session = Depends(get_db)):
+    """媒体目录总览统计
+    - 默认基于数据库快速汇总（更轻量）
+    - 当 scan=true 时，额外扫描 DOWNLOAD_PATH 计算实际占用（可能较慢）
+    """
+    total_videos = db.query(func.count(Video.id)).scalar() or 0
+    downloaded_videos = db.query(func.count(Video.id)).filter(Video.video_path.isnot(None)).scalar() or 0
+    total_size_db = db.query(func.coalesce(func.sum(Video.file_size), 0)).scalar() or 0
+
+    overview: Dict[str, Any] = {
+        "total_videos": total_videos,
+        "downloaded_videos": downloaded_videos,
+        "total_size": int(total_size_db),
+        "scan": False,
+    }
+
+    if scan:
+        download_root = Path(os.getenv('DOWNLOAD_PATH', '/app/downloads'))
+        size_on_disk = 0
+        files_on_disk = 0
+        if download_root.exists():
+            for p in download_root.rglob("*"):
+                try:
+                    if p.is_file():
+                        files_on_disk += 1
+                        size_on_disk += p.stat().st_size
+                except Exception:
+                    # 忽略个别文件读取异常
+                    continue
+        overview.update({
+            "files_on_disk": files_on_disk,
+            "size_on_disk": int(size_on_disk),
+            "scan": True,
+            "download_path": str(download_root),
+        })
+
+    return overview
+
+
+@app.get("/api/media/subscription-stats")
+async def get_subscription_stats(db: Session = Depends(get_db)):
+    """按订阅聚合统计（数量、已下载、容量、最近上传）"""
+    # 数量与容量
+    counts = (
+        db.query(
+            Video.subscription_id.label('sid'),
+            func.count(Video.id).label('total'),
+            func.sum(func.case((Video.video_path.isnot(None), 1), else_=0)).label('downloaded'),
+            func.coalesce(func.sum(Video.file_size), 0).label('size'),
+            func.max(Video.upload_date).label('latest_upload')
+        )
+        .group_by(Video.subscription_id)
+        .all()
+    )
+
+    # 订阅名称
+    subs = {s.id: s for s in db.query(Subscription).all()}
+
+    result = []
+    for row in counts:
+        sid = row.sid
+        sub = subs.get(sid)
+        result.append({
+            "subscription_id": sid,
+            "subscription_name": sub.name if sub else None,
+            "type": sub.type if sub else None,
+            "total_videos": int(row.total or 0),
+            "downloaded_videos": int(row.downloaded or 0),
+            "total_size": int(row.size or 0),
+            "latest_upload": row.latest_upload.isoformat() if row.latest_upload else None,
+        })
+
+    # 确保包含没有视频记录但存在的订阅（total=0）
+    for sid, sub in subs.items():
+        if not any(item["subscription_id"] == sid for item in result):
+            result.append({
+                "subscription_id": sid,
+                "subscription_name": sub.name,
+                "type": sub.type,
+                "total_videos": 0,
+                "downloaded_videos": 0,
+                "total_size": 0,
+                "latest_upload": None,
+            })
+
+    # 按下载数量或大小排序，便于前端默认展示
+    result.sort(key=lambda x: (x["downloaded_videos"], x["total_size"]), reverse=True)
+    return result
+
+
+@app.get("/api/media/subscriptions/{subscription_id}/videos")
+async def get_subscription_videos_detail(
+    subscription_id: int,
+    page: int = 1,
+    size: int = 20,
+    include_disk: bool = True,
+    db: Session = Depends(get_db)
+):
+    """订阅下视频明细（分页）
+    - include_disk: 是否标记 on_disk（基于 video_path 存在性）
+    """
+    query = db.query(Video).filter(Video.subscription_id == subscription_id)
+    total = query.count()
+    items = (
+        query.order_by(Video.created_at.desc())
+        .offset((page - 1) * size)
+        .limit(size)
+        .all()
+    )
+
+    def to_item(v: Video) -> Dict[str, Any]:
+        on_disk = None
+        if include_disk:
+            try:
+                on_disk = bool(v.video_path and os.path.exists(v.video_path))
+            except Exception:
+                on_disk = False
+        return {
+            "id": v.id,
+            "bilibili_id": v.bilibili_id,
+            "title": v.title,
+            "uploader": v.uploader,
+            "duration": v.duration,
+            "upload_date": v.upload_date.isoformat() if v.upload_date else None,
+            "video_path": v.video_path,
+            "file_size": v.file_size,
+            "downloaded": v.downloaded,
+            "subscription_id": v.subscription_id,
+            "created_at": v.created_at.isoformat() if v.created_at else None,
+            "updated_at": v.updated_at.isoformat() if v.updated_at else None,
+            "on_disk": on_disk,
+        }
+
+    return {
+        "total": total,
+        "page": page,
+        "size": size,
+        "videos": [to_item(v) for v in items],
     }
 
 @app.delete("/api/videos/{video_id}")
