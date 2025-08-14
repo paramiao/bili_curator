@@ -372,7 +372,12 @@
             <div id="subscriptions" class="tab-content">
                 <div class="section-header">
                     <h2>订阅管理</h2>
-                    <button onclick="showAddSubscription()" class="btn btn-primary">添加订阅</button>
+                    <div style="display:flex; gap:8px; flex-wrap: wrap; align-items:center;">
+                        <button onclick="showAddSubscription()" class="btn btn-primary">添加订阅</button>
+                        <button onclick="scanAll()" class="btn btn-secondary">全量扫描导入</button>
+                        <button onclick="associateAll()" class="btn btn-outline">全量自动关联</button>
+                        <button onclick="loadSubscriptions()" class="btn btn-info">刷新列表</button>
+                    </div>
                 </div>
                 <div id="subscription-list"></div>
             </div>
@@ -550,6 +555,20 @@
             }
         }
 
+        // 刷新并显示合集的远端总数
+        async function refreshExpected(subscriptionId) {
+            const el = document.getElementById(`expected-${subscriptionId}`);
+            if (!el) return;
+            const countEl = el.querySelector('.expected-count');
+            if (countEl) countEl.textContent = '加载中...';
+            const data = await apiRequest(`/api/subscriptions/${subscriptionId}/expected-total`);
+            if (data && typeof data.expected_total_videos === 'number') {
+                if (countEl) countEl.textContent = String(data.expected_total_videos);
+            } else {
+                if (countEl) countEl.textContent = '获取失败';
+            }
+        }
+
         // 加载仪表板
         async function loadDashboard() {
             const data = await apiRequest('/api/status');
@@ -631,6 +650,7 @@
                             </div>
                             <div class="subscription-controls">
                                 <button onclick="downloadSubscription(${sub.id})" class="btn btn-primary">开始下载</button>
+                                <button onclick="associateSubscription(${sub.id})" class="btn btn-outline">自动关联</button>
                                 <button onclick="viewSubscription(${sub.id})" class="btn btn-info">查看详情</button>
                                 <button onclick="editSubscription(${sub.id})" class="btn btn-secondary">编辑</button>
                                 <button onclick="toggleSubscription(${sub.id}, ${sub.is_active})" class="btn ${sub.is_active ? 'btn-warning' : 'btn-success'}">
@@ -644,6 +664,12 @@
                             <span class="stat-item stat-total">总计: ${totalVideos}</span>
                             <span class="stat-item stat-downloaded">已下载: ${downloadedVideos}</span>
                             <span class="stat-item stat-pending">待下载: ${pendingVideos}</span>
+                            ${sub.type === 'collection' ? `
+                                <span class="stat-item" id="expected-${sub.id}" style="background-color:#f3e5f5;color:#6a1b9a;">
+                                    远端总数: <span class="expected-count">加载中...</span>
+                                    <button class="btn btn-small btn-outline" style="margin-left:6px;" onclick="refreshExpected(${sub.id})">刷新</button>
+                                </span>
+                            ` : ''}
                         </div>
                         
                         <div style="margin-top: 8px; font-size: 14px; color: #666;">
@@ -656,6 +682,12 @@
             });
             
             document.getElementById('subscription-list').innerHTML = html || '<p>暂无订阅</p>';
+            // 渲染后，自动拉取合集的远端总数
+            result.forEach(sub => {
+                if (sub.type === 'collection') {
+                    refreshExpected(sub.id);
+                }
+            });
         }
         
         // 切换订阅状态
@@ -751,10 +783,7 @@
                 }
                 data.url = url;
                 
-                // 如果没有名称，尝试自动生成
-                if (!name) {
-                    name = '合集订阅 - ' + new Date().toLocaleString();
-                }
+                // 留空名称由后端自动识别（uploader：playlist_title）
                 
             } else if (type === 'uploader') {
                 const uploader = document.getElementById('sub-uploader').value;
@@ -847,6 +876,40 @@
                 } else {
                     loadTabData('tasks');
                 }
+            }
+        }
+
+        // 全量扫描导入
+        async function scanAll() {
+            if (!confirm('确认对下载目录进行全量扫描并导入？')) return;
+            const res = await apiRequest('/api/auto-import/scan', { method: 'POST' });
+            if (res && res.error) {
+                alert('扫描导入失败: ' + res.error);
+            } else {
+                alert('扫描导入完成');
+                loadSubscriptions();
+            }
+        }
+
+        // 全量自动关联
+        async function associateAll() {
+            const res = await apiRequest('/api/auto-import/associate', { method: 'POST' });
+            if (res && res.error) {
+                alert('自动关联失败: ' + res.error);
+            } else {
+                alert('自动关联完成');
+                loadSubscriptions();
+            }
+        }
+
+        // 针对单个订阅进行自动关联（按订阅目录前缀）
+        async function associateSubscription(id) {
+            const res = await apiRequest(`/api/subscriptions/${id}/associate`, { method: 'POST' });
+            if (res && res.error) {
+                alert('自动关联失败: ' + res.error);
+            } else {
+                alert('已触发自动关联');
+                loadSubscriptions();
             }
         }
 
@@ -1133,9 +1196,10 @@
                 <div class="list-item">
                     <div>
                         <strong>${cookie.name}</strong>
-                        <br><small>使用次数: ${cookie.usage_count} | 状态: ${cookie.active ? '活跃' : '禁用'}</small>
+                        <br><small>使用次数: ${cookie.usage_count} | 状态: ${cookie.is_active ? '活跃' : '禁用'}</small>
                     </div>
                     <div>
+                        <button class="btn" onclick="toggleCookieActive(${cookie.id}, ${cookie.is_active})">${cookie.is_active ? '禁用' : '启用'}</button>
                         <button class="btn" onclick="validateCookie(${cookie.id})">验证</button>
                         <button class="btn" onclick="deleteCookie(${cookie.id})" style="background:#dc3545;">删除</button>
                     </div>
@@ -1184,6 +1248,20 @@
             const result = await apiRequest(`/api/cookies/${id}/validate`, { method: 'POST' });
             alert(result.valid ? 'Cookie有效' : 'Cookie无效');
             loadCookies();
+        }
+
+        // 启用/禁用 Cookie
+        async function toggleCookieActive(id, current) {
+            const payload = { is_active: !current };
+            const result = await apiRequest(`/api/cookies/${id}`, {
+                method: 'PUT',
+                body: JSON.stringify(payload)
+            });
+            if (result && result.error) {
+                alert('切换失败: ' + result.error);
+            } else {
+                loadCookies();
+            }
         }
 
         // 删除Cookie

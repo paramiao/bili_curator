@@ -40,8 +40,9 @@ class BilibiliDownloaderV6:
         # 获取合集视频列表
         video_list = await self._get_collection_videos(subscription.url, db)
         
-        # 扫描已有文件
-        existing_videos = self._scan_existing_files(db)
+        # 扫描已有文件（限定在当前订阅目录，避免跨合集干扰），数据库仍做全局去重
+        subscription_dir = Path(self._create_subscription_directory(subscription))
+        existing_videos = self._scan_existing_files(db, subscription_dir=subscription_dir)
         
         # 过滤需要下载的视频
         new_videos = []
@@ -143,8 +144,11 @@ class BilibiliDownloaderV6:
                 except Exception:
                     pass
     
-    def _scan_existing_files(self, db: Session) -> Dict[str, str]:
-        """扫描已有文件，构建视频ID映射"""
+    def _scan_existing_files(self, db: Session, subscription_dir: Optional[Path] = None) -> Dict[str, str]:
+        """扫描已有文件，构建视频ID映射
+        - 数据库：全局已下载视频（任何订阅）
+        - 文件系统：仅扫描当前订阅目录（若提供），避免跨合集误判与性能问题
+        """
         existing_videos = {}
         
         # 从数据库获取已下载的视频
@@ -153,8 +157,10 @@ class BilibiliDownloaderV6:
             existing_videos[video.bilibili_id] = video.video_path
         
         # 同时扫描文件系统中的JSON文件（兼容V5格式），递归子目录，支持 *.json 与 *.info.json
+        # 仅限当前订阅目录（若提供），否则回退到全局下载目录
+        base_dir = Path(subscription_dir) if subscription_dir else self.output_dir
         scanned = set()
-        for json_file in list(self.output_dir.rglob("*.json")) + list(self.output_dir.rglob("*.info.json")):
+        for json_file in list(base_dir.rglob("*.json")) + list(base_dir.rglob("*.info.json")):
             # 避免重复处理相同路径
             if json_file in scanned:
                 continue
@@ -162,20 +168,40 @@ class BilibiliDownloaderV6:
             try:
                 with open(json_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                    video_id = data.get('id')
-                    if video_id and video_id not in existing_videos:
-                        # 计算可能的mp4文件名
-                        name = json_file.name
-                        if name.endswith('.info.json'):
-                            base_name = name[:-10]
-                        elif name.endswith('.json'):
-                            base_name = name[:-5]
-                        else:
-                            base_name = json_file.stem
-                        # 假设视频文件与json同目录
-                        video_file = json_file.parent / f"{base_name}.mp4"
-                        if video_file.exists():
-                            existing_videos[video_id] = str(video_file)
+                    ids: List[str] = []
+                    # 兼容不同结构：dict含id、dict含entries、list[dict]
+                    if isinstance(data, dict):
+                        if 'id' in data and isinstance(data['id'], str):
+                            ids.append(data['id'])
+                        if 'entries' in data and isinstance(data['entries'], list):
+                            for it in data['entries']:
+                                if isinstance(it, dict) and isinstance(it.get('id'), str):
+                                    ids.append(it['id'])
+                    elif isinstance(data, list):
+                        for it in data:
+                            if isinstance(it, dict) and isinstance(it.get('id'), str):
+                                ids.append(it['id'])
+
+                    if not ids:
+                        continue
+
+                    # 计算可能的视频文件名（与json同名）并登记
+                    name = json_file.name
+                    if name.endswith('.info.json'):
+                        base_name = name[:-10]
+                    elif name.endswith('.json'):
+                        base_name = name[:-5]
+                    else:
+                        base_name = json_file.stem
+                    # 假设视频文件与json同目录（多后缀尝试）
+                    for vid in ids:
+                        if vid in existing_videos:
+                            continue
+                        for ext in ['.mp4', '.mkv', '.webm']:
+                            video_file = json_file.parent / f"{base_name}{ext}"
+                            if video_file.exists():
+                                existing_videos[vid] = str(video_file)
+                                break
             except Exception as e:
                 logger.warning(f"读取JSON文件 {json_file} 失败: {e}")
         

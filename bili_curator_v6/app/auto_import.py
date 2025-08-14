@@ -204,24 +204,47 @@ class AutoImportService:
     def _find_matching_videos(self, subscription: Subscription, session: Session) -> List[Video]:
         """根据订阅类型查找匹配的视频"""
         query = session.query(Video)
-        
+
         if subscription.type == "uploader" and subscription.uploader_id:
             # UP主订阅：匹配uploader_id
             return query.filter(Video.uploader_id == subscription.uploader_id).all()
-        
+
         elif subscription.type == "keyword" and subscription.keyword:
             # 关键词订阅：匹配标题或标签
             keyword = subscription.keyword.lower()
             return query.filter(
                 Video.title.ilike(f"%{keyword}%")
             ).all()
-        
-        elif subscription.type == "collection" and subscription.url:
-            # 合集订阅：这里需要更复杂的逻辑，暂时返回空
-            # TODO: 实现基于合集URL的视频匹配
-            return []
-        
+
+        elif subscription.type == "collection" and (subscription.name or subscription.url):
+            # 合集订阅：按订阅目录匹配（与下载器目录规则一致：/app/downloads/<sanitized(subscription.name)>）
+            sub_dir = self._compute_subscription_dir(subscription)
+            if sub_dir:
+                prefix = str(sub_dir).rstrip('/') + '/'
+                # 匹配视频/JSON路径落在该目录下的记录
+                return query.filter(
+                    (Video.video_path.isnot(None) & Video.video_path.ilike(f"{prefix}%")) |
+                    (Video.json_path.isnot(None) & Video.json_path.ilike(f"{prefix}%"))
+                ).all()
+
         return []
+
+    def _compute_subscription_dir(self, subscription: Subscription) -> Optional[Path]:
+        """计算订阅对应的目录（与下载器命名保持一致）"""
+        base_download = self.download_dir
+        name = (getattr(subscription, 'name', None) or '').strip()
+        dir_name = self._sanitize_filename(name) if name else None
+        if not dir_name:
+            # 兜底
+            dir_name = self._sanitize_filename(f"订阅_{subscription.id}")
+        return base_download / dir_name
+
+    def _sanitize_filename(self, filename: str) -> str:
+        import re
+        illegal = r'[<>:"/\\|?*]'
+        s = re.sub(illegal, '_', filename or '')
+        s = s.strip(' .')
+        return s[:100] if len(s) > 100 else s
 
 # 全局自动导入服务实例
 auto_import_service = AutoImportService()

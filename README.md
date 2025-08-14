@@ -2,6 +2,57 @@
 
 > 🚀 专业的B站合集视频下载和管理工具，支持智能增量下载、Emby媒体库集成
 
+## 🔥 V6 近期更新（服务化/订阅管理）
+
+V6 在保留 V5 本地增量下载能力的基础上，引入 Web 后端与订阅管理，新增自动导入与目录内去重等能力，前后端口径统一。
+
+### ✅ 新增/变更点（后端与数据一致性）
+- __订阅解析与命名统一__：`parse-collection` 优先使用 yt-dlp 的“合集层级”元数据（`--flat-playlist --dump-single-json`），自动生成订阅名（`uploader + playlist_title`），并做目录安全清洗，确保与下载目录一致。
+- __目录内关联与去重__：
+  - `auto_import.py` 仅按“订阅下载目录”进行视频匹配，避免跨合集误判；
+  - `EnhancedTaskManager` 下载前查重改为传入当前订阅目录，避免“任务秒完成但未下载”的问题。
+- __自动导入与统计刷新__：
+  - `POST /api/auto-import/scan` 扫描 `/app/downloads` 下产物(JSON/视频)并入库；
+  - `POST /api/auto-import/associate` 将入库视频按目录规则自动关联到订阅并刷新统计；
+  - `POST /api/subscriptions/{id}/associate` 针对单个订阅进行关联与统计刷新。
+- __远端总数独立__：新增 `GET /api/subscriptions/{id}/expected-total`，本地统计(`total/downloaded/pending`)与远端总数(`expected_total`)分离，前端可分别展示与刷新。
+- __统一字段__：全链路统一使用 `is_active`、补齐 `updated_at`、仅使用 `bilibili_id`。
+- __Cookie 兼容性__：修复 `cookies.txt` Netscape 头部问题，提升 yt-dlp 解析稳定性。
+
+### 🚀 快速操作（Docker 部署）
+```bash
+# 启动/重启服务
+docker compose -f bili_curator_v6/docker-compose.yml up -d
+
+# 健康检查
+curl -s http://localhost:8080/health
+
+# 扫描本地已下载产物并入库
+curl -s -X POST http://localhost:8080/api/auto-import/scan
+
+# 自动将本地视频关联到订阅并刷新统计（按订阅目录匹配）
+curl -s -X POST http://localhost:8080/api/auto-import/associate
+
+# 针对单个订阅执行关联与统计刷新（示例：ID=1）
+curl -s -X POST http://localhost:8080/api/subscriptions/1/associate
+
+# 刷新并查看远端总数（与本地统计口径独立）
+curl -s http://localhost:8080/api/subscriptions/1/expected-total
+
+# 启动某订阅下载（示例：ID=1）
+curl -s -X POST http://localhost:8080/api/subscriptions/1/download
+
+# 查看订阅与其任务
+curl -s http://localhost:8080/api/subscriptions | jq .
+curl -s http://localhost:8080/api/subscriptions/1/tasks | jq .
+```
+
+### 🧭 使用建议（家用场景）
+- 并发下载：建议设为 1，减少 NAS 负载。
+- 定时检查：每 6–12 小时检查一次，如有新增再下载。
+- 遇到统计不一致：先执行“扫描 + 自动关联”，再看订阅统计。
+- 若点击“开始下载”秒完成：请先升级到包含“目录内去重”修复的版本并重启容器。
+
 ## ✨ 核心特性
 
 ### 🧠 智能增量下载

@@ -48,6 +48,15 @@ class EnhancedTaskManager:
         self.task_controls: Dict[str, asyncio.Event] = {}  # 用于暂停/恢复控制
         self.task_cancellations: Dict[str, bool] = {}  # 用于取消控制
     
+    def _safe_log_title(self, video_info: Dict[str, Any]) -> str:
+        """为日志生成更稳妥的标题：优先 title，其次 bilibili_id/id，最后 Unknown"""
+        title = (video_info or {}).get('title')
+        if title and str(title).strip().lower() not in ('', 'unknown', 'none', 'null'):
+            return str(title).strip()
+        # 兼容不同字段命名
+        vid = (video_info or {}).get('bilibili_id') or (video_info or {}).get('id')
+        return str(vid) if vid else 'Unknown'
+    
     async def start_subscription_download(self, subscription_id: int) -> str:
         """启动订阅下载任务"""
         db = next(get_db())
@@ -123,10 +132,16 @@ class EnhancedTaskManager:
             task_progress.total_videos = len(video_list)
             await self._update_task_log(task_id, f"发现 {len(video_list)} 个视频")
             
-            # 阶段3: 检查重复视频
+            # 阶段3: 检查重复视频（限定当前订阅目录，避免跨合集误判）
             await self._update_task_status(task_id, TaskStatus.CHECKING, "正在检查重复视频...")
             
-            existing_videos = downloader._scan_existing_files(db)
+            # 计算订阅目录（与下载器目录规则一致）
+            try:
+                sub_dir_path = downloader._create_subscription_directory(subscription)
+            except Exception:
+                sub_dir_path = None
+            from pathlib import Path
+            existing_videos = downloader._scan_existing_files(db, Path(sub_dir_path) if sub_dir_path else None)
             new_videos = []
             
             for video_info in video_list:
@@ -155,8 +170,8 @@ class EnhancedTaskManager:
                 # 等待暂停控制
                 await self.task_controls[task_id].wait()
                 
-                # 更新当前下载视频
-                video_title = video_info.get('title', 'Unknown')
+                # 更新当前下载视频（避免 Unknown 展示）
+                video_title = self._safe_log_title(video_info)
                 task_progress.current_video = video_title
                 task_progress.progress_percent = (i / len(new_videos)) * 100
                 await self._update_task_log(task_id, f"开始下载: {video_title}")
@@ -169,12 +184,16 @@ class EnhancedTaskManager:
                     
                     if result['success']:
                         task_progress.downloaded_videos += 1
-                        await self._update_task_log(task_id, f"下载完成: {video_title}")
+                        # 优先使用下载结果返回的实际标题
+                        done_title = result.get('title') or video_title
+                        await self._update_task_log(task_id, f"下载完成: {done_title}")
                     else:
-                        await self._update_task_log(task_id, f"下载失败: {video_title} - {result.get('error', 'Unknown error')}")
+                        fail_title = result.get('title') or video_title
+                        await self._update_task_log(task_id, f"下载失败: {fail_title} - {result.get('error', 'Unknown error')}")
                         
                 except Exception as e:
-                    await self._update_task_log(task_id, f"下载异常: {video_title} - {str(e)}")
+                    err_title = self._safe_log_title(video_info)
+                    await self._update_task_log(task_id, f"下载异常: {err_title} - {str(e)}")
             
             # 任务完成
             task_progress.progress_percent = 100.0
