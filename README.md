@@ -19,6 +19,12 @@ V6 在保留 V5 本地增量下载能力的基础上，引入 Web 后端与订�
 - __统一字段__：全链路统一使用 `is_active`、补齐 `updated_at`、仅使用 `bilibili_id`。
 - __Cookie 兼容性__：修复 `cookies.txt` Netscape 头部问题，提升 yt-dlp 解析稳定性。
 
+### 🖥️ 前端“总览”与统计改动（V6 合并）
+- __导航合并__：将“仪表盘”和“视频管理”合并为“总览”，同页展示系统状态、媒体总览、订阅统计、目录统计/明细。
+- __远端总数本地缓存__：前端对 `expected-total` 结果做 1 小时 `localStorage` 缓存；仅在点击“获取/刷新”时请求远端，避免频繁触发风控。
+- __“待下载”口径统一__：优先显示“远端总数 − 已下载”，失败或未获取时回退“本地总计 − 已下载”，并做非负裁剪；界面标注来源（远端/本地）。
+- __错误提示友好化__：当接口返回 4xx/5xx 或非 JSON 时，前端以明确的错误条提示，不再长时间停留在“加载中…”。
+
 ### 🛡️ 风控友好策略（V6 新增）
 - __分段抓取列表__：下载器与 `expected-total` 统计均采用手动分页，`--playlist-items` 每段 100，段间随机延时 2–4s，减少一次性拉取 999 条造成的风控命中。
 - __下载节流__：默认并发=1，单个视频间随机延时 5–10s，平滑请求节奏（家用 NAS 建议保持）。
@@ -56,6 +62,19 @@ curl -s http://localhost:8080/api/subscriptions/1/tasks | jq .
 
 # 查看容器日志（注意指定 compose 文件）
 docker compose -f bili_curator_v6/docker-compose.yml logs -f
+
+# —— 媒体总览/统计相关 API ——
+# 媒体总览（可触发磁盘扫描）
+curl -s "http://localhost:8080/api/media/overview?scan=true" | jq .
+
+# 订阅聚合统计（总数/已下载/容量/最近上传）
+curl -s http://localhost:8080/api/media/subscription-stats | jq .
+
+# 目录聚合统计（下载根目录一级子目录）
+curl -s http://localhost:8080/api/media/directories | jq .
+
+# 查看某目录下的视频明细（分页）
+curl -s "http://localhost:8080/api/media/directory-videos?dir=%2Fapp%2Fdownloads%2F某目录&page=1&size=20" | jq .
 ```
 
 ### 🗝️ Cookie 管理 API（启停与最小化）
