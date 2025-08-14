@@ -88,6 +88,9 @@ class Cookie(Base):
     bili_jct = Column(String(255))
     dedeuserid = Column(String(100))
     is_active = Column(Boolean, default=True)
+    # 失败计数与最近失败时间，用于按阈值禁用
+    failure_count = Column(Integer, default=0)
+    last_failure_at = Column(DateTime)
     usage_count = Column(Integer, default=0)
     last_used = Column(DateTime)
     created_at = Column(DateTime, default=datetime.now)
@@ -160,7 +163,10 @@ class DownloadTask(Base):
 
 # 数据库连接和会话管理
 class Database:
-    def __init__(self, db_path: str = "data/bili_curator.db"):
+    def __init__(self, db_path: str = None):
+        # 统一数据库路径：优先环境变量 DB_PATH，其次默认 /app/data/bili_curator.db
+        if db_path is None:
+            db_path = os.environ.get("DB_PATH", "/app/data/bili_curator.db")
         # 确保数据目录存在
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         
@@ -220,8 +226,21 @@ class Database:
             # cookies 表缺失列
             if not has_column('cookies', 'updated_at'):
                 conn.exec_driver_sql("ALTER TABLE cookies ADD COLUMN updated_at DATETIME")
+            # 新增：失败阈值相关列（幂等）
+            if not has_column('cookies', 'failure_count'):
+                conn.exec_driver_sql("ALTER TABLE cookies ADD COLUMN failure_count INTEGER DEFAULT 0")
+            if not has_column('cookies', 'last_failure_at'):
+                conn.exec_driver_sql("ALTER TABLE cookies ADD COLUMN last_failure_at DATETIME")
 
-            # download_tasks 表：新增 bilibili_id，并从旧的 video_id 迁移数据
+            # download_tasks 表：补齐缺失列
+            # 1) 如缺少 video_id（旧库可能没有），则新增可空的 video_id 以兼容当前模型
+            if not has_column('download_tasks', 'video_id'):
+                try:
+                    conn.exec_driver_sql("ALTER TABLE download_tasks ADD COLUMN video_id VARCHAR(50)")
+                except Exception as ee:
+                    print(f"新增 download_tasks.video_id 失败: {ee}")
+
+            # 2) 新增 bilibili_id，并从旧的 video_id 迁移数据
             if not has_column('download_tasks', 'bilibili_id'):
                 conn.exec_driver_sql("ALTER TABLE download_tasks ADD COLUMN bilibili_id VARCHAR(50)")
                 # 如果存在旧列 video_id，将其数据迁移到 bilibili_id

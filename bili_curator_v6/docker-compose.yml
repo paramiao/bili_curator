@@ -27,6 +27,8 @@ services:
       - DOWNLOAD_PATH=/app/downloads
       # 设置时区为上海时区
       - TZ=Asia/Shanghai
+      # 使用已存在的旧数据库文件，确保迁移在该库上执行
+      - DB_PATH=/app/data/bilibili_curator.db
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]

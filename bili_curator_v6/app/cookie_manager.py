@@ -16,6 +16,24 @@ class SimpleCookieManager:
         self.current_cookie_id = None
         self.last_switch_time = 0
         self.min_switch_interval = 300  # 5分钟最小切换间隔
+        # 失败阈值策略
+        self.failure_threshold = 3            # 在时间窗口内最多允许失败次数
+        self.failure_window_minutes = 15      # 时间窗口分钟数
+        self._checked_schema = False
+        self._has_failure_columns = False
+
+    def _ensure_failure_columns(self, db: Session):
+        """检查 SQLite 表是否存在 failure_count/last_failure_at 列，避免老库报错"""
+        if self._checked_schema:
+            return
+        try:
+            rows = db.execute("PRAGMA table_info(cookies)").fetchall()
+            cols = {r[1] for r in rows}
+            self._has_failure_columns = {'failure_count', 'last_failure_at'}.issubset(cols)
+        except Exception:
+            self._has_failure_columns = False
+        finally:
+            self._checked_schema = True
     
     def get_available_cookie(self, db: Session) -> Optional[Cookie]:
         """获取可用的Cookie"""
@@ -65,6 +83,41 @@ class SimpleCookieManager:
             
             # 强制切换到其他Cookie
             self.current_cookie_id = None
+
+    def reset_failures(self, db: Session, cookie_id: int):
+        """重置失败计数（验证成功或下载成功时调用）"""
+        self._ensure_failure_columns(db)
+        if not self._has_failure_columns:
+            return
+        cookie = db.query(Cookie).filter(Cookie.id == cookie_id).first()
+        if cookie:
+            cookie.failure_count = 0
+            cookie.last_failure_at = None
+            db.commit()
+
+    def record_failure(self, db: Session, cookie_id: int, reason: str = ""):
+        """记录一次失败，若在窗口内达到阈值则禁用"""
+        self._ensure_failure_columns(db)
+        cookie = db.query(Cookie).filter(Cookie.id == cookie_id).first()
+        if not cookie:
+            return
+        if not self._has_failure_columns:
+            # 回退策略：老库不支持失败计数，保持原行为直接禁用，避免无限错误循环
+            self.mark_cookie_banned(db, cookie_id, reason or "old schema, direct ban")
+            return
+
+        now = datetime.now()
+        # 窗口外失败重置
+        if not cookie.last_failure_at or (now - cookie.last_failure_at).total_seconds() > self.failure_window_minutes * 60:
+            cookie.failure_count = 0
+        cookie.failure_count = (cookie.failure_count or 0) + 1
+        cookie.last_failure_at = now
+        db.commit()
+
+        logger.warning(f"Cookie {cookie.name} 失败计数: {cookie.failure_count}/{self.failure_threshold}，原因: {reason}")
+
+        if cookie.failure_count >= self.failure_threshold:
+            self.mark_cookie_banned(db, cookie_id, f"达到失败阈值({self.failure_threshold})，原因: {reason}")
     
     async def validate_cookie(self, cookie: Cookie) -> bool:
         """验证Cookie是否有效"""
@@ -125,7 +178,9 @@ class SimpleCookieManager:
             try:
                 is_valid = await self.validate_cookie(cookie)
                 if not is_valid:
-                    self.mark_cookie_banned(db, cookie.id, "验证失败")
+                    self.record_failure(db, cookie.id, "验证失败")
+                else:
+                    self.reset_failures(db, cookie.id)
                 await asyncio.sleep(random.uniform(2, 5))  # 避免请求过快
             except Exception as e:
                 logger.error(f"验证Cookie {cookie.name} 时出错: {e}")
