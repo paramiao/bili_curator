@@ -7,13 +7,17 @@
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; }
-        .header { background: #00a1d6; color: white; padding: 1rem; text-align: center; }
+        .header { background: linear-gradient(135deg, #00a1d6 0%, #0084b4 100%); color: white; padding: 2rem 1rem; text-align: center; box-shadow: 0 4px 20px rgba(0,161,214,0.3); }
+        .header h1 { font-size: 2rem; font-weight: 700; margin-bottom: 0.5rem; }
+        .header p { opacity: 0.9; font-size: 1.1rem; }
         .container { max-width: 1200px; margin: 2rem auto; padding: 0 1rem; }
-        .card { background: white; border-radius: 10px; padding: 1.25rem 1.5rem; margin-bottom: 1.25rem; box-shadow: 0 2px 10px rgba(0,0,0,0.06); border: 1px solid #eef2f7; }
+        .card { background: white; border-radius: 12px; padding: 1.5rem 2rem; margin-bottom: 1.5rem; box-shadow: 0 4px 20px rgba(0,0,0,0.08); border: 1px solid #e5e7eb; transition: all 0.3s ease; }
+        .card:hover { box-shadow: 0 8px 30px rgba(0,0,0,0.12); transform: translateY(-2px); }
         .card h3 { margin-bottom: 0.5rem; font-size: 1.1rem; color: #333; }
-        .tabs { display: flex; border-bottom: 1px solid #ddd; margin-bottom: 1rem; }
-        .tab { padding: 0.5rem 1rem; cursor: pointer; border-bottom: 2px solid transparent; }
-        .tab.active { border-bottom-color: #00a1d6; color: #00a1d6; }
+        .tabs { display: flex; border-bottom: 1px solid #ddd; margin-bottom: 1rem; background: #fff; border-radius: 8px 8px 0 0; }
+        .tab { padding: 0.75rem 1.5rem; cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.3s ease; font-weight: 500; }
+        .tab:hover { background: #f8f9fa; }
+        .tab.active { border-bottom-color: #00a1d6; color: #00a1d6; background: #f0f9ff; }
         .tab-content { display: none; }
         .tab-content.active { display: block; }
         .btn { background: #00a1d6; color: white; border: none; padding: 0.45rem 0.8rem; border-radius: 6px; cursor: pointer; }
@@ -74,6 +78,24 @@
 
         /* 卡片内分节标题行 */
         .card .section-header { display:flex; justify-content:space-between; align-items:center; margin-bottom: 8px; }
+
+        /* 队列管理样式 */
+        .badge { padding: 2px 8px; border-radius: 999px; font-size: 12px; border: 1px solid #e5e7eb; background:#f3f4f6; color:#374151; }
+        .badge-success { background:#ecfdf5; color:#065f46; border-color:#a7f3d0; }
+        .badge-danger { background:#fef2f2; color:#991b1b; border-color:#fecaca; }
+        .stat-card { border:1px solid #e5e7eb; border-radius:8px; padding:12px; background:#fff; }
+        .stat-title { font-weight:600; margin-bottom:6px; color:#374151; }
+        .stat-row { display:flex; align-items:center; justify-content: space-between; padding:4px 0; }
+        .stat-label { color:#6b7280; font-size:12px; }
+        .stat-number { font-weight:700; color:#111827; }
+        .stat-number.ok { color:#065f46; }
+        .stat-number.warn { color:#b45309; }
+        .status { padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; }
+        .status.pending { background: #f3f4f6; color: #374151; }
+        .status.running { background: #dbeafe; color: #1e40af; }
+        .status.done { background: #dcfce7; color: #166534; }
+        .status.failed { background: #fee2e2; color: #dc2626; }
+        .status.cancelled { background: #f3f4f6; color: #6b7280; }
 
         .task-controls {
             display: flex;
@@ -376,9 +398,10 @@
     <div class="container">
         <div class="card">
             <div class="tabs">
-                <div class="tab active" onclick="showTab(this,'dashboard')">总览</div>
+                <div class="tab" onclick="showTab(this,'dashboard')">总览</div>
                 <div class="tab" onclick="showTab(this,'subscriptions')">订阅管理</div>
                 <div class="tab" onclick="showTab(this,'tasks')">下载任务</div>
+                <div class="tab" onclick="showTab(this,'queue')">队列管理</div>
                 <div class="tab" onclick="showTab(this,'cookies')">Cookie管理</div>
                 <div class="tab" onclick="showTab(this,'settings')">系统设置</div>
             </div>
@@ -455,7 +478,91 @@
                     <button onclick="clearCompletedTasks()" class="btn btn-outline">清理完成任务</button>
                 </div>
                 <div id="task-list">加载中...</div>
-            </div>    
+            </div>
+
+            <!-- 队列管理 -->
+            <div id="queue" class="tab-content">
+                <div class="section-header">
+                    <h2>请求队列管理</h2>
+                    <div style="font-size: 14px; color: #666;">可视化控制并发、暂停和任务优先级，实时观察队列</div>
+                </div>
+
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; margin-bottom: 20px;">
+                    <div class="card">
+                        <h3>暂停/恢复</h3>
+                        <div style="display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px;">
+                            <select id="pause-scope" style="padding: 6px 8px; border: 1px solid #ddd; border-radius: 6px;">
+                                <option value="all">全部(all)</option>
+                                <option value="requires_cookie">需要Cookie</option>
+                                <option value="no_cookie">无需Cookie</option>
+                            </select>
+                            <button id="btn-pause" class="btn">暂停</button>
+                            <button id="btn-resume" class="btn">恢复</button>
+                        </div>
+                        <div style="color: #666; font-size: 12px;">注：暂停仅阻止新任务进入运行，已在运行中的任务不被强制中断。</div>
+                    </div>
+
+                    <div class="card">
+                        <h3>并发配置</h3>
+                        <div style="display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px;">
+                            <label style="display: flex; align-items: center; gap: 8px;">需要Cookie: <input id="cap-cookie" type="number" min="0" value="1" style="width:80px; padding: 4px 6px; border: 1px solid #ddd; border-radius: 4px;" /></label>
+                            <label style="display: flex; align-items: center; gap: 8px;">无需Cookie: <input id="cap-nocookie" type="number" min="0" value="2" style="width:80px; padding: 4px 6px; border: 1px solid #ddd; border-radius: 4px;" /></label>
+                            <button id="btn-apply-cap" class="btn">应用</button>
+                        </div>
+                        <div style="color: #666; font-size: 12px;">修改后立即生效。设置为 0 表示禁止该通道的新任务进入运行。</div>
+                    </div>
+
+                    <div class="card">
+                        <h3>任务操作</h3>
+                        <div style="margin-bottom: 12px;">
+                            <input id="job-id" placeholder="输入 job_id" style="width: 100%; padding: 6px 8px; border: 1px solid #ddd; border-radius: 4px; margin-bottom: 8px;" />
+                        </div>
+                        <div style="display: flex; gap: 8px;">
+                            <button id="btn-cancel" class="btn btn-outline">取消</button>
+                            <button id="btn-prio" class="btn">置顶优先</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h3 style="display:flex; align-items:center; gap:8px;">队列总览 <span id="badge-paused" style="padding: 2px 8px; border-radius: 999px; font-size: 12px; border: 1px solid #e5e7eb; background:#f3f4f6; color:#374151;">-</span></h3>
+                    <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:12px; margin-top:8px;" id="cap-cards">
+                        <!-- cards injected here -->
+                    </div>
+                    <details style="margin-top:8px;">
+                        <summary style="cursor:pointer;">查看原始数据(JSON)</summary>
+                        <pre id="stats" style="margin-top:8px; color: #666; font-size: 12px; background: #f8f9fa; padding: 12px; border-radius: 6px; overflow: auto;">载入中...</pre>
+                    </details>
+                </div>
+
+                <div class="card">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                        <h3>请求列表</h3>
+                        <div style="display: flex; gap: 8px; align-items: center;">
+                            <div style="color: #666; font-size: 14px;">每 2 秒自动刷新</div>
+                            <button id="btn-refresh" class="btn btn-outline">立即刷新</button>
+                        </div>
+                    </div>
+                    <div class="table-wrap">
+                        <table class="data">
+                            <thead>
+                                <tr>
+                                    <th>job_id</th>
+                                    <th>类型</th>
+                                    <th>订阅ID</th>
+                                    <th>需Cookie</th>
+                                    <th>状态</th>
+                                    <th>创建</th>
+                                    <th>开始</th>
+                                    <th>结束</th>
+                                    <th>错误</th>
+                                </tr>
+                            </thead>
+                            <tbody id="queue-tbody"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
                 <div id="add-subscription" style="display:none; margin-top:1rem;">
                     <h3>添加新订阅</h3>
                     <div class="form-group">
@@ -601,6 +708,10 @@
             if (tabName !== 'tasks') {
                 stopTasksPolling();
             }
+            // 切换到非队列标签时停止队列轮询
+            if (tabName !== 'queue') {
+                stopQueuePolling();
+            }
             switch(tabName) {
                 case 'dashboard':
                     // 合并后的总览：系统状态 + 媒体概览
@@ -615,6 +726,9 @@
                     break;
                 case 'cookies':
                     loadCookies();
+                    break;
+                case 'queue':
+                    loadQueueData();
                     break;
                 case 'settings':
                     loadSettings();
@@ -1631,8 +1745,170 @@
             }
         }
 
-        // 页面加载完成后初始化
+        // 队列管理相关函数
+        let queuePollingTimer = null;
+
+        function formatTime(s) {
+            if (!s) return '';
+            try { return new Date(s).toLocaleString(); } catch { return s; }
+        }
+
+        function setPausedBadge(s) {
+            const el = document.getElementById('badge-paused');
+            if (!el || !s || !s.paused) return;
+            const anyPaused = !!(s.paused.all || s.paused.requires_cookie || s.paused.no_cookie);
+            el.textContent = anyPaused ? '已暂停' : '运行中';
+            el.className = 'badge ' + (anyPaused ? 'badge-danger' : 'badge-success');
+        }
+
+        function renderCapCards(s) {
+            const root = document.getElementById('cap-cards');
+            if (!root) return;
+            const cc = (s && s.capacity) || {};
+            const cb = (s && s.counts && s.counts_by_channel) ? s.counts_by_channel : (s && s.counts_by_channel) || {};
+            const queuedCookie = typeof cb.queued_cookie === 'number' ? cb.queued_cookie : '-';
+            const queuedNoCookie = typeof cb.queued_nocookie === 'number' ? cb.queued_nocookie : '-';
+            const blocks = [
+                { title: '需要Cookie', cfg: cc.requires_cookie, run: cc.running_cookie, avail: (cc.available_cookie ?? (cc.requires_cookie - cc.running_cookie)), queued: queuedCookie },
+                { title: '无需Cookie', cfg: cc.no_cookie, run: cc.running_nocookie, avail: (cc.available_nocookie ?? (cc.no_cookie - cc.running_nocookie)), queued: queuedNoCookie },
+            ];
+            root.innerHTML = blocks.map(b => `
+                <div class="stat-card">
+                    <div class="stat-title">${b.title}</div>
+                    <div class="stat-row"><span class="stat-label">配置</span><span class="stat-number">${b.cfg ?? '-'}</span></div>
+                    <div class="stat-row"><span class="stat-label">运行</span><span class="stat-number">${b.run ?? '-'}</span></div>
+                    <div class="stat-row"><span class="stat-label">可用</span><span class="stat-number ${Number(b.avail) > 0 ? 'ok' : 'warn'}">${(b.avail ?? '-')}</span></div>
+                    <div class="stat-row"><span class="stat-label">排队</span><span class="stat-number">${b.queued}</span></div>
+                </div>
+            `).join('');
+        }
+
+        async function loadQueueStats() {
+            try {
+                const s = await apiRequest('/api/queue/stats');
+                setPausedBadge(s);
+                renderCapCards(s);
+                document.getElementById('stats').textContent = JSON.stringify(s, null, 2);
+                if (s && s.capacity) {
+                    if (typeof s.capacity.requires_cookie === 'number') document.getElementById('cap-cookie').value = s.capacity.requires_cookie;
+                    if (typeof s.capacity.no_cookie === 'number') document.getElementById('cap-nocookie').value = s.capacity.no_cookie;
+                }
+            } catch (e) {
+                document.getElementById('stats').textContent = '加载失败: ' + e.message;
+            }
+        }
+
+        function statusClass(s) {
+            return 'status ' + (s||'').toLowerCase();
+        }
+
+        async function loadQueueRequests() {
+            try {
+                const data = await apiRequest('/api/requests');
+                const items = data.items || data || [];
+                const tbody = document.getElementById('queue-tbody');
+                tbody.innerHTML = '';
+                for (const it of items) {
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `
+                        <td style="font-family: monospace; font-size: 11px; color: #666;">${it.id}</td>
+                        <td>${it.type || ''}</td>
+                        <td>${it.subscription_id ?? ''}</td>
+                        <td>${it.requires_cookie ? '是' : '否'}</td>
+                        <td><span class="${statusClass(it.status)}">${it.status}</span></td>
+                        <td style="font-size: 12px; color: #666;">${formatTime(it.created_at)}</td>
+                        <td style="font-size: 12px; color: #666;">${formatTime(it.started_at)}</td>
+                        <td style="font-size: 12px; color: #666;">${formatTime(it.finished_at)}</td>
+                        <td style="font-size: 12px; color: #666;">${it.last_error || ''}</td>
+                    `;
+                    tbody.appendChild(tr);
+                }
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        function loadQueueData() {
+            loadQueueStats();
+            loadQueueRequests();
+            // 启动队列轮询
+            if (queuePollingTimer) clearInterval(queuePollingTimer);
+            queuePollingTimer = setInterval(() => {
+                loadQueueStats();
+                loadQueueRequests();
+            }, 2000);
+        }
+
+        function stopQueuePolling() {
+            if (queuePollingTimer) {
+                clearInterval(queuePollingTimer);
+                queuePollingTimer = null;
+            }
+        }
+
+        // 队列管理事件绑定
         document.addEventListener('DOMContentLoaded', function() {
+            // 队列控制按钮事件
+            const btnRefresh = document.getElementById('btn-refresh');
+            if (btnRefresh) {
+                btnRefresh.onclick = () => { loadQueueStats(); loadQueueRequests(); };
+            }
+
+            const btnPause = document.getElementById('btn-pause');
+            if (btnPause) {
+                btnPause.onclick = async () => {
+                    const scope = document.getElementById('pause-scope').value;
+                    await apiRequest('/api/queue/pause', { method: 'POST', body: JSON.stringify({ scope }) });
+                    await loadQueueStats();
+                };
+            }
+
+            const btnResume = document.getElementById('btn-resume');
+            if (btnResume) {
+                btnResume.onclick = async () => {
+                    const scope = document.getElementById('pause-scope').value;
+                    await apiRequest('/api/queue/resume', { method: 'POST', body: JSON.stringify({ scope }) });
+                    await loadQueueStats();
+                };
+            }
+
+            const btnApplyCap = document.getElementById('btn-apply-cap');
+            if (btnApplyCap) {
+                btnApplyCap.onclick = async () => {
+                    const requires_cookie = document.getElementById('cap-cookie').value;
+                    const no_cookie = document.getElementById('cap-nocookie').value;
+                    await apiRequest('/api/queue/capacity', { 
+                        method: 'POST', 
+                        body: JSON.stringify({ requires_cookie: parseInt(requires_cookie), no_cookie: parseInt(no_cookie) })
+                    });
+                    await loadQueueStats();
+                };
+            }
+
+            const btnCancel = document.getElementById('btn-cancel');
+            if (btnCancel) {
+                btnCancel.onclick = async () => {
+                    const id = document.getElementById('job-id').value.trim();
+                    if (!id) return alert('请输入 job_id');
+                    await apiRequest(`/api/requests/${encodeURIComponent(id)}/cancel`, { method: 'POST' });
+                    await loadQueueStats();
+                    await loadQueueRequests();
+                };
+            }
+
+            const btnPrio = document.getElementById('btn-prio');
+            if (btnPrio) {
+                btnPrio.onclick = async () => {
+                    const id = document.getElementById('job-id').value.trim();
+                    if (!id) return alert('请输入 job_id');
+                    await apiRequest(`/api/requests/${encodeURIComponent(id)}/prioritize`, { 
+                        method: 'POST', 
+                        body: JSON.stringify({ priority: 0 })
+                    });
+                    await loadQueueRequests();
+                };
+            }
+
             // 合并后总览需要同时加载系统状态与媒体数据
             loadTabData('dashboard');
         });

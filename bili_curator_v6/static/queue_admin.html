@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>请求队列管理</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; margin: 16px; color: #1f2937; }
+    h1 { font-size: 20px; margin: 0 0 12px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+    .card { border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; background: #fff; }
+    .card h2 { margin: 0 0 8px; font-size: 16px; }
+    button { padding: 6px 10px; border-radius: 6px; border: 1px solid #d1d5db; background: #f9fafb; cursor: pointer; }
+    button.primary { background: #2563eb; color: #fff; border-color: #1d4ed8; }
+    input, select { padding: 6px 8px; border: 1px solid #d1d5db; border-radius: 6px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border-bottom: 1px solid #e5e7eb; padding: 6px 8px; text-align: left; }
+    .muted { color: #6b7280; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+    .status { font-weight: 600; }
+    .status.running { color: #10b981; }
+    .status.queued { color: #f59e0b; }
+    .status.failed { color: #ef4444; }
+    .status.canceled { color: #9ca3af; }
+    /* top nav */
+    .topnav { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+    .topnav a { text-decoration: none; color: #374151; padding: 8px 12px; border: 1px solid #e5e7eb; border-radius: 8px; background: #f9fafb; }
+    .topnav a.active { background: #2563eb; color: #fff; border-color: #1d4ed8; }
+  </style>
+</head>
+<body>
+  <div class="topnav">
+    <a href="/static/video_detection.html" id="tab-video">视频检测</a>
+    <a href="/static/queue_admin.html" id="tab-queue" class="active">队列管理</a>
+  </div>
+  <div class="container" style="max-width: 1200px; margin: 0 auto;">
+    <h1 style="font-size:22px; margin: 8px 0 16px;">请求队列管理</h1>
+    <div class="muted" style="margin:-6px 0 16px;">可视化控制并发、暂停和任务优先级，实时观察队列</div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>暂停/恢复</h2>
+      <div class="row">
+        <select id="pause-scope">
+          <option value="all">全部(all)</option>
+          <option value="requires_cookie">需要Cookie</option>
+          <option value="no_cookie">无需Cookie</option>
+        </select>
+        <button id="btn-pause">暂停</button>
+        <button id="btn-resume">恢复</button>
+      </div>
+      <div class="muted">注：暂停仅阻止新任务进入运行，已在运行中的任务不被强制中断。</div>
+    </div>
+
+    <div class="card">
+      <h2>并发配置</h2>
+      <div class="row">
+        <label>需要Cookie: <input id="cap-cookie" type="number" min="0" value="1" style="width:80px" /></label>
+        <label>无需Cookie: <input id="cap-nocookie" type="number" min="0" value="2" style="width:80px" /></label>
+        <button id="btn-apply-cap" class="primary">应用</button>
+      </div>
+      <div class="muted">修改后立即生效。设置为 0 表示禁止该通道的新任务进入运行。</div>
+    </div>
+
+    <div class="card">
+      <h2>任务操作</h2>
+      <div class="row">
+        <input id="job-id" placeholder="输入 job_id" style="width:260px" />
+      </div>
+      <div class="row">
+        <button id="btn-cancel">取消</button>
+        <button id="btn-prio">置顶优先</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:12px">
+    <h2 style="display:flex; align-items:center; gap:8px;">队列总览 <span id="badge-paused" class="badge">-</span></h2>
+    <div class="stats-grid" id="cap-cards">
+      <!-- cards injected here -->
+    </div>
+    <details style="margin-top:8px;">
+      <summary style="cursor:pointer;">查看原始数据(JSON)</summary>
+      <pre id="stats" class="muted" style="margin-top:8px;">载入中...</pre>
+    </details>
+  </div>
+
+  <div class="card" style="margin-top:12px">
+    <h2>请求列表</h2>
+    <div class="row" style="justify-content: space-between;">
+      <div class="muted">每 2 秒自动刷新</div>
+      <button id="btn-refresh">立即刷新</button>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>job_id</th>
+          <th>类型</th>
+          <th>订阅ID</th>
+          <th>需Cookie</th>
+          <th>状态</th>
+          <th>创建</th>
+          <th>开始</th>
+          <th>结束</th>
+          <th>错误</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    function formatTime(s) {
+      if (!s) return '';
+      try { return new Date(s).toLocaleString(); } catch { return s; }
+    }
+
+    // highlight active tab when page path matches (defensive for future routes)
+    (function highlightActive() {
+      try {
+        const path = window.location.pathname || '';
+        const isQueue = path.endsWith('/queue_admin.html');
+        const tabVideo = document.getElementById('tab-video');
+        const tabQueue = document.getElementById('tab-queue');
+        if (isQueue) {
+          tabQueue && tabQueue.classList.add('active');
+          tabVideo && tabVideo.classList.remove('active');
+        } else {
+          tabVideo && tabVideo.classList.add('active');
+          tabQueue && tabQueue.classList.remove('active');
+        }
+      } catch (_) {}
+    })();
+
+    async function apiGet(path) {
+      const res = await fetch(path);
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    }
+    async function apiPost(path, params) {
+      const url = new URL(path, window.location.origin);
+      if (params) {
+        Object.entries(params).forEach(([k,v])=>{ if (v!==undefined && v!==null && v!=='') url.searchParams.set(k, v); });
+      }
+      const res = await fetch(url.toString(), { method: 'POST' });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    }
+
+    // helpers: badge + cards
+    function setPausedBadge(s) {
+      const el = $('badge-paused');
+      if (!el || !s || !s.paused) return;
+      const anyPaused = !!(s.paused.all || s.paused.requires_cookie || s.paused.no_cookie);
+      el.textContent = anyPaused ? '已暂停' : '运行中';
+      el.className = 'badge ' + (anyPaused ? 'badge-danger' : 'badge-success');
+    }
+
+    function renderCapCards(s) {
+      const root = document.getElementById('cap-cards');
+      if (!root) return;
+      const cc = (s && s.capacity) || {};
+      const cb = (s && s.counts && s.counts_by_channel) ? s.counts_by_channel : (s && s.counts_by_channel) || {};
+      const queuedCookie = typeof cb.queued_cookie === 'number' ? cb.queued_cookie : '-';
+      const queuedNoCookie = typeof cb.queued_nocookie === 'number' ? cb.queued_nocookie : '-';
+      const blocks = [
+        { title: '需要Cookie', cfg: cc.requires_cookie, run: cc.running_cookie, avail: (cc.available_cookie ?? (cc.requires_cookie - cc.running_cookie)), queued: queuedCookie },
+        { title: '无需Cookie', cfg: cc.no_cookie, run: cc.running_nocookie, avail: (cc.available_nocookie ?? (cc.no_cookie - cc.running_nocookie)), queued: queuedNoCookie },
+      ];
+      root.innerHTML = blocks.map(b => `
+        <div class="stat-card">
+          <div class="stat-title">${b.title}</div>
+          <div class="stat-row"><span class="stat-label">配置</span><span class="stat-number">${b.cfg ?? '-'}</span></div>
+          <div class="stat-row"><span class="stat-label">运行</span><span class="stat-number">${b.run ?? '-'}</span></div>
+          <div class="stat-row"><span class="stat-label">可用</span><span class="stat-number ${Number(b.avail) > 0 ? 'ok' : 'warn'}">${(b.avail ?? '-')}</span></div>
+          <div class="stat-row"><span class="stat-label">排队</span><span class="stat-number">${b.queued}</span></div>
+        </div>
+      `).join('');
+    }
+
+    async function loadStats() {
+      try {
+        const s = await apiGet('/api/queue/stats');
+        setPausedBadge(s);
+        renderCapCards(s);
+        $('stats').textContent = JSON.stringify(s, null, 2);
+        if (s && s.capacity) {
+          if (typeof s.capacity.requires_cookie === 'number') $('cap-cookie').value = s.capacity.requires_cookie;
+          if (typeof s.capacity.no_cookie === 'number') $('cap-nocookie').value = s.capacity.no_cookie;
+        }
+      } catch (e) {
+        $('stats').textContent = '加载失败: ' + e.message;
+      }
+    }
+
+    function statusClass(s) {
+      return 'status ' + (s||'').toLowerCase();
+    }
+
+    async function loadRequests() {
+      try {
+        const data = await apiGet('/api/requests');
+        const items = data.items || data || [];
+        const tbody = $('tbody');
+        tbody.innerHTML = '';
+        for (const it of items) {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td class="muted">${it.id}</td>
+            <td>${it.type || ''}</td>
+            <td>${it.subscription_id ?? ''}</td>
+            <td>${it.requires_cookie ? '是' : '否'}</td>
+            <td class="${statusClass(it.status)}">${it.status}</td>
+            <td class="muted">${formatTime(it.created_at)}</td>
+            <td class="muted">${formatTime(it.started_at)}</td>
+            <td class="muted">${formatTime(it.finished_at)}</td>
+            <td class="muted">${it.last_error || ''}</td>
+          `;
+          tbody.appendChild(tr);
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    // Events
+    $('btn-refresh').onclick = () => { loadStats(); loadRequests(); };
+    $('btn-pause').onclick = async () => {
+      const scope = $('pause-scope').value;
+      await apiPost('/api/queue/pause', { scope });
+      await loadStats();
+    };
+    $('btn-resume').onclick = async () => {
+      const scope = $('pause-scope').value;
+      await apiPost('/api/queue/resume', { scope });
+      await loadStats();
+    };
+    $('btn-apply-cap').onclick = async () => {
+      const requires_cookie = $('cap-cookie').value;
+      const no_cookie = $('cap-nocookie').value;
+      await apiPost('/api/queue/capacity', { requires_cookie, no_cookie });
+      await loadStats();
+    };
+    $('btn-cancel').onclick = async () => {
+      const id = $('job-id').value.trim();
+      if (!id) return alert('请输入 job_id');
+      await apiPost(`/api/requests/${encodeURIComponent(id)}/cancel`);
+      await loadStats();
+      await loadRequests();
+    };
+    $('btn-prio').onclick = async () => {
+      const id = $('job-id').value.trim();
+      if (!id) return alert('请输入 job_id');
+      await apiPost(`/api/requests/${encodeURIComponent(id)}/prioritize`, { priority: 0 });
+      await loadRequests();
+    };
+
+    // Auto refresh
+    loadStats();
+    loadRequests();
+    setInterval(()=>{ loadStats(); loadRequests(); }, 2000);
+  </script>
+  </div>
+  <style>
+    /* overview cosmetics */
+    .badge { padding: 2px 8px; border-radius: 999px; font-size: 12px; border: 1px solid #e5e7eb; background:#f3f4f6; color:#374151; }
+    .badge-success { background:#ecfdf5; color:#065f46; border-color:#a7f3d0; }
+    .badge-danger { background:#fef2f2; color:#991b1b; border-color:#fecaca; }
+    .stats-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:12px; margin-top:8px; }
+    .stat-card { border:1px solid #e5e7eb; border-radius:8px; padding:12px; background:#fff; }
+    .stat-title { font-weight:600; margin-bottom:6px; color:#374151; }
+    .stat-row { display:flex; align-items:center; justify-content: space-between; padding:4px 0; }
+    .stat-label { color:#6b7280; font-size:12px; }
+    .stat-number { font-weight:700; color:#111827; }
+    .stat-number.ok { color:#065f46; }
+    .stat-number.warn { color:#b45309; }
+  </style>
+</body>
+</html>

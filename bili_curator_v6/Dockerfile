@@ -4,13 +4,19 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # 安装基础系统依赖（最小化）
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
-    && rm -rf /var/lib/apt/lists/*
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/* \
+    || (echo "Network issue, trying with different mirror..." && \
+        sed -i 's/deb.debian.org/mirrors.ustc.edu.cn/g' /etc/apt/sources.list && \
+        apt-get update && apt-get install -y --no-install-recommends curl ffmpeg && \
+        rm -rf /var/lib/apt/lists/*)
 
 # 复制并安装Python依赖
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir --upgrade yt-dlp
 
 # 复制应用代码
 COPY . .

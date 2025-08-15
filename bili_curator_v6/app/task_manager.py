@@ -12,6 +12,7 @@ from loguru import logger
 
 from .models import DownloadTask, Video, Subscription, get_db
 from .downloader import downloader
+from .queue_manager import get_subscription_lock
 
 class TaskStatus(Enum):
     PENDING = "pending"
@@ -119,7 +120,10 @@ class EnhancedTaskManager:
             await self._update_task_status(task_id, TaskStatus.CHECKING, "正在获取视频列表...")
             
             if subscription.type == 'collection':
-                video_list = await downloader._get_collection_videos(subscription.url, db)
+                # 订阅级互斥，避免与 expected-total/下载并发外网请求
+                sub_lock = get_subscription_lock(subscription.id)
+                async with sub_lock:
+                    video_list = await downloader._get_collection_videos(subscription.url, db, subscription_id=subscription.id)
             elif subscription.type == 'keyword':
                 # 对于关键词订阅，从数据库中查找匹配的视频
                 video_list = await self._get_keyword_videos(subscription, db)

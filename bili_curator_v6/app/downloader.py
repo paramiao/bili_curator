@@ -18,6 +18,25 @@ from loguru import logger
 
 from .models import Video, DownloadTask, Subscription, Settings, get_db
 from .cookie_manager import cookie_manager, rate_limiter, simple_retry
+from .queue_manager import yt_dlp_semaphore, get_subscription_lock, request_queue
+
+# UA 策略（与 API 层保持一致语义）：
+# - requires_cookie=True 时使用稳定 UA
+# - requires_cookie=False 时可使用随机 UA（此文件主要走 Cookie 通道）
+_UA_POOL = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0',
+]
+
+def get_user_agent(requires_cookie: bool) -> str:
+    try:
+        if requires_cookie:
+            return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+        return random.choice(_UA_POOL)
+    except Exception:
+        return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 
 class BilibiliDownloaderV6:
     def __init__(self, output_dir: str = None):
@@ -38,14 +57,17 @@ class BilibiliDownloaderV6:
             raise ValueError(f"订阅 {subscription_id} 不存在")
         
         logger.info(f"开始下载合集: {subscription.name}")
-        
+
         # 订阅目录（先计算，便于缓存列表）
         subscription_dir = Path(self._create_subscription_directory(subscription))
 
         # 获取合集视频列表（失败时回退到本地缓存）
+        # 同一订阅加互斥，避免与 expected-total/parse 并发外网请求
+        sub_lock = get_subscription_lock(subscription.id)
         cache_path = subscription_dir / 'playlist.json'
         try:
-            video_list = await self._get_collection_videos(subscription.url, db)
+            async with sub_lock:
+                video_list = await self._get_collection_videos(subscription.url, db, subscription_id=subscription.id)
             try:
                 with open(cache_path, 'w', encoding='utf-8') as cf:
                     json.dump(video_list, cf, ensure_ascii=False)
@@ -109,13 +131,26 @@ class BilibiliDownloaderV6:
         }
     
 
-    async def _get_collection_videos(self, collection_url: str, db: Session) -> List[Dict]:
+    async def _get_collection_videos(self, collection_url: str, db: Session, subscription_id: Optional[int] = None) -> List[Dict]:
         """获取合集视频列表（对齐V4：支持仅SESSDATA、UA/Referer、重试参数、三段回退解析）"""
         await rate_limiter.wait()
 
         cookie = cookie_manager.get_available_cookie(db)
         if not cookie:
             raise Exception("没有可用的Cookie")
+
+        # 队列登记：list_fetch
+        job_id: Optional[str] = None
+        try:
+            job_id = await request_queue.enqueue(
+                job_type="list_fetch",
+                subscription_id=subscription_id,
+                requires_cookie=True
+            )
+            await request_queue.mark_running(job_id)
+        except Exception:
+            # 队列模块异常不影响主流程
+            job_id = None
 
         cookies_path = None
         try:
@@ -137,8 +172,9 @@ class BilibiliDownloaderV6:
             # 公共 yt-dlp 参数（与V4对齐）：UA/Referer/重试/忽略警告/轻睡眠
             common_args = [
                 'yt-dlp',
-                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                '--user-agent', get_user_agent(True),
                 '--referer', 'https://www.bilibili.com/',
+                '--force-ipv4',
                 '--sleep-interval', '2',
                 '--max-sleep-interval', '5',
                 '--retries', '5',
@@ -150,20 +186,27 @@ class BilibiliDownloaderV6:
                 '--cookies', cookies_path,
             ]
 
+            # 允许通过环境变量传入 extractor-args（例如为 bilibili 指定解析策略）
+            extractor_args = os.getenv('YT_DLP_EXTRACTOR_ARGS')
+            if extractor_args and isinstance(extractor_args, str) and extractor_args.strip():
+                common_args += ['--extractor-args', extractor_args.strip()]
+
             async def run_cmd(args):
-                proc = await asyncio.create_subprocess_exec(
-                    *args,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                out, err = await proc.communicate()
-                return proc.returncode, out, err
+                async with yt_dlp_semaphore:
+                    proc = await asyncio.create_subprocess_exec(
+                        *args,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    out, err = await proc.communicate()
+                    return proc.returncode, out, err
 
             videos: List[Dict] = []
             last_err = None
 
             # 优先：手动分页抓取，避免一次性请求过大触发风控
-            chunk_size = 100
+            # 将分段从 100 降至 50，并为每段增加重试与退避，缓解 999 合集解析器偶发错误
+            chunk_size = 50
             max_chunks = 50  # 安全上限（最多约 5000 条）
             chunk_idx = 0
             while chunk_idx < max_chunks:
@@ -174,9 +217,24 @@ class BilibiliDownloaderV6:
                     '--playlist-items', f'{start}-{end}',
                     collection_url
                 ]
-                rc, out, err = await run_cmd(cmd_chunk)
+
+                # 每段最多重试3次，退避延时 2~5s
+                attempt = 0
+                out, err = b'', b''
+                rc = 0
+                while attempt < 3:
+                    rc, out, err = await run_cmd(cmd_chunk)
+                    if rc == 0:
+                        break
+                    attempt += 1
+                    last_err = (err.decode('utf-8', errors='ignore') or '').strip()
+                    logger.warning(f"分页抓取 {start}-{end} 失败(rc={rc}) 第{attempt}次: {last_err}")
+                    try:
+                        await asyncio.sleep(random.uniform(2, 5))
+                    except Exception:
+                        pass
                 if rc != 0:
-                    last_err = err.decode('utf-8', errors='ignore')
+                    # 当前段最终失败，结束分页，转入后续回退策略
                     break
                 count_this = 0
                 for line in (out.decode('utf-8', errors='ignore') or '').strip().split('\n'):
@@ -195,7 +253,7 @@ class BilibiliDownloaderV6:
                 chunk_idx += 1
                 # 段与段之间轻量延时，降低风控风险
                 try:
-                    await asyncio.sleep(random.uniform(2, 4))
+                    await asyncio.sleep(random.uniform(3, 6))
                 except Exception:
                     pass
 
@@ -270,6 +328,12 @@ class BilibiliDownloaderV6:
             # 412/风控：仅告警不计失败（避免误伤）
             if "412" in str(e) or "precondition" in str(e).lower():
                 logger.warning("远端可能触发风控(412)，已跳过失败计数")
+            # 队列标记失败
+            try:
+                if job_id:
+                    await request_queue.mark_failed(job_id, str(e))
+            except Exception:
+                pass
             raise
         finally:
             if cookies_path and os.path.exists(cookies_path):
@@ -420,6 +484,7 @@ class BilibiliDownloaderV6:
                     video_info.get('url', f"https://www.bilibili.com/video/{video_id}"),
                     base_filename,
                     subscription_dir,
+                    subscription_id,
                     cookie,
                     task.id,
                     db
@@ -542,8 +607,9 @@ class BilibiliDownloaderV6:
 
             cmd = [
                 'yt-dlp',
-                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                '--user-agent', get_user_agent(True),
                 '--referer', 'https://www.bilibili.com/',
+                '--force-ipv4',
                 '--sleep-interval', '2',
                 '--max-sleep-interval', '5',
                 '--retries', '5',
@@ -556,12 +622,13 @@ class BilibiliDownloaderV6:
                 '--cookies', cookies_path,
                 url,
             ]
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await process.communicate()
+            async with yt_dlp_semaphore:
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await process.communicate()
             if process.returncode != 0:
                 err = stderr.decode('utf-8', errors='ignore')
                 logger.warning(f"获取视频元数据失败: {err}")
@@ -584,8 +651,10 @@ class BilibiliDownloaderV6:
                 except Exception:
                     pass
     
-    async def _download_with_ytdlp(self, url: str, base_filename: str, subscription_dir: Path, cookie, task_id: int, db: Session) -> Path:
-        """使用yt-dlp下载视频（输出到订阅目录）"""
+    async def _download_with_ytdlp(self, url: str, base_filename: str, subscription_dir: Path, subscription_id: int, cookie, task_id: int, db: Session) -> Path:
+        """使用yt-dlp下载视频（输出到订阅目录）。
+        同时在全局请求队列登记一个 download 作业（requires_cookie=True），以便分通道并发与可视化统计。
+        """
         output_template = str(subscription_dir / f"{base_filename}.%(ext)s")
 
         # 写入临时 cookies.txt（Netscape 格式最简行）
@@ -603,11 +672,24 @@ class BilibiliDownloaderV6:
                 if getattr(cookie, 'dedeuserid', None) and str(cookie.dedeuserid).strip():
                     cf.write(f".bilibili.com\tTRUE\t/\tFALSE\t0\tDedeUserID\t{cookie.dedeuserid}\n")
 
+            # 队列登记：download（强制 Cookie 通道）
+            job_id: Optional[str] = None
+            try:
+                job_id = await request_queue.enqueue(
+                    job_type="download",
+                    subscription_id=subscription_id,
+                    requires_cookie=True
+                )
+                await request_queue.mark_running(job_id)
+            except Exception:
+                job_id = None
+
             async def run_yt_dlp(format_str: str):
                 cmd = [
                     'yt-dlp',
-                    '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    '--user-agent', get_user_agent(True),
                     '--referer', 'https://www.bilibili.com/',
+                    '--force-ipv4',
                     '--sleep-interval', '2',
                     '--max-sleep-interval', '5',
                     '--retries', '5',
@@ -624,21 +706,42 @@ class BilibiliDownloaderV6:
                     '--cookies', cookies_path,
                     url
                 ]
-                proc = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                out, err = await proc.communicate()
+
+                # 显式指定ffmpeg路径，若环境变量存在
+                ffmpeg_path = os.getenv('FFMPEG_PATH')
+                if ffmpeg_path and os.path.exists(ffmpeg_path):
+                    cmd.extend(['--ffmpeg-location', ffmpeg_path])
+                async with yt_dlp_semaphore:
+                    proc = await asyncio.create_subprocess_exec(
+                        *cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    out, err = await proc.communicate()
                 return proc.returncode, out, err
 
             # 首选 1080 限制，失败则回退到通用最佳
-            ret, out, err = await run_yt_dlp('bestvideo*[height<=1080]+bestaudio/best')
-            if ret != 0 and b'Requested format is not available' in err:
-                ret, out, err = await run_yt_dlp('bv+ba/b')
-            if ret != 0:
-                error_msg = (err or b'').decode('utf-8', errors='ignore')
-                raise Exception(f"yt-dlp下载失败: {error_msg}")
+            try:
+                ret, out, err = await run_yt_dlp('bestvideo*[height<=1080]+bestaudio/best')
+                if ret != 0 and b'Requested format is not available' in err:
+                    ret, out, err = await run_yt_dlp('bv+ba/b')
+                if ret != 0:
+                    error_msg = (err or b'').decode('utf-8', errors='ignore')
+                    raise Exception(f"yt-dlp下载失败: {error_msg}")
+                # 下载成功，标记队列完成
+                try:
+                    if job_id:
+                        await request_queue.mark_done(job_id)
+                except Exception:
+                    pass
+            except Exception as e:
+                # 下载失败，标记队列失败
+                try:
+                    if job_id:
+                        await request_queue.mark_failed(job_id, str(e))
+                except Exception:
+                    pass
+                raise
         finally:
             if cookies_path and os.path.exists(cookies_path):
                 try:

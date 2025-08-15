@@ -119,9 +119,17 @@
             color: #6c757d;
             margin-top: 5px;
         }
+        /* top nav */
+        .topnav { display: flex; gap: 8px; align-items: center; margin: 0 0 16px; }
+        .topnav a { text-decoration: none; color: #374151; padding: 8px 12px; border: 1px solid #e5e7eb; border-radius: 8px; background: #f9fafb; }
+        .topnav a.active { background: #2563eb; color: #fff; border-color: #1d4ed8; }
     </style>
 </head>
 <body>
+    <div class="topnav">
+        <a href="/static/video_detection.html" id="tab-video" class="active">视频检测</a>
+        <a href="/static/queue_admin.html" id="tab-queue">队列管理</a>
+    </div>
     <div class="container">
         <div class="header">
             <h1>🎬 视频检测服务管理</h1>
@@ -352,6 +360,20 @@
         // 初始化
         document.addEventListener('DOMContentLoaded', async () => {
             addLog('视频检测服务管理界面已加载');
+            // highlight active tab defensively by path
+            try {
+                const path = window.location.pathname || '';
+                const isVideo = path.endsWith('/video_detection.html');
+                const tabVideo = document.getElementById('tab-video');
+                const tabQueue = document.getElementById('tab-queue');
+                if (isVideo) {
+                    tabVideo && tabVideo.classList.add('active');
+                    tabQueue && tabQueue.classList.remove('active');
+                } else {
+                    tabQueue && tabQueue.classList.add('active');
+                    tabVideo && tabVideo.classList.remove('active');
+                }
+            } catch (_) {}
             await getServiceStatus();
             await getVideoCount();
             

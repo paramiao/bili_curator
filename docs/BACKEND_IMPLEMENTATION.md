@@ -1,6 +1,6 @@
 # 后端实现说明（Backend Implementation）
 
-更新时间：2025-08-14 13:19 (Asia/Shanghai)
+更新时间：2025-08-15 13:57 (Asia/Shanghai)
 
 ## 1. 关键代码路径
 - API：`bili_curator_v6/app/api.py`
@@ -8,6 +8,7 @@
 - 自动导入：`bili_curator_v6/app/auto_import.py`
 - 任务管理器：`bili_curator_v6/app/task_manager.py`
 - 模型：`bili_curator_v6/app/models.py`
+- 队列：`bili_curator_v6/app/queue_manager.py`
 
 ## 2. 订阅解析与命名
 - `parse-collection`：优先使用 yt-dlp 合集层级元数据（`--flat-playlist --dump-single-json`）。
@@ -31,13 +32,35 @@
 - 本地统计：`total_videos/downloaded_videos/pending_videos` 来源于 DB + 目录关联；
 - 远端总数：`GET /api/subscriptions/{id}/expected-total` 独立获取，前端单独展示与刷新。
 
-## 6. Cookie 策略
+## 6. Cookie 与 UA 策略
 - 统一通过 `--cookies` 传入 yt-dlp，使用临时 Netscape 格式文件；
 - 解析/下载一致；出现 401/403 自动禁用该 Cookie 并记录。
+- UA 统一：在 `downloader.py` 内提供 `get_user_agent(requires_cookie)`；
+  - `requires_cookie=True` 使用稳定桌面 UA；
+  - `requires_cookie=False` 使用内置池随机 UA；
+  - 所有下载链路的 yt-dlp 命令均使用 `get_user_agent(True)`。
 
-## 7. 定时任务
+## 7. 请求队列与并发控制
+- 全局队列管理：`RequestQueueManager`（内存实现）。
+  - 入队：`enqueue(job_type, subscription_id, requires_cookie, priority)` → `job_id`。
+  - 运行：`mark_running(job_id)`；完成/失败：`mark_done/mark_failed(job_id)`；控制：暂停/恢复/取消/置顶。
+  - 统计：`stats()` 返回并发容量、运行计数、分通道排队数（`queued_cookie/queued_nocookie`）。
+- 并发原语：
+  - `yt_dlp_semaphore = asyncio.Semaphore(1)`：全局 yt-dlp 串行。
+  - `get_subscription_lock(subscription_id)`：订阅级互斥，确保同订阅严格串行。
+- 下载类任务强制 `requires_cookie=True` 并入队登记，以保证成功率与可观测。
+
+## 8. 定时任务
 - `POST /api/scheduler/check-subscriptions` 触发检查；后续计划：后台周期任务 + 自动下载开关。
 
-## 8. 一致性原则
+## 9. 一致性原则
 - 字段统一：仅使用 `bilibili_id`；输入使用 `is_active`；更新补齐 `updated_at`；
 - 目录口径统一：导入/关联/去重都以“订阅下载目录”为边界，避免跨合集。
+
+## 10. API 映射（与队列的集成）
+- 只读：`GET /api/requests`、`GET /api/requests/{id}`。
+- 队列管理：`GET /api/queue/stats`、`POST /api/queue/pause|resume`、`POST /api/queue/capacity`、`POST /api/requests/{id}/cancel|prioritize`。
+- 业务端点（内部入队）：
+  - 远端总数：`GET /api/subscriptions/{id}/expected-total` → `type=expected_total`（默认无 Cookie，失败回退 Cookie 并提升优先级）。
+  - 合集列表：`list_fetch`（Cookie）。
+  - 下载：`download`（强制 Cookie）。
