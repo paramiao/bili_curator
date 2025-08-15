@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 from sqlalchemy.orm import Session
 from loguru import logger
+import subprocess
 
 from .models import Video, DownloadTask, Subscription, Settings, get_db
 from .cookie_manager import cookie_manager, rate_limiter, simple_retry
@@ -46,9 +47,54 @@ class BilibiliDownloaderV6:
         
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        # 降低并发，减少触发风控概率
-        self.concurrent_downloads = 1
+        # 每订阅并发（可通过环境变量 PER_SUB_DOWNLOADS 配置，范围1-3）
+        def _env_int(name: str, default: int, lo: int, hi: int) -> int:
+            try:
+                v = int(os.getenv(name, str(default)))
+                return max(lo, min(hi, v))
+            except Exception:
+                return default
+        self.concurrent_downloads = _env_int('PER_SUB_DOWNLOADS', 1, 1, 3)
         self.download_semaphore = asyncio.Semaphore(self.concurrent_downloads)
+        # 相邻视频下载的休眠区间（秒），可通过 INTER_DOWNLOAD_DELAY_MIN/MAX 配置
+        try:
+            dmin = float(os.getenv('INTER_DOWNLOAD_DELAY_MIN', '5'))
+            dmax = float(os.getenv('INTER_DOWNLOAD_DELAY_MAX', '10'))
+            if dmin > dmax:
+                dmin, dmax = dmax, dmin
+            self.delay_min = max(0.0, dmin)
+            self.delay_max = max(self.delay_min, dmax)
+        except Exception:
+            self.delay_min, self.delay_max = 5.0, 10.0
+        # list_fetch 可调参数（分页与退避）
+        try:
+            lc = int(os.getenv('LIST_CHUNK_SIZE', '50'))
+            self.list_chunk_size = max(10, min(200, lc))
+        except Exception:
+            self.list_chunk_size = 50
+        try:
+            lr = int(os.getenv('LIST_RETRY', '3'))
+            self.list_retry = max(0, min(5, lr))
+        except Exception:
+            self.list_retry = 3
+        try:
+            bmin = float(os.getenv('LIST_BACKOFF_MIN', '2'))
+            bmax = float(os.getenv('LIST_BACKOFF_MAX', '5'))
+            if bmin > bmax:
+                bmin, bmax = bmax, bmin
+            self.list_backoff_min = max(0.0, bmin)
+            self.list_backoff_max = max(self.list_backoff_min, bmax)
+        except Exception:
+            self.list_backoff_min, self.list_backoff_max = 2.0, 5.0
+        try:
+            pgmin = float(os.getenv('LIST_PAGE_GAP_MIN', '3'))
+            pgmax = float(os.getenv('LIST_PAGE_GAP_MAX', '6'))
+            if pgmin > pgmax:
+                pgmin, pgmax = pgmax, pgmin
+            self.list_page_gap_min = max(0.0, pgmin)
+            self.list_page_gap_max = max(self.list_page_gap_min, pgmax)
+        except Exception:
+            self.list_page_gap_min, self.list_page_gap_max = 3.0, 6.0
     
     async def download_collection(self, subscription_id: int, db: Session) -> Dict[str, Any]:
         """下载合集"""
@@ -111,9 +157,9 @@ class BilibiliDownloaderV6:
                     'success': False,
                     'error': str(e)
                 })
-            # 视频之间随机延时，降低风控几率
+            # 视频之间随机延时（可配置），降低风控几率
             if idx < len(new_videos):
-                delay = random.uniform(5, 10)
+                delay = random.uniform(self.delay_min, self.delay_max)
                 try:
                     await asyncio.sleep(delay)
                 except Exception:
@@ -205,8 +251,8 @@ class BilibiliDownloaderV6:
             last_err = None
 
             # 优先：手动分页抓取，避免一次性请求过大触发风控
-            # 将分段从 100 降至 50，并为每段增加重试与退避，缓解 999 合集解析器偶发错误
-            chunk_size = 50
+            # 分段大小、重试与退避由环境变量控制
+            chunk_size = self.list_chunk_size
             max_chunks = 50  # 安全上限（最多约 5000 条）
             chunk_idx = 0
             while chunk_idx < max_chunks:
@@ -218,11 +264,11 @@ class BilibiliDownloaderV6:
                     collection_url
                 ]
 
-                # 每段最多重试3次，退避延时 2~5s
+                # 每段重试次数与退避区间
                 attempt = 0
                 out, err = b'', b''
                 rc = 0
-                while attempt < 3:
+                while attempt < self.list_retry:
                     rc, out, err = await run_cmd(cmd_chunk)
                     if rc == 0:
                         break
@@ -230,7 +276,7 @@ class BilibiliDownloaderV6:
                     last_err = (err.decode('utf-8', errors='ignore') or '').strip()
                     logger.warning(f"分页抓取 {start}-{end} 失败(rc={rc}) 第{attempt}次: {last_err}")
                     try:
-                        await asyncio.sleep(random.uniform(2, 5))
+                        await asyncio.sleep(random.uniform(self.list_backoff_min, self.list_backoff_max))
                     except Exception:
                         pass
                 if rc != 0:
@@ -251,9 +297,9 @@ class BilibiliDownloaderV6:
                 if count_this < chunk_size:
                     break
                 chunk_idx += 1
-                # 段与段之间轻量延时，降低风控风险
+                # 段与段之间轻量延时（可配置），降低风控风险
                 try:
-                    await asyncio.sleep(random.uniform(3, 6))
+                    await asyncio.sleep(random.uniform(self.list_page_gap_min, self.list_page_gap_max))
                 except Exception:
                     pass
 
@@ -316,6 +362,12 @@ class BilibiliDownloaderV6:
 
             cookie_manager.update_cookie_usage(db, cookie.id)
             logger.info(f"获取到 {len(videos)} 个视频")
+            # 成功路径：标记队列完成，释放信号量/计数
+            try:
+                if job_id:
+                    await request_queue.mark_done(job_id)
+            except Exception:
+                pass
             return videos
         except Exception as e:
             logger.error(f"获取合集视频列表失败: {e}")
@@ -800,6 +852,12 @@ class BilibiliDownloaderV6:
         except Exception as e:
             logger.warning(f"重命名标准化失败，保持原名: {video_file} - {e}")
 
+        # 兜底：若mp4无音轨，尝试与同目录同名的m4a合并
+        try:
+            self._ensure_audio_embedded(video_file)
+        except Exception as e:
+            logger.warning(f"下载后音轨校验/合并过程出现异常，跳过: {e}")
+
         return video_file
     
     async def _create_nfo_file(self, video_info: Dict[str, Any], base_filename: str, subscription_dir: Path):
@@ -949,6 +1007,94 @@ class BilibiliDownloaderV6:
         text = text.replace('"', '&quot;')
         text = text.replace("'", '&apos;')
         return text
+
+    # ============== 媒体处理兜底：确保视频含音轨 ==============
+    def _has_audio(self, mp4_path: Path) -> bool:
+        try:
+            cmd = ['ffprobe', '-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=index', '-of', 'csv=p=0', str(mp4_path)]
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            return any(line.strip() for line in (proc.stdout or '').splitlines())
+        except Exception:
+            return True  # 保守：探测失败视为有音轨，避免误操作
+
+    def _pick_m4a_candidate(self, video_file: Path) -> Optional[Path]:
+        stem = video_file.stem
+        parent = video_file.parent
+        # 兼容 base.mp4 与 base.fXXXX.mp4 两种情况，尝试多种候选名
+        candidates: List[Path] = []
+        # 1) 同名 .m4a
+        candidates.append(parent / f"{stem}.m4a")
+        # 2) 去除 .fXXXXX 后缀后的 .m4a
+        try:
+            import re
+            m = re.search(r"\.f\d{3,6}$", stem)
+            if m:
+                base = stem[:m.start()]
+                candidates.append(parent / f"{base}.m4a")
+        except Exception:
+            pass
+        # 3) 目录下同前缀的 .m4a（挑选最大/最新）
+        try:
+            more = [p for p in parent.glob("*.m4a") if p.exists()]
+            more.sort(key=lambda p: (p.stat().st_size, p.name), reverse=True)
+            candidates.extend(more[:3])
+        except Exception:
+            pass
+        for p in candidates:
+            if p and p.exists():
+                return p
+        return None
+
+    def _ensure_audio_embedded(self, video_file: Path):
+        if video_file.suffix.lower() != '.mp4':
+            return
+        if self._has_audio(video_file):
+            return
+        m4a = self._pick_m4a_candidate(video_file)
+        if not m4a:
+            logger.info(f"未找到可用的音频文件用于合并: {video_file}")
+            return
+        tmp = video_file.with_suffix('').as_posix() + '.__mux.tmp.mp4'
+        bak = str(video_file) + '.bak'
+        def ff(cmd: List[str]) -> int:
+            return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE).returncode
+        logger.info(f"尝试为无音轨视频合并音频: video='{video_file.name}', audio='{m4a.name}'")
+        # ffmpeg路径
+        ffmpeg_path = os.getenv('FFMPEG_PATH')
+        ffmpeg_bin = ffmpeg_path if (ffmpeg_path and os.path.exists(ffmpeg_path)) else 'ffmpeg'
+
+        # 先尝试流复制
+        rc = ff([ffmpeg_bin, '-y', '-v', 'error', '-i', str(video_file), '-i', str(m4a),
+                 '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'copy', '-movflags', '+faststart', tmp])
+        if rc != 0:
+            # 回退AAC转码
+            if os.path.exists(tmp):
+                try: os.remove(tmp)
+                except OSError: pass
+            rc = ff([ffmpeg_bin, '-y', '-v', 'error', '-i', str(video_file), '-i', str(m4a),
+                     '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', tmp])
+        if rc != 0 or (not os.path.exists(tmp)):
+            logger.warning(f"自动合并失败，保留原文件: {video_file}")
+            if os.path.exists(tmp):
+                try: os.remove(tmp)
+                except OSError: pass
+            return
+        # 原子替换
+        try:
+            if os.path.exists(bak):
+                os.remove(bak)
+            os.rename(str(video_file), bak)
+            os.rename(tmp, str(video_file))
+            logger.info(f"自动合并音轨成功: {video_file.name}")
+        except Exception as e:
+            logger.warning(f"替换合并结果失败，尝试回滚: {e}")
+            if os.path.exists(tmp):
+                try: os.remove(tmp)
+                except OSError: pass
+            if (not os.path.exists(str(video_file))) and os.path.exists(bak):
+                try: os.rename(bak, str(video_file))
+                except Exception:
+                    pass
 
 # 全局下载器实例
 downloader = BilibiliDownloaderV6()

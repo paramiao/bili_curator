@@ -1,6 +1,6 @@
 """
 全局请求队列/限流/互斥管理（内存版，最小可用）
-- 全局 yt-dlp 串行信号量
+- 全局 yt-dlp 并发信号量（可通过环境变量配置）
 - 订阅级互斥锁
 - 简单任务登记与查询（便于 Web 可视化）
 
@@ -11,20 +11,28 @@ import uuid
 from dataclasses import dataclass, asdict, field
 from datetime import datetime
 from typing import Dict, Optional, List, Any
+import os
 
 from loguru import logger
 
 
-# 全局 yt-dlp 串行（保守稳态）
-yt_dlp_semaphore = asyncio.Semaphore(1)
+# 全局 yt-dlp 并发（默认1，可通过 YTDLP_CONCURRENCY 配置，范围1-4）
+def _env_int(name: str, default: int, lo: int, hi: int) -> int:
+    try:
+        v = int(os.getenv(name, str(default)))
+        return max(lo, min(hi, v))
+    except Exception:
+        return default
+
+yt_dlp_semaphore = asyncio.Semaphore(_env_int('YTDLP_CONCURRENCY', 1, 1, 4))
 
 # 分级并发：需要 Cookie 与不需要 Cookie 可分开控制
 _sem_cookie = asyncio.Semaphore(1000)      # 大容量，实际并发由 _cap_* 与运行计数控制
 _sem_nocookie = asyncio.Semaphore(1000)
 
-# 期望的并发容量（可配置）
-_cap_cookie = 1
-_cap_nocookie = 2
+# 期望的并发容量（可配置，范围：cookie 1-3；nocookie 1-5）
+_cap_cookie = _env_int('QUEUE_CAP_COOKIE', 1, 1, 3)
+_cap_nocookie = _env_int('QUEUE_CAP_NOCOOKIE', 2, 1, 5)
 
 # 当前运行计数
 _run_cookie = 0
@@ -66,6 +74,10 @@ class RequestJob:
     last_error: str = ""
     priority: int = 0
     acquired_scope: Optional[str] = None  # 'cookie' | 'nocookie' | None
+    # 诊断字段（内存态）
+    wait_cycles: int = 0
+    wait_ms: int = 0
+    last_wait_reason: str = ""
 
 
 class RequestQueueManager:
@@ -119,16 +131,32 @@ class RequestQueueManager:
 
             # 检查暂停条件
             if paused_all or (job.requires_cookie and paused_cookie) or ((not job.requires_cookie) and paused_nocookie):
+                reason = 'paused_all' if paused_all else ('paused_cookie' if job.requires_cookie else 'paused_nocookie')
+                async with self._lock:
+                    job = self._jobs.get(job_id)
+                    if job:
+                        job.wait_cycles += 1
+                        job.last_wait_reason = reason
                 await asyncio.sleep(0.2)
                 continue
 
             # 检查容量上限
             if job.requires_cookie:
                 if _run_cookie >= _cap_cookie:
+                    async with self._lock:
+                        job = self._jobs.get(job_id)
+                        if job:
+                            job.wait_cycles += 1
+                            job.last_wait_reason = 'cap_cookie'
                     await asyncio.sleep(0.1)
                     continue
             else:
                 if _run_nocookie >= _cap_nocookie:
+                    async with self._lock:
+                        job = self._jobs.get(job_id)
+                        if job:
+                            job.wait_cycles += 1
+                            job.last_wait_reason = 'cap_nocookie'
                     await asyncio.sleep(0.1)
                     continue
 
@@ -159,11 +187,17 @@ class RequestQueueManager:
                 job.status = JobStatus.RUNNING
                 job.started_at = datetime.now()
                 job.acquired_scope = acquired
+                # 记录等待时长（ms）
+                try:
+                    job.wait_ms = int((job.started_at - job.created_at).total_seconds() * 1000)
+                except Exception:
+                    job.wait_ms = 0
                 # 递增运行计数
                 if acquired == 'cookie':
                     _run_cookie += 1
                 else:
                     _run_nocookie += 1
+                logger.info(f"开始执行: {job.type} sid={job.subscription_id} id={job_id} scope={acquired} wait_ms={job.wait_ms} cycles={job.wait_cycles} reason={job.last_wait_reason}")
             return
 
     async def mark_done(self, job_id: str):

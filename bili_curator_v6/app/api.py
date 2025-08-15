@@ -151,6 +151,23 @@ async def get_system_status(db: Session = Depends(get_db)):
         "running_tasks": []
     }
 
+# 队列调试接口
+@app.get("/api/queue/stats")
+async def queue_stats():
+    """返回队列容量/运行/暂停与各通道排队数。"""
+    try:
+        return request_queue.stats()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/queue/list")
+async def queue_list():
+    """返回所有任务的快照（包含 wait_ms、last_wait_reason 等诊断字段）。"""
+    try:
+        return request_queue.list()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # 订阅管理API
 @app.get("/api/subscriptions")
 async def get_subscriptions(db: Session = Depends(get_db)):
@@ -1220,7 +1237,11 @@ async def get_directory_stats(db: Session = Depends(get_db)):
         s["total_videos"] += 1
         if v.video_path:
             s["downloaded_videos"] += 1
-        s["total_size"] += int(v.file_size or 0)
+        # 优先使用 total_size；否则回退到 file_size + audio_size
+        size_sum = (v.total_size if getattr(v, 'total_size', None) is not None else None)
+        if size_sum is None:
+            size_sum = int(v.file_size or 0) + int((getattr(v, 'audio_size', 0) or 0))
+        s["total_size"] += int(size_sum or 0)
 
     # 转列表，按大小/数量倒序
     result = list(stats.values())
@@ -1230,6 +1251,112 @@ async def get_directory_stats(db: Session = Depends(get_db)):
         "items": result,
         "total_dirs": len(result),
     }
+
+
+# —— 回填与校准：刷新视频/音频大小，写回 DB ——
+@app.post("/api/media/refresh-sizes")
+async def refresh_media_sizes(background: BackgroundTasks):
+    """后台回填磁盘大小（视频+音频），写回到 videos.file_size / audio_size / total_size。
+    - 非阻塞：启动后台任务后立即返回。
+    - 扫描策略：仅处理有 video_path 的记录；音频尝试匹配同名 .m4a。
+    """
+
+    def _find_audio_path(video_path: str) -> Optional[str]:
+        try:
+            p = Path(video_path)
+            stem = p.with_suffix("").name
+            candidate = p.with_name(stem + ".m4a")
+            if candidate.exists():
+                return str(candidate)
+        except Exception:
+            return None
+        return None
+
+    def _worker():
+        from .models import db as _db, Video as _Video
+        session = _db.get_session()
+        updated = 0
+        try:
+            q = session.query(_Video).filter(_Video.video_path.isnot(None))
+            for v in q.yield_per(200):
+                v_path = (v.video_path or '').strip()
+                if not v_path:
+                    continue
+                video_size = None
+                audio_size = None
+                try:
+                    if os.path.exists(v_path):
+                        video_size = os.path.getsize(v_path)
+                except Exception:
+                    video_size = None
+                # 仅当容器缺少音轨时，才统计旁路 .m4a 的体积，避免双重统计
+                def _has_audio_track(pth: str) -> bool:
+                    try:
+                        import subprocess
+                        proc = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=index', '-of', 'csv=p=0', pth],
+                                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                        return any(line.strip() for line in (proc.stdout or '').splitlines())
+                    except Exception:
+                        # 探测失败时，保守认为“有音轨”，以避免把残留 m4a 计入导致容量虚高
+                        return True
+
+                try:
+                    # 只有当视频存在而且“无音轨”时，尝试统计同名 m4a
+                    if v_path and os.path.exists(v_path) and (not _has_audio_track(v_path)):
+                        a_path = _find_audio_path(v_path)
+                        if a_path and os.path.exists(a_path):
+                            audio_size = os.path.getsize(a_path)
+                        else:
+                            audio_size = 0
+                    else:
+                        # 有音轨或视频不存在：不计旁路音频
+                        audio_size = 0 if video_size is not None else None
+                except Exception:
+                    audio_size = 0 if video_size is not None else None
+
+                # 若两者皆为空，跳过
+                if video_size is None and audio_size is None:
+                    continue
+
+                new_file_size = int(video_size) if video_size is not None else (v.file_size or 0)
+                new_audio_size = int(audio_size) if audio_size is not None else (getattr(v, 'audio_size', 0) or 0)
+                new_total = int(new_file_size) + int(new_audio_size)
+
+                changed = False
+                if v.file_size != new_file_size:
+                    v.file_size = new_file_size
+                    changed = True
+                # 兼容旧库无字段的情况：getattr/setattr
+                if getattr(v, 'audio_size', None) != new_audio_size:
+                    try:
+                        setattr(v, 'audio_size', new_audio_size)
+                        changed = True
+                    except Exception:
+                        pass
+                if getattr(v, 'total_size', None) != new_total:
+                    try:
+                        setattr(v, 'total_size', new_total)
+                        changed = True
+                    except Exception:
+                        pass
+                if changed:
+                    updated += 1
+                    # 分批提交，降低事务体积
+                    if updated % 200 == 0:
+                        try:
+                            session.commit()
+                        except Exception:
+                            session.rollback()
+            try:
+                session.commit()
+            except Exception:
+                session.rollback()
+        finally:
+            session.close()
+
+    # 后台执行
+    background.add_task(_worker)
+    return {"message": "刷新任务已启动", "status": "started"}
 
 
 @app.get("/api/media/directory-videos")

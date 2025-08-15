@@ -63,7 +63,9 @@ class Video(Base):
     thumbnail_path = Column(Text)  # 缩略图文件路径
     
     # 统计信息
-    file_size = Column(Integer)  # 文件大小(字节)
+    file_size = Column(Integer)  # 视频文件大小(字节)
+    audio_size = Column(Integer)  # 音频文件大小(字节，分离封装时存在)
+    total_size = Column(Integer)  # 总大小(字节，视频+音频)，用于聚合加速
     view_count = Column(Integer, default=0)  # 播放量
     
     # 状态信息
@@ -249,6 +251,12 @@ class Database:
                         conn.exec_driver_sql("UPDATE download_tasks SET bilibili_id = video_id WHERE bilibili_id IS NULL")
                     except Exception as ee:
                         print(f"迁移download_tasks.video_id到bilibili_id失败: {ee}")
+
+            # videos 表：补齐大小相关列（audio_size、total_size）
+            if not has_column('videos', 'audio_size'):
+                conn.exec_driver_sql("ALTER TABLE videos ADD COLUMN audio_size INTEGER")
+            if not has_column('videos', 'total_size'):
+                conn.exec_driver_sql("ALTER TABLE videos ADD COLUMN total_size INTEGER")
 
         except Exception as e:
             print(f"数据库迁移失败: {e}")
