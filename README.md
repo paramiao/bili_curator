@@ -166,7 +166,7 @@ pip install -r requirements.txt
 ### 基本使用
 ```bash
 # 下载合集（推荐用法）
-python bilibili_collection_downloader_v5.py \
+python legacy/v5/bilibili_collection_downloader_v5.py \
   "https://space.bilibili.com/351754674/lists/2416048?type=season" \
   "/Volumes/nas-mk/" \
   --cookies "SESSDATA=your_sessdata_here"
@@ -175,7 +175,7 @@ python bilibili_collection_downloader_v5.py \
 ### 高级配置
 ```bash
 # 完整配置示例
-python bilibili_collection_downloader_v5.py \
+python legacy/v5/bilibili_collection_downloader_v5.py \
   "collection_url" "/output/dir" \
   --cookies "SESSDATA=your_sessdata" \
   --naming title \
