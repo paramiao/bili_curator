@@ -70,4 +70,4 @@ chmod +x scripts/manage.sh
 - 刷新远端总数（快速路径，不枚举）：
   - `curl -s http://localhost:8080/api/subscriptions/1/expected-total`
 
-更多 API 与操作见 `README.md` 与 `docs/REQUEST_QUEUE_DESIGN.md`、`docs/BACKEND_IMPLEMENTATION.md`、`docs/KNOWN_ISSUES.md`。
+更多 API 与操作见 `README.md`、`docs/BACKEND_IMPLEMENTATION.md`、`docs/KNOWN_ISSUES.md`。
