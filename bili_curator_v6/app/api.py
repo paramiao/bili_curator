@@ -460,6 +460,7 @@ async def get_subscription_expected_total(subscription_id: int, db: Session = De
                 common_args += ['--cookies', cookies_path]
 
             async def run_and_parse(args):
+                timeout_sec = int(os.getenv('EXPECTED_TOTAL_TIMEOUT', '30'))
                 async with sub_lock:
                     async with yt_dlp_semaphore:
                         proc = await asyncio.create_subprocess_exec(
@@ -467,46 +468,21 @@ async def get_subscription_expected_total(subscription_id: int, db: Session = De
                             stdout=asyncio.subprocess.PIPE,
                             stderr=asyncio.subprocess.PIPE
                         )
-                        out, err = await proc.communicate()
-                        return proc.returncode, out, err
+                        try:
+                            out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
+                            return proc.returncode, out, err
+                        except asyncio.TimeoutError:
+                            logger.warning(f"expected_total 命令超时 (>{timeout_sec}s)，正在终止: {' '.join(args)}")
+                            try:
+                                proc.terminate()
+                                await asyncio.wait_for(proc.wait(), timeout=5.0)
+                            except asyncio.TimeoutError:
+                                proc.kill()
+                            raise
 
             expected_total = None
             last_err = None
-            # 手动分页
-            try:
-                chunk_size = 100
-                max_chunks = 50
-                total_count = 0
-                chunk_idx = 0
-                while chunk_idx < max_chunks:
-                    start = chunk_idx * chunk_size + 1
-                    end = start + chunk_size - 1
-                    cmd_chunk = common_args + ['--dump-json', '--flat-playlist', '--playlist-items', f'{start}-{end}', sub.url]
-                    rc, out, err = await run_and_parse(cmd_chunk)
-                    if rc != 0:
-                        last_err = err.decode('utf-8', errors='ignore')
-                        break
-                    count_this = 0
-                    for line in (out.decode('utf-8', errors='ignore') or '').strip().split('\n'):
-                        if not line.strip():
-                            continue
-                        try:
-                            _ = json_lib.loads(line)
-                            count_this += 1
-                        except json_lib.JSONDecodeError:
-                            continue
-                    total_count += count_this
-                    if count_this < chunk_size:
-                        break
-                    chunk_idx += 1
-                    try:
-                        await asyncio.sleep(random.uniform(2, 4))
-                    except Exception:
-                        pass
-                if total_count > 0:
-                    expected_total = total_count
-            except Exception as e:
-                last_err = e
+            # 只使用快速元数据路径（不做分页枚举）
 
             # A：dump-single-json
             try:

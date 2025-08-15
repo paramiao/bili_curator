@@ -1,6 +1,6 @@
 # 后端实现说明（Backend Implementation）
 
-更新时间：2025-08-15 13:57 (Asia/Shanghai)
+更新时间：2025-08-15 17:49 (Asia/Shanghai)
 
 ## 1. 关键代码路径
 - API：`bili_curator_v6/app/api.py`
@@ -30,7 +30,11 @@
 
 ## 5. 统计与远端总数
 - 本地统计：`total_videos/downloaded_videos/pending_videos` 来源于 DB + 目录关联；
-- 远端总数：`GET /api/subscriptions/{id}/expected-total` 独立获取，前端单独展示与刷新。
+- 远端总数：`GET /api/subscriptions/{id}/expected-total` 采用 yt-dlp 的快速元数据路径获取计数（不进行分页枚举）：
+  - 优先 `--flat-playlist --dump-single-json` 读取 `n_entries`，回退 `entries.length`；
+  - 次选 `-J` 读取 `n_entries`/`playlist_count`/`entries.length`；
+  - 兜底 `--dump-json --playlist-items 1` 读取首条中的计数字段；
+  - 所有调用均设置超时（`EXPECTED_TOTAL_TIMEOUT`，默认 30s），失败再走 Cookie 回退。
 
 ## 6. Cookie 与 UA 策略
 - 统一通过 `--cookies` 传入 yt-dlp，使用临时 Netscape 格式文件；
@@ -46,7 +50,7 @@
   - 运行：`mark_running(job_id)`；完成/失败：`mark_done/mark_failed(job_id)`；控制：暂停/恢复/取消/置顶。
   - 统计：`stats()` 返回并发容量、运行计数、分通道排队数（`queued_cookie/queued_nocookie`）。
 - 并发原语：
-  - `yt_dlp_semaphore = asyncio.Semaphore(1)`：全局 yt-dlp 串行。
+  - `yt_dlp_semaphore = asyncio.Semaphore(1)`：全局 yt-dlp 串行；所有 yt-dlp 子进程均配置超时与终止策略，避免卡死。
   - `get_subscription_lock(subscription_id)`：订阅级互斥，确保同订阅严格串行。
 - 下载类任务强制 `requires_cookie=True` 并入队登记，以保证成功率与可观测。
 
@@ -64,3 +68,12 @@
   - 远端总数：`GET /api/subscriptions/{id}/expected-total` → `type=expected_total`（默认无 Cookie，失败回退 Cookie 并提升优先级）。
   - 合集列表：`list_fetch`（Cookie）。
   - 下载：`download`（强制 Cookie）。
+
+## 11. 配置与环境变量（新增）
+- 分页与上限：
+  - `LIST_MAX_CHUNKS=200`（合集列表抓取的最大分页数上限，默认 200；与单页 100 搭配 → 上限约 20,000 条）。
+- 子进程超时：
+  - `LIST_FETCH_CMD_TIMEOUT=120`（列表抓取子进程超时秒数）。
+  - `DOWNLOAD_CMD_TIMEOUT=1800`（下载子进程超时秒数）。
+  - `META_CMD_TIMEOUT=60`（视频元数据子进程超时秒数）。
+  - `EXPECTED_TOTAL_TIMEOUT=30`（expected-total 快速探测超时秒数）。

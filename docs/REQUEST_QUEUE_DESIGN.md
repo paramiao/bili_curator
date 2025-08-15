@@ -1,6 +1,6 @@
 # 全局请求队列与分级限流设计
 
-更新时间：2025-08-15 13:56 (Asia/Shanghai)
+更新时间：2025-08-15 17:48 (Asia/Shanghai)
 
 ## 目标
 - 统一管理所有对 B 站的外网请求（expected-total、parse-collection、列表抓取、下载等），防止并发叠加引发风控。
@@ -33,7 +33,7 @@
   - Cookie Lane：需要 Cookie 的任务；默认并发=1，严格限流。
   - NoCookie Lane：不需要 Cookie 的任务；并发可配置（默认 1–2），UA 可轮换。
 - 执行约束：
-  - 全局 `yt_dlp_semaphore = Semaphore(1)`：所有 yt-dlp 子进程串行，控压风控。
+  - 全局 `yt_dlp_semaphore = Semaphore(1)`：所有 yt-dlp 子进程串行，控压风控；并为子进程调用设置独立超时（见“配置与默认值”）。
   - 订阅级互斥 `locks[sid] = asyncio.Lock()`：同订阅任务严格串行。
 - 调度策略：按 `priority`、创建时间排序，同订阅任务保持顺序。
 - 重试与退避：指数退避（如 2–5s 起步），最大重试 N 次，可按 `type` 配置。
@@ -47,6 +47,7 @@
 
 ## 端点改造为“入队”模式
 - `GET /api/subscriptions/{id}/expected-total` → 入队 `type=expected_total`；
+  - 内部采用 yt-dlp 的“快速元数据路径”（`--flat-playlist --dump-single-json` / `-J` / `--dump-json --playlist-items 1`）读取计数字段，不做分页枚举；
   - `sync=true` 支持在队列内执行并阻塞返回（等待任务完成或超时）。
 - `POST /api/subscriptions/{id}/download` → 入队 `type=list_fetch`，完成后再入队 `type=download`；
   - 下载类任务统一强制 `requires_cookie=true`，以提升成功率与稳定性；
@@ -66,6 +67,11 @@
 - `QUEUE_NOCOOKIE_LANE_CONCURRENCY=1`
 - `UA_PROFILES=desktop,mobile`
 - `YT_DLP_EXTRACTOR_ARGS=...`
+- `LIST_MAX_CHUNKS=200`（合集列表抓取的最大分页数上限，默认 200；配合单页 100 → 上限约 20,000 条）
+- `LIST_FETCH_CMD_TIMEOUT=120`（列表抓取子进程超时秒数）
+- `DOWNLOAD_CMD_TIMEOUT=1800`（下载子进程超时秒数）
+- `META_CMD_TIMEOUT=60`（视频元数据子进程超时秒数）
+- `EXPECTED_TOTAL_TIMEOUT=30`（expected-total 快速探测超时秒数）
 
 ## 前端管理后台
 - “请求队列”页/卡片：
@@ -131,7 +137,7 @@
 - 分级限流/暂停恢复：调整容量与暂停状态，验证 Cookie/NoCookie 通道并发上限与 queued→running 行为。
 - 订阅互斥：同一 `subscription_id` 下并发触发多操作，确认严格串行。
 - 队列控制：取消与置顶在 queued/running 两种状态下的行为与资源释放正确。
-- 链路一致性：expected-total/列表/下载的 UA/Referer/重试/分段/回退一致性与超大合集（999）健壮性。
+  - 链路一致性：expected-total（快速路径、无枚举）/列表/下载在 UA/Referer/重试/延时/超时策略上保持一致；校验超大合集（999）健壮性。
 - 前端闭环：管理页操作与 API 响应一致，stats 与实际并发计数相符。
 
 ## 后续迭代计划（建议）

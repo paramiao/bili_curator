@@ -13,7 +13,7 @@
         .container { max-width: 1200px; margin: 2rem auto; padding: 0 1rem; }
         .card { background: white; border-radius: 12px; padding: 1.5rem 2rem; margin-bottom: 1.5rem; box-shadow: 0 4px 20px rgba(0,0,0,0.08); border: 1px solid #e5e7eb; transition: all 0.3s ease; }
         .card:hover { box-shadow: 0 8px 30px rgba(0,0,0,0.12); transform: translateY(-2px); }
-        .card h3 { margin-bottom: 0.5rem; font-size: 1.1rem; color: #333; }
+        .card h3 { margin-bottom: 0.5rem; font-size: 1.05rem; color: #333; }
         .tabs { display: flex; border-bottom: 1px solid #ddd; margin-bottom: 1rem; background: #fff; border-radius: 8px 8px 0 0; }
         .tab { padding: 0.75rem 1.5rem; cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.3s ease; font-weight: 500; }
         .tab:hover { background: #f8f9fa; }
@@ -75,6 +75,8 @@
         table.data tbody tr:nth-child(even) { background: #fcfdff; }
         table.data tbody tr:hover { background: #f0f7ff; }
         .pager { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+        .num { text-align: right; }
+        .mono { font-family: Menlo, Monaco, Consolas, 'Courier New', monospace; font-size: 12px; color: #555; }
 
         /* 卡片内分节标题行 */
         .card .section-header { display:flex; justify-content:space-between; align-items:center; margin-bottom: 8px; }
@@ -286,12 +288,7 @@
         }
 
         /* 订阅统计样式 */
-        .subscription-stats {
-            display: flex;
-            gap: 16px;
-            margin-top: 8px;
-            font-size: 14px;
-        }
+        .subscription-stats { display: flex; gap: 12px; margin-top: 6px; font-size: 13px; }
 
         .stat-item {
             padding: 4px 8px;
@@ -314,13 +311,9 @@
             color: #f57c00;
         }
 
-        .subscription-item {
-            border: 1px solid #e9ecef;
-            border-radius: 8px;
-            padding: 16px;
-            margin-bottom: 12px;
-            background-color: #fff;
-        }
+        .subscription-item { border: 1px solid #e9ecef; border-radius: 8px; padding: 14px; margin-bottom: 12px; background-color: #fff; }
+        .section-toolbar { display:flex; gap:8px; align-items:center; }
+        .muted { color:#6b7280; }
 
         .subscription-header {
             display: flex;
@@ -1466,19 +1459,25 @@
                 <tr>
                     <td>${x.subscription_name || '-'}</td>
                     <td>${x.type || '-'}</td>
-                    <td style="text-align:right;">${x.total_videos}</td>
-                    <td style="text-align:right;">${x.downloaded_videos}</td>
-                    <td style="text-align:right;">${formatBytes(x.total_size || 0)}</td>
+                    <td class="num">${x.total_videos}</td>
+                    <td class="num">${x.downloaded_videos}</td>
+                    <td class="num">${formatBytes(x.total_size || 0)}</td>
                     <td>${x.latest_upload ? new Date(x.latest_upload).toLocaleString() : '-'}</td>
                     <td><button class="btn btn-small" onclick="showSubscriptionDetail(${x.subscription_id}, '${(x.subscription_name || '').replace(/'/g, "\'")}')">查看明细</button></td>
                 </tr>
             `).join('');
             content.innerHTML = `
-                <div style="overflow:auto;">
-                  <table style="width:100%; border-collapse: collapse;">
+                <div class="table-wrap">
+                  <table class="data">
                     <thead>
-                      <tr style="text-align:left; border-bottom:1px solid #eee;">
-                        <th>订阅名称</th><th>类型</th><th style="text-align:right;">总数</th><th style="text-align:right;">已下载</th><th style="text-align:right;">容量</th><th>最近上传</th><th>操作</th>
+                      <tr>
+                        <th>订阅名称</th>
+                        <th>类型</th>
+                        <th class="num">总数</th>
+                        <th class="num">已下载</th>
+                        <th class="num">容量</th>
+                        <th>最近上传</th>
+                        <th>操作</th>
                       </tr>
                     </thead>
                     <tbody>${rows}</tbody>
@@ -1509,25 +1508,30 @@
                     <td>${escapeHtml(v.title || '')}</td>
                     <td>${v.bilibili_id || ''}</td>
                     <td>${v.upload_date ? new Date(v.upload_date).toLocaleDateString() : '-'}</td>
-                    <td style="text-align:right;">${formatBytes(v.file_size || 0)}</td>
+                    <td class="num">${formatBytes(v.file_size || 0)}</td>
                     <td>${v.on_disk ? '在磁盘' : '缺文件'}</td>
-                    <td><small>${v.video_path || '-'}</small></td>
+                    <td class="mono">${v.video_path || '-'}</td>
                 </tr>
             `).join('');
             const total = data.total || 0;
             const totalPages = Math.max(1, Math.ceil(total / size));
             const pager = `
-                <div style="display:flex; gap:8px; align-items:center; margin-top:8px;">
+                <div class="pager">
                     <button class="btn btn-outline" ${page<=1?'disabled':''} onclick="loadSubscriptionDetailPage(${sid}, ${page-1})">上一页</button>
                     <span>第 ${page} / ${totalPages} 页，共 ${total} 条</span>
                     <button class="btn btn-outline" ${page>=totalPages?'disabled':''} onclick="loadSubscriptionDetailPage(${sid}, ${page+1})">下一页</button>
                 </div>`;
             document.getElementById('media-sub-detail-content').innerHTML = `
-                <div style="overflow:auto;">
-                  <table style="width:100%; border-collapse: collapse;">
+                <div class="table-wrap">
+                  <table class="data">
                     <thead>
-                      <tr style="text-align:left; border-bottom:1px solid #eee;">
-                        <th>标题</th><th>BV</th><th>上传日期</th><th style="text-align:right;">大小</th><th>磁盘</th><th>路径</th>
+                      <tr>
+                        <th>标题</th>
+                        <th>BV</th>
+                        <th>上传日期</th>
+                        <th class="num">大小</th>
+                        <th>磁盘</th>
+                        <th>路径</th>
                       </tr>
                     </thead>
                     <tbody>${rows || '<tr><td colspan="6">暂无数据</td></tr>'}</tbody>
@@ -1563,17 +1567,21 @@
             const rows = items.map(d => `
               <tr>
                 <td>${escapeHtml(d.dir)}</td>
-                <td style="text-align:right;">${d.total_videos}</td>
-                <td style="text-align:right;">${d.downloaded_videos}</td>
-                <td style="text-align:right;">${formatBytes(d.total_size || 0)}</td>
+                <td class="num">${d.total_videos}</td>
+                <td class="num">${d.downloaded_videos}</td>
+                <td class="num">${formatBytes(d.total_size || 0)}</td>
                 <td><button class="btn btn-small" onclick="showDirectoryDetail('${d.dir.replace(/'/g, "\\'")}')">查看视频</button></td>
               </tr>`).join('');
             wrap.innerHTML = `
               <div class="table-wrap">
                 <table class="data">
                   <thead>
-                    <tr style="text-align:left; border-bottom:1px solid #eee;">
-                      <th>目录</th><th style="text-align:right;">总数</th><th style="text-align:right;">已下载</th><th style="text-align:right;">容量</th><th>操作</th>
+                    <tr>
+                      <th>目录</th>
+                      <th class="num">总数</th>
+                      <th class="num">已下载</th>
+                      <th class="num">容量</th>
+                      <th>操作</th>
                     </tr>
                   </thead>
                   <tbody>${rows}</tbody>
@@ -1607,14 +1615,14 @@
                     <td>${escapeHtml(v.title || '')}</td>
                     <td>${v.bilibili_id || ''}</td>
                     <td>${v.upload_date ? new Date(v.upload_date).toLocaleDateString() : '-'}</td>
-                    <td style="text-align:right;">${formatBytes(v.file_size || 0)}</td>
-                    <td><small>${v.video_path || '-'}</small></td>
+                    <td class="num">${formatBytes(v.file_size || 0)}</td>
+                    <td class="mono">${v.video_path || '-'}</td>
                 </tr>
             `).join('');
             const total = data.total || 0;
             const totalPages = Math.max(1, Math.ceil(total / size));
             const pager = `
-                <div style="display:flex; gap:8px; align-items:center; margin-top:8px;">
+                <div class="pager">
                     <button class="btn btn-outline" ${page<=1?'disabled':''} onclick="loadDirectoryVideosPage('${dir.replace(/'/g, "\\'")}', ${page-1})">上一页</button>
                     <span>第 ${page} / ${totalPages} 页，共 ${total} 条</span>
                     <button class="btn btn-outline" ${page>=totalPages?'disabled':''} onclick="loadDirectoryVideosPage('${dir.replace(/'/g, "\\'")}', ${page+1})">下一页</button>
@@ -1623,8 +1631,12 @@
                 <div class="table-wrap">
                   <table class="data">
                     <thead>
-                      <tr style="text-align:left; border-bottom:1px solid #eee;">
-                        <th>标题</th><th>BV</th><th>上传日期</th><th style="text-align:right;">大小</th><th>路径</th>
+                      <tr>
+                        <th>标题</th>
+                        <th>BV</th>
+                        <th>上传日期</th>
+                        <th class="num">大小</th>
+                        <th>路径</th>
                       </tr>
                     </thead>
                     <tbody>${rows || '<tr><td colspan="5">暂无数据</td></tr>'}</tbody>

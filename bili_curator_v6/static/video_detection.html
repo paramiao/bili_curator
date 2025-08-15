@@ -8,7 +8,7 @@
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             margin: 0;
-            padding: 20px;
+            padding: 16px;
             background-color: #f5f5f5;
         }
         .container {
@@ -17,19 +17,24 @@
             background: white;
             border-radius: 8px;
             box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            padding: 30px;
+            padding: 20px;
         }
         .header {
             text-align: center;
-            margin-bottom: 30px;
+            margin-bottom: 16px;
             color: #333;
         }
+        .header h1 { font-size: 20px; margin: 0 0 6px; }
+        .header p { margin: 0; color: #6b7280; font-size: 12px; }
         .status-card {
             background: #f8f9fa;
             border-radius: 8px;
-            padding: 20px;
-            margin-bottom: 20px;
-            border-left: 4px solid #007bff;
+            padding: 12px;
+            margin-bottom: 12px;
+            border-left: 3px solid #007bff;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
         }
         .status-indicator {
             display: inline-block;
@@ -42,16 +47,17 @@
         .status-stopped { background-color: #dc3545; }
         .controls {
             display: flex;
-            gap: 10px;
-            margin-bottom: 20px;
+            gap: 8px;
+            margin-bottom: 12px;
             flex-wrap: wrap;
+            justify-content: flex-end;
         }
         .btn {
-            padding: 10px 20px;
+            padding: 8px 14px;
             border: none;
             border-radius: 5px;
             cursor: pointer;
-            font-size: 14px;
+            font-size: 13px;
             transition: all 0.3s;
         }
         .btn-primary { background: #007bff; color: white; }
@@ -64,10 +70,10 @@
             background: #f8f9fa;
             padding: 20px;
             border-radius: 8px;
-            margin-bottom: 20px;
+            margin-bottom: 12px;
         }
         .form-group {
-            margin-bottom: 15px;
+            margin-bottom: 12px;
         }
         .form-group label {
             display: block;
@@ -84,7 +90,7 @@
             background: #f8f9fa;
             padding: 20px;
             border-radius: 8px;
-            margin-top: 20px;
+            margin-top: 12px;
         }
         .log-content {
             background: #1e1e1e;
@@ -98,24 +104,24 @@
         }
         .stats-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 15px;
-            margin-bottom: 20px;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 12px;
+            margin-bottom: 12px;
         }
         .stat-card {
             background: #fff;
             border: 1px solid #e9ecef;
             border-radius: 8px;
-            padding: 15px;
+            padding: 12px;
             text-align: center;
         }
         .stat-number {
-            font-size: 24px;
+            font-size: 20px;
             font-weight: bold;
             color: #007bff;
         }
         .stat-label {
-            font-size: 12px;
+            font-size: 11px;
             color: #6c757d;
             margin-top: 5px;
         }
@@ -123,6 +129,12 @@
         .topnav { display: flex; gap: 8px; align-items: center; margin: 0 0 16px; }
         .topnav a { text-decoration: none; color: #374151; padding: 8px 12px; border: 1px solid #e5e7eb; border-radius: 8px; background: #f9fafb; }
         .topnav a.active { background: #2563eb; color: #fff; border-color: #1d4ed8; }
+        
+        /* small screens tweaks */
+        @media (max-width: 480px) {
+            .container { padding: 16px; }
+            .controls { justify-content: flex-start; }
+        }
     </style>
 </head>
 <body>

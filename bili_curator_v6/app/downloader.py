@@ -95,6 +95,12 @@ class BilibiliDownloaderV6:
             self.list_page_gap_max = max(self.list_page_gap_min, pgmax)
         except Exception:
             self.list_page_gap_min, self.list_page_gap_max = 3.0, 6.0
+        self.list_max_chunks = _env_int('LIST_MAX_CHUNKS', 200, 10, 1000) # 分页抓取最大块数
+
+        # yt-dlp 进程超时（秒）
+        self.list_fetch_cmd_timeout = _env_int('LIST_FETCH_CMD_TIMEOUT', 120, 10, 600)
+        self.download_cmd_timeout = _env_int('DOWNLOAD_CMD_TIMEOUT', 1800, 60, 7200)
+        self.meta_cmd_timeout = _env_int('META_CMD_TIMEOUT', 60, 10, 300)
     
     async def download_collection(self, subscription_id: int, db: Session) -> Dict[str, Any]:
         """下载合集"""
@@ -244,8 +250,17 @@ class BilibiliDownloaderV6:
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE
                     )
-                    out, err = await proc.communicate()
-                    return proc.returncode, out, err
+                    try:
+                        out, err = await asyncio.wait_for(proc.communicate(), timeout=self.list_fetch_cmd_timeout)
+                        return proc.returncode, out, err
+                    except asyncio.TimeoutError:
+                        logger.warning(f"列表抓取命令超时 (>{self.list_fetch_cmd_timeout}s)，正在终止: {' '.join(args)}")
+                        try:
+                            proc.terminate()
+                            await asyncio.wait_for(proc.wait(), timeout=5.0)
+                        except asyncio.TimeoutError:
+                            proc.kill()
+                        raise
 
             videos: List[Dict] = []
             last_err = None
@@ -253,7 +268,7 @@ class BilibiliDownloaderV6:
             # 优先：手动分页抓取，避免一次性请求过大触发风控
             # 分段大小、重试与退避由环境变量控制
             chunk_size = self.list_chunk_size
-            max_chunks = 50  # 安全上限（最多约 5000 条）
+            max_chunks = self.list_max_chunks
             chunk_idx = 0
             while chunk_idx < max_chunks:
                 start = chunk_idx * chunk_size + 1
@@ -680,7 +695,16 @@ class BilibiliDownloaderV6:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
-                stdout, stderr = await process.communicate()
+                try:
+                    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=self.meta_cmd_timeout)
+                except asyncio.TimeoutError:
+                    logger.warning(f"元数据获取命令超时 (>{self.meta_cmd_timeout}s)，正在终止: {' '.join(cmd)}")
+                    try:
+                        process.terminate()
+                        await asyncio.wait_for(process.wait(), timeout=5.0)
+                    except asyncio.TimeoutError:
+                        process.kill()
+                    return None
             if process.returncode != 0:
                 err = stderr.decode('utf-8', errors='ignore')
                 logger.warning(f"获取视频元数据失败: {err}")
@@ -769,8 +793,17 @@ class BilibiliDownloaderV6:
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE
                     )
-                    out, err = await proc.communicate()
-                return proc.returncode, out, err
+                    try:
+                        out, err = await asyncio.wait_for(proc.communicate(), timeout=self.download_cmd_timeout)
+                        return proc.returncode, out, err
+                    except asyncio.TimeoutError:
+                        logger.warning(f"下载命令超时 (>{self.download_cmd_timeout}s)，正在终止: {' '.join(cmd)}")
+                        try:
+                            proc.terminate()
+                            await asyncio.wait_for(proc.wait(), timeout=5.0)
+                        except asyncio.TimeoutError:
+                            proc.kill()
+                        raise
 
             # 首选 1080 限制，失败则回退到通用最佳
             try:
