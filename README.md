@@ -34,6 +34,24 @@ V6 在保留 V5 本地增量下载能力的基础上，引入 Web 后端与订�
 - __统计与下载一致__：`GET /api/subscriptions/{id}/expected-total` 与下载端同样使用分段统计，确保口径一致。
 
 ### 🚀 快速操作（Docker 部署）
+
+推荐使用一键脚本：`scripts/manage.sh`（见 `docs/DEPLOY_WITH_DOCKER.md`）
+
+```bash
+# 首次赋权
+chmod +x scripts/manage.sh
+
+# 启动/重启（自动构建）
+./scripts/manage.sh up
+
+# 查看日志
+./scripts/manage.sh logs
+
+# 健康检查
+./scripts/manage.sh health
+```
+
+也可直接使用 compose：
 ```bash
 # 启动/重启服务
 docker compose -f bili_curator_v6/docker-compose.yml up -d
@@ -196,12 +214,12 @@ python bilibili_collection_downloader_v5.py \
 - ✅ **修复下载**：自动检测并重新下载损坏的文件
 - ✅ **任意文件名**：支持重命名后的文件（基于JSON内容识别）
 
-## 🛠️ 工具脚本
+## 🛠️ 工具脚本（Legacy CLI，V6 以服务端为主）
 
-### 批量下载
+### 批量下载（Legacy）
 ```bash
-# 使用配置文件批量下载多个合集
-python batch_download_v4.py --config collections_config_v4.json
+# 使用配置文件批量下载多个合集（已迁移至 legacy/）
+python legacy/batch_download_v4.py --config collections_config_v4.json
 ```
 
 ### 诊断工具

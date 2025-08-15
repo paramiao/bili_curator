@@ -17,8 +17,6 @@ services:
       - ./web:/app/web:ro
       # 应用代码挂载（确保API和服务代码持久化）
       - ./app:/app/app:ro
-      # 导入脚本直接挂载（只读，防止容器内意外修改）
-      - ./import_existing_videos.py:/app/import_existing_videos.py:ro
       # 主应用文件挂载
       - ./main.py:/app/main.py:ro
     environment:
