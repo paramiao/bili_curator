@@ -284,10 +284,19 @@ tail -f /output/dir/download_v5.log
 
 ## 📚 相关文档
 
-- [智能增量下载详解](SMART_INCREMENTAL_EXAMPLE.md)
-- [V5版本改进指南](IMPROVEMENT_GUIDE_V5.md)
-- [Cookie使用指南](COOKIE_GUIDE.md)
- - [Legacy CLI（V4/V5）](docs/LEGACY_CLI.md)
+### 架构与技术
+- [V6 架构设计](V6_ARCHITECTURE_DESIGN.md) - 当前版本完整架构说明
+- [后端实现详解](docs/BACKEND_IMPLEMENTATION.md) - 模块设计、队列、Cookie管理
+- [前端实现详解](docs/FRONTEND_IMPLEMENTATION.md) - Web界面与交互设计
+- [部署与运维](docs/DEPLOY_WITH_DOCKER.md) - Docker部署、一键脚本使用
+
+### 问题与规划
+- [已知问题](docs/KNOWN_ISSUES.md) - 常见问题与解决方案
+- [开发路线图](docs/ROADMAP_V6.md) - 功能规划与优先级
+
+### 历史文档
+- [Legacy CLI（V4/V5）](docs/LEGACY_CLI.md) - 历史命令行工具使用
+- [历史文档归档](docs/legacy/) - 过时的设计文档与需求
 
 ## 🤝 贡献
 
