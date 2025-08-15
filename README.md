@@ -214,25 +214,8 @@ python legacy/v5/bilibili_collection_downloader_v5.py \
 - ✅ **修复下载**：自动检测并重新下载损坏的文件
 - ✅ **任意文件名**：支持重命名后的文件（基于JSON内容识别）
 
-## 🛠️ 工具脚本（Legacy CLI，V6 以服务端为主）
-
-### 批量下载（Legacy）
-```bash
-# 使用配置文件批量下载多个合集（已迁移至 legacy/）
-python legacy/batch_download_v4.py --config collections_config_v4.json
-```
-
-### 诊断工具
-```bash
-# 检查Cookie和网络连接
-python diagnose_bilibili.py --test-cookie
-```
-
-### 清理废弃脚本
-```bash
-# 清理不再需要的旧版本脚本
-python cleanup_obsolete_scripts.py --execute
-```
+## 🛠️ Legacy CLI（V4/V5）
+详见 `docs/LEGACY_CLI.md`。
 
 ## ⚙️ 配置选项
 
@@ -304,6 +287,7 @@ tail -f /output/dir/download_v5.log
 - [智能增量下载详解](SMART_INCREMENTAL_EXAMPLE.md)
 - [V5版本改进指南](IMPROVEMENT_GUIDE_V5.md)
 - [Cookie使用指南](COOKIE_GUIDE.md)
+ - [Legacy CLI（V4/V5）](docs/LEGACY_CLI.md)
 
 ## 🤝 贡献
 
