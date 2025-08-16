@@ -37,6 +37,19 @@
     <h1 style="font-size:22px; margin: 8px 0 16px;">请求队列管理</h1>
     <div class="muted" style="margin:-6px 0 16px;">可视化控制并发、暂停和任务优先级，实时观察队列</div>
 
+    <!-- 订阅同步概览区块 -->
+    <div class="card" style="margin-bottom:12px">
+      <h2 style="display:flex; align-items:center; gap:8px;">订阅同步概览 <span id="sync-badge" class="badge">-</span></h2>
+      <div class="row" style="margin-bottom:8px;">
+        <input id="subscription-ids" placeholder="输入订阅ID列表，用逗号分隔 (如: 1,2,3)" style="width:300px" />
+        <button id="btn-load-sync" class="primary">加载</button>
+        <button id="btn-refresh-sync">刷新</button>
+      </div>
+      <div class="sync-overview" id="sync-overview">
+        <div class="muted">请输入订阅ID并点击"加载"查看同步状态</div>
+      </div>
+    </div>
+
   <div class="grid">
     <div class="card">
       <h2>暂停/恢复</h2>
@@ -257,6 +270,185 @@
       await loadRequests();
     };
 
+    // 订阅同步相关功能
+    let currentSyncIds = [];
+    let syncPoller = null;
+
+    class AdaptivePoller {
+      constructor(fetchFn, baseInterval = 5000) {
+        this.fetchFn = fetchFn;
+        this.baseInterval = baseInterval;
+        this.currentInterval = baseInterval;
+        this.isRunning = false;
+        this.consecutiveErrors = 0;
+        this.timeoutId = null;
+      }
+      
+      async poll() {
+        if (this.isRunning) return;
+        
+        this.isRunning = true;
+        try {
+          await this.fetchFn();
+          this.consecutiveErrors = 0;
+          this.currentInterval = this.baseInterval;
+        } catch (error) {
+          console.error('Sync polling error:', error);
+          this.consecutiveErrors++;
+          this.currentInterval = Math.min(
+            this.baseInterval * Math.pow(2, this.consecutiveErrors), 
+            30000
+          );
+        } finally {
+          this.isRunning = false;
+          this.timeoutId = setTimeout(() => this.poll(), this.currentInterval);
+        }
+      }
+      
+      start() {
+        this.stop();
+        this.poll();
+      }
+      
+      stop() {
+        if (this.timeoutId) {
+          clearTimeout(this.timeoutId);
+          this.timeoutId = null;
+        }
+      }
+    }
+
+    async function loadSyncOverview() {
+      if (!currentSyncIds.length) return;
+      
+      try {
+        const response = await fetch('/api/subscriptions/sync_overview', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ subscription_ids: currentSyncIds })
+        });
+        
+        if (!response.ok) throw new Error(await response.text());
+        const data = await response.json();
+        
+        renderSyncOverview(data.items || []);
+        updateSyncBadge(data.items || []);
+      } catch (e) {
+        $('sync-overview').innerHTML = `<div class="muted" style="color:#ef4444;">加载失败: ${e.message}</div>`;
+      }
+    }
+
+    function renderSyncOverview(items) {
+      const container = $('sync-overview');
+      if (!items.length) {
+        container.innerHTML = '<div class="muted">未找到同步状态数据</div>';
+        return;
+      }
+      
+      container.innerHTML = `
+        <div class="sync-grid">
+          ${items.map(item => `
+            <div class="sync-card" data-status="${item.status}">
+              <div class="sync-header">
+                <span class="sync-id">订阅 #${item.id}</span>
+                <span class="sync-status status ${item.status}">${getStatusText(item.status)}</span>
+              </div>
+              <div class="sync-stats">
+                <div class="sync-stat">
+                  <span class="sync-label">待下载</span>
+                  <span class="sync-value ${item.pending > 0 ? 'warn' : 'ok'}">${item.pending}</span>
+                </div>
+                <div class="sync-stat">
+                  <span class="sync-label">总数</span>
+                  <span class="sync-value">${item.remote_total}</span>
+                </div>
+                <div class="sync-stat">
+                  <span class="sync-label">更新时间</span>
+                  <span class="sync-value muted">${formatTime(item.updated_at) || '未知'}</span>
+                </div>
+              </div>
+              <div class="sync-actions">
+                <button onclick="viewSyncDetail(${item.id})" class="btn-detail">查看详情</button>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+        <div class="sync-notice muted" style="margin-top:8px; font-size:12px;">
+          💡 提示："同步完成"指本轮闭环结束，不代表全部已下载完成，请参考"待下载"数量
+        </div>
+      `;
+    }
+
+    function getStatusText(status) {
+      const statusMap = {
+        'idle': '空闲',
+        'running': '同步中...',
+        'completed': '本轮已完成',
+        'failed': '同步失败'
+      };
+      return statusMap[status] || status;
+    }
+
+    function updateSyncBadge(items) {
+      const badge = $('sync-badge');
+      if (!items.length) {
+        badge.textContent = '-';
+        badge.className = 'badge';
+        return;
+      }
+      
+      const running = items.filter(i => i.status === 'running').length;
+      const pending = items.reduce((sum, i) => sum + (i.pending || 0), 0);
+      
+      if (running > 0) {
+        badge.textContent = `${running}个同步中`;
+        badge.className = 'badge badge-warning';
+      } else if (pending > 0) {
+        badge.textContent = `${pending}个待下载`;
+        badge.className = 'badge badge-info';
+      } else {
+        badge.textContent = '全部完成';
+        badge.className = 'badge badge-success';
+      }
+    }
+
+    function viewSyncDetail(subscriptionId) {
+      window.open(`/static/subscription_detail.html?id=${subscriptionId}`, '_blank');
+    }
+
+    // 事件绑定
+    $('btn-load-sync').onclick = () => {
+      const input = $('subscription-ids').value.trim();
+      if (!input) {
+        alert('请输入订阅ID');
+        return;
+      }
+      
+      try {
+        currentSyncIds = input.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
+        if (!currentSyncIds.length) {
+          alert('请输入有效的订阅ID');
+          return;
+        }
+        
+        loadSyncOverview();
+        
+        // 启动轮询
+        if (syncPoller) syncPoller.stop();
+        syncPoller = new AdaptivePoller(loadSyncOverview);
+        syncPoller.start();
+        
+      } catch (e) {
+        alert('输入格式错误，请使用逗号分隔的数字');
+      }
+    };
+
+    $('btn-refresh-sync').onclick = () => {
+      if (currentSyncIds.length) {
+        loadSyncOverview();
+      }
+    };
+
     // Auto refresh
     loadStats();
     loadRequests();
@@ -268,6 +460,30 @@
     .badge { padding: 2px 8px; border-radius: 999px; font-size: 12px; border: 1px solid #e5e7eb; background:#f3f4f6; color:#374151; }
     .badge-success { background:#ecfdf5; color:#065f46; border-color:#a7f3d0; }
     .badge-danger { background:#fef2f2; color:#991b1b; border-color:#fecaca; }
+    .badge-warning { background:#fef3c7; color:#92400e; border-color:#fcd34d; }
+    .badge-info { background:#dbeafe; color:#1e40af; border-color:#93c5fd; }
+    
+    /* 同步概览样式 */
+    .sync-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin-top: 8px; }
+    .sync-card { border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; background: #fff; }
+    .sync-card[data-status="running"] { border-left: 4px solid #10b981; }
+    .sync-card[data-status="failed"] { border-left: 4px solid #ef4444; }
+    .sync-card[data-status="completed"] { border-left: 4px solid #6b7280; }
+    
+    .sync-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+    .sync-id { font-weight: 600; color: #374151; }
+    .sync-status { font-size: 12px; padding: 2px 6px; border-radius: 4px; }
+    
+    .sync-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; }
+    .sync-stat { display: flex; flex-direction: column; }
+    .sync-label { font-size: 11px; color: #6b7280; margin-bottom: 2px; }
+    .sync-value { font-weight: 600; color: #111827; }
+    .sync-value.warn { color: #dc2626; }
+    .sync-value.ok { color: #059669; }
+    
+    .sync-actions { text-align: right; }
+    .btn-detail { padding: 4px 8px; font-size: 12px; border: 1px solid #d1d5db; border-radius: 4px; background: #f9fafb; cursor: pointer; }
+    .btn-detail:hover { background: #f3f4f6; }
     .stats-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:12px; margin-top:8px; }
     .stat-card { border:1px solid #e5e7eb; border-radius:8px; padding:12px; background:#fff; }
     .stat-title { font-weight:600; margin-bottom:6px; color:#374151; }

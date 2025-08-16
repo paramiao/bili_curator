@@ -20,24 +20,10 @@ import subprocess
 from .models import Video, DownloadTask, Subscription, Settings, get_db
 from .cookie_manager import cookie_manager, rate_limiter, simple_retry
 from .queue_manager import yt_dlp_semaphore, get_subscription_lock, request_queue
+from .services.subscription_stats import recompute_subscription_stats
+from .services.http_utils import get_user_agent
 
-# UA 策略（与 API 层保持一致语义）：
-# - requires_cookie=True 时使用稳定 UA
-# - requires_cookie=False 时可使用随机 UA（此文件主要走 Cookie 通道）
-_UA_POOL = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0',
-]
 
-def get_user_agent(requires_cookie: bool) -> str:
-    try:
-        if requires_cookie:
-            return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-        return random.choice(_UA_POOL)
-    except Exception:
-        return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 
 class BilibiliDownloaderV6:
     def __init__(self, output_dir: str = None):
@@ -110,6 +96,17 @@ class BilibiliDownloaderV6:
         
         logger.info(f"开始下载合集: {subscription.name}")
 
+        # 同步状态：标记本次订阅同步开始（用于UI显示“周期更新/同步中”）
+        try:
+            self._set_sync_status(db, subscription_id, status='running', extra={
+                'name': subscription.name,
+                'type': subscription.type,
+                'started_at': datetime.now().isoformat()
+            })
+            db.commit()
+        except Exception as e:
+            logger.debug(f"设置同步状态失败（开始）: {e}")
+
         # 订阅目录（先计算，便于缓存列表）
         subscription_dir = Path(self._create_subscription_directory(subscription))
 
@@ -138,15 +135,34 @@ class BilibiliDownloaderV6:
             else:
                 raise
         
-        # 扫描已有文件（限定在当前订阅目录，避免跨合集干扰），数据库仍做全局去重
-        existing_videos = self._scan_existing_files(db, subscription_dir=subscription_dir)
+        # 高性能比对：针对大合集优化的智能查询策略
+        remote_video_count = len([vi for vi in video_list if vi.get('id')])
         
-        # 过滤需要下载的视频
-        new_videos = []
-        for video_info in video_list:
-            video_id = video_info.get('id')
-            if video_id not in existing_videos:
-                new_videos.append(video_info)
+        # 智能查询：如果远端视频数量较大，使用 IN 查询只检查相关视频
+        if remote_video_count > 100:
+            logger.info(f"大合集模式：远端 {remote_video_count} 个视频，使用批量查询优化")
+            remote_ids = [vi.get('id') for vi in video_list if vi.get('id')]
+            existing_videos = self._batch_check_existing(db, remote_ids, subscription_id=subscription_id, subscription_dir=subscription_dir)
+        else:
+            existing_videos = self._scan_existing_files(db, subscription_id=subscription_id, subscription_dir=subscription_dir)
+        
+        existing_ids = set(existing_videos.keys())
+        
+        # 保持远端顺序的新视频过滤（O(n)时间复杂度）
+        new_videos = [vi for vi in video_list if (vid := vi.get('id')) and vid not in existing_ids]
+        
+        logger.info(f"远端视频: {remote_video_count}, 本地已有: {len(existing_ids)}, 待下载: {len(new_videos)}")
+        # 同步状态：更新一次汇总数据，便于UI计算“剩余待下”
+        try:
+            self._set_sync_status(db, subscription_id, status='running', extra={
+                'remote_total': remote_video_count,
+                'existing': len(existing_ids),
+                'pending': len(new_videos),
+                'updated_at': datetime.now().isoformat()
+            })
+            db.commit()
+        except Exception as e:
+            logger.debug(f"设置同步状态失败（中间）: {e}")
         
         logger.info(f"发现 {len(new_videos)} 个新视频需要下载")
         
@@ -171,15 +187,111 @@ class BilibiliDownloaderV6:
                 except Exception:
                     pass
         
-        # 更新订阅检查时间
+        # 更新订阅检查时间并刷新统计
         subscription.last_check = datetime.now()
+        try:
+            recompute_subscription_stats(db, subscription_id, touch_last_check=False)
+        except Exception as e:
+            logger.warning(f"刷新订阅统计失败(下载完成后)：{e}")
         db.commit()
+        # 同步状态：标记完成
+        try:
+            self._set_sync_status(db, subscription_id, status='completed', extra={
+                'completed_at': datetime.now().isoformat(),
+                'remote_total': remote_video_count,
+                'new_downloads': len(new_videos)
+            })
+            db.commit()
+        except Exception as e:
+            logger.debug(f"设置同步状态失败（完成）: {e}")
         
         return {
             'subscription_id': subscription_id,
             'total_videos': len(video_list),
             'new_videos': len(new_videos),
             'download_results': download_results
+        }
+    
+
+    async def compute_pending_list(self, subscription_id: int, db: Session) -> Dict[str, Any]:
+        """计算远端-本地的差值列表（不触发下载）。
+        返回：{ subscription_id, remote_total, existing, pending, videos: [ {id,title,webpage_url} ] }
+        仅对 type=collection 有效。
+        """
+        subscription = db.query(Subscription).filter(Subscription.id == subscription_id).first()
+        if not subscription:
+            raise ValueError(f"订阅 {subscription_id} 不存在")
+        if subscription.type != 'collection' or not subscription.url:
+            raise ValueError("仅支持合集订阅或订阅缺少URL")
+
+        # 订阅目录，便于现有去重路径使用
+        subscription_dir = Path(self._create_subscription_directory(subscription))
+
+        # 获取远端视频列表（与下载路径一致，但不创建任何下载任务）
+        sub_lock = get_subscription_lock(subscription.id)
+        async with sub_lock:
+            video_list = await self._get_collection_videos(subscription.url, db, subscription_id=subscription.id)
+
+        remote_video_count = len([vi for vi in video_list if vi.get('id')])
+
+        # 选择合适的已存在检查策略
+        if remote_video_count > 100:
+            remote_ids = [vi.get('id') for vi in video_list if vi.get('id')]
+            existing_videos = self._batch_check_existing(db, remote_ids, subscription_id=subscription.id, subscription_dir=subscription_dir)
+        else:
+            existing_videos = self._scan_existing_files(db, subscription_id=subscription.id, subscription_dir=subscription_dir)
+
+        existing_ids = set(existing_videos.keys())
+        new_videos_full = [vi for vi in video_list if (vid := vi.get('id')) and vid not in existing_ids]
+
+        # 精简返回字段
+        def compact(vi: Dict[str, Any]) -> Dict[str, Any]:
+            return {
+                'id': vi.get('id'),
+                'title': vi.get('title') or vi.get('fulltitle') or vi.get('alt_title') or '',
+                'webpage_url': vi.get('webpage_url') or vi.get('url') or ''
+            }
+
+        pending_list = [compact(vi) for vi in new_videos_full]
+
+        # 结合全局请求队列，标记哪些视频已经在下载队列中（queued/running）
+        try:
+            jobs = request_queue.list()
+            queued_ids = {
+                j.get('video_id')
+                for j in jobs
+                if j.get('type') == 'download'
+                and j.get('subscription_id') == subscription_id
+                and j.get('status') in ('queued', 'running')
+                and j.get('video_id')
+            }
+        except Exception:
+            queued_ids = set()
+
+        for it in pending_list:
+            try:
+                it['is_queued'] = bool(it.get('id') in queued_ids)
+            except Exception:
+                it['is_queued'] = False
+
+        # 同步状态中写入一次统计，供前端 UI 使用（不改变状态机）
+        try:
+            self._set_sync_status(db, subscription_id, status='running', extra={
+                'remote_total': remote_video_count,
+                'existing': len(existing_ids),
+                'pending': len(pending_list),
+                'updated_at': datetime.now().isoformat()
+            })
+            db.commit()
+        except Exception:
+            pass
+
+        return {
+            'subscription_id': subscription_id,
+            'remote_total': remote_video_count,
+            'existing': len(existing_ids),
+            'pending': len(pending_list),
+            'videos': pending_list,
         }
     
 
@@ -263,6 +375,7 @@ class BilibiliDownloaderV6:
                         raise
 
             videos: List[Dict] = []
+            trace_events: List[Dict[str, Any]] = []
             last_err = None
 
             # 优先：手动分页抓取，避免一次性请求过大触发风控
@@ -270,6 +383,13 @@ class BilibiliDownloaderV6:
             chunk_size = self.list_chunk_size
             max_chunks = self.list_max_chunks
             chunk_idx = 0
+            # 连续失败阈值：若连续失败达到阈值则结束分页，避免无谓重试
+            try:
+                fail_streak_limit = int(os.getenv('LIST_FAIL_STREAK_LIMIT', '3'))
+            except Exception:
+                fail_streak_limit = 3
+            fail_streak = 0
+
             while chunk_idx < max_chunks:
                 start = chunk_idx * chunk_size + 1
                 end = start + chunk_size - 1
@@ -283,6 +403,7 @@ class BilibiliDownloaderV6:
                 attempt = 0
                 out, err = b'', b''
                 rc = 0
+                t0 = datetime.now()
                 while attempt < self.list_retry:
                     rc, out, err = await run_cmd(cmd_chunk)
                     if rc == 0:
@@ -295,8 +416,30 @@ class BilibiliDownloaderV6:
                     except Exception:
                         pass
                 if rc != 0:
-                    # 当前段最终失败，结束分页，转入后续回退策略
-                    break
+                    # 当前段最终失败：记录并继续后续分页，允许跳过个别失败区间
+                    fail_streak += 1
+                    logger.warning(f"分页抓取 {start}-{end} 最终失败，跳过该区间 (连续失败 {fail_streak}/{fail_streak_limit})")
+                    trace_events.append({
+                        'type': 'chunk_failed',
+                        'range': f'{start}-{end}',
+                        'attempts': attempt,
+                        'duration_ms': int((datetime.now() - t0).total_seconds()*1000),
+                        'error': last_err
+                    })
+                    if fail_streak >= fail_streak_limit:
+                        logger.warning("连续失败达到阈值，提前结束分页")
+                        break
+                    # 跳到下一段
+                    chunk_idx += 1
+                    # 段与段之间轻量延时（可配置），降低风控风险
+                    try:
+                        await asyncio.sleep(random.uniform(self.list_page_gap_min, self.list_page_gap_max))
+                    except Exception:
+                        pass
+                    continue
+                
+                # 成功获取当前段，重置连续失败计数
+                fail_streak = 0
                 count_this = 0
                 for line in (out.decode('utf-8', errors='ignore') or '').strip().split('\n'):
                     if not line.strip():
@@ -308,6 +451,12 @@ class BilibiliDownloaderV6:
                             count_this += 1
                     except json.JSONDecodeError:
                         continue
+                trace_events.append({
+                    'type': 'chunk_ok',
+                    'range': f'{start}-{end}',
+                    'count': count_this,
+                    'duration_ms': int((datetime.now() - t0).total_seconds()*1000)
+                })
                 # 本段不足 chunk_size，说明已到结尾
                 if count_this < chunk_size:
                     break
@@ -318,7 +467,23 @@ class BilibiliDownloaderV6:
                 except Exception:
                     pass
 
-            # 回退：若分页抓取失败或未取到任何内容，走原有 A/B/C 策略
+            # 统一去重合并（无论分页成功还是后续回退都需要）
+            def dedup_videos(video_list):
+                if not video_list:
+                    return video_list
+                try:
+                    uniq = {}
+                    for it in video_list:
+                        vid = it.get('id') if isinstance(it, dict) else None
+                        if isinstance(vid, str) and vid:
+                            uniq[vid] = it
+                    return list(uniq.values())
+                except Exception:
+                    return video_list
+            
+            videos = dedup_videos(videos)
+
+            # 回退：若分页抓取完全失败或未取到任何内容，走原有 A/B/C 策略
             if not videos:
                 # A. 扁平化单次JSON
                 cmd_a = common_args + ['--flat-playlist', '--dump-single-json', collection_url]
@@ -370,9 +535,22 @@ class BilibiliDownloaderV6:
                 else:
                     last_err = err.decode('utf-8', errors='ignore')
 
+            # 最终去重（回退策略可能产生重复）
+            videos = dedup_videos(videos)
+
             if not videos:
                 err_msg = f"yt-dlp未能解析到视频列表; last_error={last_err!s}"
                 logger.error(f"yt-dlp获取视频列表失败: {last_err}")
+                # 写入一次trace，便于UI显示失败原因
+                try:
+                    self._set_sync_trace(db, subscription_id, [{
+                        'type': 'list_failed',
+                        'error': str(last_err),
+                        'ts': datetime.now().isoformat()
+                    }])
+                    db.commit()
+                except Exception:
+                    pass
                 raise Exception(f"获取视频列表失败: {err_msg}")
 
             cookie_manager.update_cookie_usage(db, cookie.id)
@@ -383,58 +561,238 @@ class BilibiliDownloaderV6:
                     await request_queue.mark_done(job_id)
             except Exception:
                 pass
-            return videos
-        except Exception as e:
-            logger.error(f"获取合集视频列表失败: {e}")
-            if "403" in str(e) or "401" in str(e):
-                # 记录失败，按阈值禁用
-                try:
-                    cookie_manager.record_failure(db, cookie.id, str(e))
-                except Exception:
-                    cookie_manager.mark_cookie_banned(db, cookie.id, str(e))
-            # 412/风控：仅告警不计失败（避免误伤）
-            if "412" in str(e) or "precondition" in str(e).lower():
-                logger.warning("远端可能触发风控(412)，已跳过失败计数")
-            # 队列标记失败
+            # 写入trace（保留最近若干）
             try:
-                if job_id:
-                    await request_queue.mark_failed(job_id, str(e))
+                # 仅保留头尾与失败的关键事件，避免过大
+                compact = []
+                for ev in trace_events[-20:]:
+                    compact.append(ev)
+                compact.append({'type': 'list_done', 'count': len(videos), 'ts': datetime.now().isoformat()})
+                self._set_sync_trace(db, subscription_id, compact)
+                db.commit()
             except Exception:
                 pass
-            raise
-        finally:
-            if cookies_path and os.path.exists(cookies_path):
+            return videos
+        except Exception as e:
+                logger.error(f"获取合集视频列表失败: {e}")
+                if "403" in str(e) or "401" in str(e):
+                    # 记录失败，按阈值禁用
+                    try:
+                        cookie_manager.record_failure(db, cookie.id, str(e))
+                    except Exception:
+                        cookie_manager.mark_cookie_banned(db, cookie.id, str(e))
+                # 412/风控：仅告警不计失败（避免误伤）
+                if "412" in str(e) or "precondition" in str(e).lower():
+                    logger.warning("远端可能触发风控(412)，已跳过失败计数")
+                # 队列标记失败
                 try:
-                    os.remove(cookies_path)
+                    if job_id:
+                        await request_queue.mark_failed(job_id, str(e))
                 except Exception:
                     pass
+                raise
+        finally:
+                if cookies_path and os.path.exists(cookies_path):
+                    try:
+                        os.remove(cookies_path)
+                    except Exception:
+                        pass
+
+    # ----------------------
+    # 同步状态与Trace辅助
+    # ----------------------
+    def _set_sync_status(self, db: Session, subscription_id: int, *, status: str, extra: Optional[Dict[str, Any]] = None) -> None:
+        try:
+            key = f"sync:{subscription_id}:status"
+            payload = {'status': status, 'ts': datetime.now().isoformat()}
+            if extra:
+                payload.update(extra)
+            val = json.dumps(payload, ensure_ascii=False)
+            
+            # 使用 UPSERT 避免并发写入问题
+            from sqlalchemy import text
+            db.execute(text("""
+                INSERT INTO settings (key, value, description) 
+                VALUES (:key, :val, '订阅同步状态')
+                ON CONFLICT(key) DO UPDATE SET 
+                value = :val, updated_at = CURRENT_TIMESTAMP
+            """), {"key": key, "val": val})
+        except Exception as e:
+            logger.debug(f"记录同步状态失败: {e}")
+
+    def _set_sync_trace(self, db: Session, subscription_id: int, events: List[Dict[str, Any]]) -> None:
+        try:
+            key = f"sync:{subscription_id}:trace"
+            s = db.query(Settings).filter(Settings.key == key).first()
+            # 读取现有并合并，保留最近50条
+            arr: List[Dict[str, Any]] = []
+            if s and s.value:
+                try:
+                    arr = json.loads(s.value)
+                    if not isinstance(arr, list):
+                        arr = []
+                except Exception:
+                    arr = []
+            arr.extend(events)
+            if len(arr) > 50:
+                arr = arr[-50:]
+            val = json.dumps(arr, ensure_ascii=False)
+            if s:
+                s.value = val
+                s.description = s.description or '订阅同步Trace'
+            else:
+                db.add(Settings(key=key, value=val, description='订阅同步Trace'))
+        except Exception as e:
+            logger.debug(f"记录同步Trace失败: {e}")
     
-    def _scan_existing_files(self, db: Session, subscription_dir: Optional[Path] = None) -> Dict[str, str]:
-        """扫描已有文件，构建视频ID映射
-        - 数据库：全局已下载视频（任何订阅）
-        - 文件系统：仅扫描当前订阅目录（若提供），避免跨合集误判与性能问题
+    def _scan_existing_files(self, db: Session, subscription_id: Optional[int] = None, subscription_dir: Optional[Path] = None) -> Dict[str, str]:
+        """扫描数据库（优先）或文件系统，返回已存在的视频ID->路径映射
+        优先数据库，因为更快；如果数据库查询失败，则尝试文件系统扫描（仅限指定目录）
+        """
+        existing_videos = {}
+        try:
+            # 查询数据库中已下载的视频，仅取必要列
+            scope = os.getenv('DEDUP_SCOPE', 'global').strip().lower()
+            query = db.query(Video.bilibili_id, Video.video_path).filter(Video.downloaded == True)
+            if scope == 'subscription' and subscription_id is not None:
+                query = query.filter(Video.subscription_id == subscription_id)
+            results = query.all()
+            for vid, vpath in results:
+                existing_videos[vid] = vpath or ''
+            logger.info(f"发现 {len(existing_videos)} 个已存在的视频")
+            return existing_videos
+        except Exception as e:
+            logger.warning(f"数据库查询失败，尝试文件系统扫描: {e}")
+            # 降级：如果优化查询失败，回退到原始方法
+            downloaded_videos = db.query(Video).filter(Video.downloaded == True).all()
+            for video in downloaded_videos:
+                existing_videos[video.bilibili_id] = video.video_path
+        
+        # 可配置：是否扫描文件系统加速去重（默认关闭以提升大合集性能）
+        scan_fs = os.getenv('DEDUP_SCAN_FILESYSTEM', '0')
+        if str(scan_fs).strip() in ('1', 'true', 'True', 'yes', 'on'):
+            # 同时扫描文件系统中的JSON文件（兼容V5格式），递归子目录，支持 *.json 与 *.info.json
+            # 仅限当前订阅目录（若提供），否则回退到全局下载目录
+            base_dir = Path(subscription_dir) if subscription_dir else self.output_dir
+            scanned = set()
+            for json_file in list(base_dir.rglob("*.json")) + list(base_dir.rglob("*.info.json")):
+                # 避免重复处理相同路径
+                if json_file in scanned:
+                    continue
+                scanned.add(json_file)
+                try:
+                    with open(json_file, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        ids: List[str] = []
+                        # 兼容不同结构：dict含id、dict含entries、list[dict]
+                        if isinstance(data, dict):
+                            if 'id' in data and isinstance(data['id'], str):
+                                ids.append(data['id'])
+                            if 'entries' in data and isinstance(data['entries'], list):
+                                for it in data['entries']:
+                                    if isinstance(it, dict) and isinstance(it.get('id'), str):
+                                        ids.append(it['id'])
+                        elif isinstance(data, list):
+                            for it in data:
+                                if isinstance(it, dict) and isinstance(it.get('id'), str):
+                                    ids.append(it['id'])
+
+                        if not ids:
+                            continue
+
+                        # 计算可能的视频文件名（与json同名）并登记
+                        name = json_file.name
+                        if name.endswith('.info.json'):
+                            base_name = name[:-10]
+                        elif name.endswith('.json'):
+                            base_name = name[:-5]
+                        else:
+                            base_name = json_file.stem
+                        # 假设视频文件与json同目录（多后缀尝试）
+                        for vid in ids:
+                            if vid in existing_videos:
+                                continue
+                            for ext in ['.mp4', '.mkv', '.webm']:
+                                video_file = json_file.parent / f"{base_name}{ext}"
+                                if video_file.exists():
+                                    existing_videos[vid] = str(video_file)
+                                    break
+                except Exception as e:
+                    logger.warning(f"读取JSON文件 {json_file} 失败: {e}")
+        
+        logger.info(f"发现 {len(existing_videos)} 个已存在的视频")
+        return existing_videos
+    
+    def _batch_check_existing(self, db: Session, remote_video_ids: List[str], subscription_id: Optional[int] = None, subscription_dir: Optional[Path] = None) -> Dict[str, str]:
+        """大合集优化：批量检查指定视频ID是否已存在
+        只查询远端视频ID列表中的视频，避免全表扫描
         """
         existing_videos = {}
         
-        # 从数据库获取已下载的视频
-        downloaded_videos = db.query(Video).filter(Video.downloaded == True).all()
-        for video in downloaded_videos:
-            existing_videos[video.bilibili_id] = video.video_path
+        # 分批查询，避免 IN 子句过长
+        batch_size = int(os.getenv('BATCH_IN_SIZE', '500'))  # SQLite IN 子句建议不超过999个参数
         
-        # 同时扫描文件系统中的JSON文件（兼容V5格式），递归子目录，支持 *.json 与 *.info.json
-        # 仅限当前订阅目录（若提供），否则回退到全局下载目录
-        base_dir = Path(subscription_dir) if subscription_dir else self.output_dir
+        for i in range(0, len(remote_video_ids), batch_size):
+            batch_ids = remote_video_ids[i:i + batch_size]
+            try:
+                # 只查询当前批次的视频ID
+                scope = os.getenv('DEDUP_SCOPE', 'global').strip().lower()
+                query = db.query(Video.bilibili_id, Video.video_path).filter(
+                    Video.bilibili_id.in_(batch_ids),
+                    Video.downloaded == True
+                )
+                if scope == 'subscription' and subscription_id is not None:
+                    query = query.filter(Video.subscription_id == subscription_id)
+                batch_results = query.all()
+                
+                # 将结果加入 existing_videos
+                for vid, vpath in batch_results:
+                    existing_videos[vid] = vpath or ''
+                
+                logger.debug(f"批次 {i//batch_size + 1}: 检查 {len(batch_ids)} 个视频，找到 {len(batch_results)} 个已存在")
+                
+            except Exception as e:
+                logger.warning(f"批量查询失败，回退到逐个检查: {e}")
+                # 降级处理：逐个查询这个批次
+                for video_id in batch_ids:
+                    try:
+                        result = db.query(Video.bilibili_id, Video.video_path).filter(
+                            Video.bilibili_id == video_id,
+                            Video.downloaded == True
+                        ).first()
+                        if result:
+                            existing_videos[result[0]] = result[1]
+                    except Exception:
+                        continue
+        
+        # 可选：仍然扫描文件系统（如果启用）
+        scan_fs = os.getenv('DEDUP_SCAN_FILESYSTEM', '0')
+        if str(scan_fs).strip() in ('1', 'true', 'True', 'yes', 'on'):
+            logger.debug("大合集模式下仍启用文件系统扫描")
+            # 只扫描当前订阅目录，不做全局扫描
+            if subscription_dir:
+                fs_existing = self._scan_filesystem_in_dir(subscription_dir, set(remote_video_ids))
+                existing_videos.update(fs_existing)
+        
+        total_batches = (len(remote_video_ids) + batch_size - 1) // batch_size
+        logger.info(f"批量检查完成：{total_batches} 批次，{len(existing_videos)} 个视频已存在（scope={os.getenv('DEDUP_SCOPE','global')}）")
+        return existing_videos
+    
+    def _scan_filesystem_in_dir(self, base_dir: Path, target_ids: set) -> Dict[str, str]:
+        """在指定目录扫描文件系统，只查找目标视频ID"""
+        found_videos = {}
         scanned = set()
+        
         for json_file in list(base_dir.rglob("*.json")) + list(base_dir.rglob("*.info.json")):
-            # 避免重复处理相同路径
             if json_file in scanned:
                 continue
             scanned.add(json_file)
+            
             try:
                 with open(json_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                    ids: List[str] = []
-                    # 兼容不同结构：dict含id、dict含entries、list[dict]
+                    ids = []
+                    
                     if isinstance(data, dict):
                         if 'id' in data and isinstance(data['id'], str):
                             ids.append(data['id'])
@@ -446,11 +804,13 @@ class BilibiliDownloaderV6:
                         for it in data:
                             if isinstance(it, dict) and isinstance(it.get('id'), str):
                                 ids.append(it['id'])
-
-                    if not ids:
+                    
+                    # 只处理目标ID集合中的视频
+                    relevant_ids = [vid for vid in ids if vid in target_ids]
+                    if not relevant_ids:
                         continue
-
-                    # 计算可能的视频文件名（与json同名）并登记
+                    
+                    # 计算视频文件路径
                     name = json_file.name
                     if name.endswith('.info.json'):
                         base_name = name[:-10]
@@ -458,20 +818,21 @@ class BilibiliDownloaderV6:
                         base_name = name[:-5]
                     else:
                         base_name = json_file.stem
-                    # 假设视频文件与json同目录（多后缀尝试）
-                    for vid in ids:
-                        if vid in existing_videos:
+                    
+                    for vid in relevant_ids:
+                        if vid in found_videos:
                             continue
                         for ext in ['.mp4', '.mkv', '.webm']:
                             video_file = json_file.parent / f"{base_name}{ext}"
                             if video_file.exists():
-                                existing_videos[vid] = str(video_file)
+                                found_videos[vid] = str(video_file)
                                 break
+                                
             except Exception as e:
-                logger.warning(f"读取JSON文件 {json_file} 失败: {e}")
+                logger.debug(f"扫描JSON文件失败 {json_file}: {e}")
+                continue
         
-        logger.info(f"发现 {len(existing_videos)} 个已存在的视频")
-        return existing_videos
+        return found_videos
     
     async def _download_single_video(self, video_info: Dict[str, Any], subscription_id: int, db: Session) -> Dict[str, Any]:
         """下载单个视频"""
@@ -552,6 +913,7 @@ class BilibiliDownloaderV6:
                     base_filename,
                     subscription_dir,
                     subscription_id,
+                    video_id,
                     cookie,
                     task.id,
                     db
@@ -727,7 +1089,7 @@ class BilibiliDownloaderV6:
                 except Exception:
                     pass
     
-    async def _download_with_ytdlp(self, url: str, base_filename: str, subscription_dir: Path, subscription_id: int, cookie, task_id: int, db: Session) -> Path:
+    async def _download_with_ytdlp(self, url: str, base_filename: str, subscription_dir: Path, subscription_id: int, video_id: Optional[str], cookie, task_id: int, db: Session) -> Path:
         """使用yt-dlp下载视频（输出到订阅目录）。
         同时在全局请求队列登记一个 download 作业（requires_cookie=True），以便分通道并发与可视化统计。
         """
@@ -754,7 +1116,9 @@ class BilibiliDownloaderV6:
                 job_id = await request_queue.enqueue(
                     job_type="download",
                     subscription_id=subscription_id,
-                    requires_cookie=True
+                    requires_cookie=True,
+                    dedup_key=(f"download:{subscription_id}:{video_id}" if video_id else None),
+                    video_id=video_id
                 )
                 await request_queue.mark_running(job_id)
             except Exception:
@@ -805,28 +1169,65 @@ class BilibiliDownloaderV6:
                             proc.kill()
                         raise
 
-            # 首选 1080 限制，失败则回退到通用最佳
+            # 多级格式回退策略，确保能下载到视频文件
+            formats_to_try = [
+                'bestvideo*[height<=1080]+bestaudio/best[height<=1080]',  # 首选1080p
+                'bestvideo[height<=720]+bestaudio/best[height<=720]',     # 回退到720p
+                'bv*+ba/b*',                                              # 通用最佳视频+音频
+                'best[height<=1080]',                                     # 单流1080p
+                'best[height<=720]',                                      # 单流720p
+                'best'                                                    # 最后的兜底
+            ]
+            
+            success = False
+            last_error = ""
+            
+            for format_str in formats_to_try:
+                try:
+                    logger.debug(f"尝试格式: {format_str}")
+                    ret, out, err = await run_yt_dlp(format_str)
+                    if ret == 0:
+                        success = True
+                        logger.info(f"下载成功，使用格式: {format_str}")
+                        break
+                    else:
+                        error_msg = (err or b'').decode('utf-8', errors='ignore')
+                        last_error = error_msg
+                        logger.warning(f"格式 {format_str} 失败: {error_msg}")
+                        
+                        # 如果是格式不可用，继续尝试下一个格式
+                        if any(keyword in error_msg.lower() for keyword in [
+                            'requested format is not available',
+                            'no video formats found',
+                            'format not available'
+                        ]):
+                            continue
+                        else:
+                            # 其他错误，直接抛出
+                            raise Exception(f"yt-dlp下载失败: {error_msg}")
+                except Exception as e:
+                    last_error = str(e)
+                    logger.warning(f"格式 {format_str} 异常: {e}")
+                    continue
+            
+            if not success:
+                raise Exception(f"所有格式尝试失败，最后错误: {last_error}")
+                
+            # 下载成功，标记队列完成
             try:
-                ret, out, err = await run_yt_dlp('bestvideo*[height<=1080]+bestaudio/best')
-                if ret != 0 and b'Requested format is not available' in err:
-                    ret, out, err = await run_yt_dlp('bv+ba/b')
-                if ret != 0:
-                    error_msg = (err or b'').decode('utf-8', errors='ignore')
-                    raise Exception(f"yt-dlp下载失败: {error_msg}")
-                # 下载成功，标记队列完成
-                try:
-                    if job_id:
-                        await request_queue.mark_done(job_id)
-                except Exception:
-                    pass
-            except Exception as e:
-                # 下载失败，标记队列失败
-                try:
-                    if job_id:
-                        await request_queue.mark_failed(job_id, str(e))
-                except Exception:
-                    pass
-                raise
+                if job_id:
+                    await request_queue.mark_done(job_id)
+            except Exception:
+                pass
+                
+        except Exception as e:
+            # 下载失败，标记队列失败
+            try:
+                if job_id:
+                    await request_queue.mark_failed(job_id, str(e))
+            except Exception:
+                pass
+            raise
         finally:
             if cookies_path and os.path.exists(cookies_path):
                 try:

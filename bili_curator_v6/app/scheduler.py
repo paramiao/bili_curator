@@ -10,8 +10,21 @@ from sqlalchemy.orm import Session
 from loguru import logger
 
 from .models import Subscription, DownloadTask, Cookie, Settings, get_db
+from .auto_import import auto_import_service
+from .services.subscription_stats import recompute_all_subscriptions
 from .downloader import downloader
 from .cookie_manager import cookie_manager
+from .task_manager import enhanced_task_manager
+
+def _get_int_setting(db: Session, key: str, default: int) -> int:
+    """从 Settings 读取整数配置，读取失败返回默认值。"""
+    try:
+        s = db.query(Settings).filter(Settings.key == key).first()
+        if not s or s.value is None:
+            return default
+        return int(str(s.value).strip())
+    except Exception:
+        return default
 
 class SimpleScheduler:
     def __init__(self):
@@ -64,6 +77,37 @@ class SimpleScheduler:
             max_instances=1
         )
         
+        # 检查并修正僵尸同步状态 - 每10分钟
+        self.scheduler.add_job(
+            func=self.check_stale_sync_status,
+            trigger=IntervalTrigger(minutes=10),
+            id='check_stale_sync_status',
+            replace_existing=True,
+            max_instances=1
+        )
+
+        # 周期性后台任务：自动导入 + 自动关联 + 统一重算订阅统计 - 间隔可配置
+        # 读取 Settings.auto_import_interval_minutes，若无则回退到 Settings.check_interval，再回退 15
+        minutes = 15
+        db = next(get_db())
+        try:
+            minutes = _get_int_setting(db, 'auto_import_interval_minutes', minutes)
+            if minutes == 15:
+                minutes = _get_int_setting(db, 'check_interval', minutes)
+        finally:
+            db.close()
+
+        # 容错：限制合理区间，防止过于频繁或过于稀疏
+        minutes = max(1, min(24 * 60, minutes))
+        self.scheduler.add_job(
+            func=self.run_auto_import_and_recompute,
+            trigger=IntervalTrigger(minutes=minutes),
+            id='auto_import_and_recompute',
+            replace_existing=True,
+            max_instances=1
+        )
+        logger.info(f"注册周期任务 auto_import_and_recompute，间隔 {minutes} 分钟")
+        
         logger.info("默认定时任务已添加")
     
     async def check_subscriptions(self):
@@ -95,6 +139,37 @@ class SimpleScheduler:
             logger.error(f"检查订阅时出错: {e}")
         finally:
             db.close()
+
+    async def run_auto_import_and_recompute(self):
+        """后台周期任务：自动导入 + 自动关联 + 统一重算（去抖在统计服务内部可选触发）"""
+        logger.info("开始周期任务：auto_import + auto_associate + recompute_all_subscriptions")
+        try:
+            # 1) 扫描并导入（IO阻塞，放到线程池）
+            try:
+                await asyncio.to_thread(auto_import_service.scan_and_import)
+            except Exception as e:
+                logger.warning(f"自动导入阶段异常：{e}")
+
+            # 2) 自动关联订阅（IO/DB阻塞，放到线程池）
+            try:
+                await asyncio.to_thread(auto_import_service.auto_associate_subscriptions)
+            except Exception as e:
+                logger.warning(f"自动关联阶段异常：{e}")
+
+            # 3) 统一重算所有订阅统计
+            db = next(get_db())
+            try:
+                recompute_all_subscriptions(db, touch_last_check=False)
+                db.commit()
+            except Exception as e:
+                db.rollback()
+                logger.warning(f"统一重算订阅统计失败：{e}")
+            finally:
+                db.close()
+
+            logger.info("周期任务完成：auto_import + auto_associate + recompute_all_subscriptions")
+        except Exception as e:
+            logger.error(f"周期任务执行失败：{e}")
     
     async def _process_subscription(self, subscription: Subscription, db: Session):
         """处理单个订阅"""
@@ -152,6 +227,48 @@ class SimpleScheduler:
             
         except Exception as e:
             logger.error(f"清理旧任务时出错: {e}")
+            db.rollback()
+        finally:
+            db.close()
+    
+    async def check_stale_sync_status(self):
+        """检查并清理过期的同步状态"""
+        logger.debug("开始检查过期同步状态...")
+        
+        db = next(get_db())
+        try:
+            import json
+            # 查找超过30分钟仍为 running 的状态
+            stale_threshold = datetime.now() - timedelta(minutes=30)
+            
+            stale_settings = db.query(Settings).filter(
+                Settings.key.like('sync:%:status'),
+                Settings.updated_at < stale_threshold
+            ).all()
+            
+            healed_count = 0
+            for setting in stale_settings:
+                try:
+                    data = json.loads(setting.value)
+                    if data.get('status') == 'running':
+                        # 标记为失败状态
+                        data['status'] = 'failed'
+                        data['error'] = 'Process timeout or crashed'
+                        data['completed_at'] = datetime.now().isoformat()
+                        setting.value = json.dumps(data, ensure_ascii=False)
+                        healed_count += 1
+                        
+                except json.JSONDecodeError:
+                    continue
+                    
+            if healed_count > 0:
+                db.commit()
+                logger.info(f"修正了 {healed_count} 个过期的同步状态")
+            else:
+                logger.debug("未发现需要修正的过期同步状态")
+                
+        except Exception as e:
+            logger.error(f"检查过期同步状态时出错: {e}")
             db.rollback()
         finally:
             db.close()
@@ -302,4 +419,4 @@ class TaskManager:
         return tasks
 
 # 全局任务管理器实例
-task_manager = TaskManager()
+task_manager = enhanced_task_manager

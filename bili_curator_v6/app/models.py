@@ -34,6 +34,9 @@ class Subscription(Base):
     # 统计信息
     total_videos = Column(Integer, default=0)  # 总视频数
     downloaded_videos = Column(Integer, default=0)  # 已下载视频数
+    # 远端期望总数（例如合集远端返回的总视频数），以及最近同步时间
+    expected_total = Column(Integer, default=0)
+    expected_total_synced_at = Column(DateTime)
     
     is_active = Column(Boolean, default=True)
     last_check = Column(DateTime)
@@ -224,6 +227,11 @@ class Database:
                 conn.exec_driver_sql("ALTER TABLE subscriptions ADD COLUMN total_videos INTEGER DEFAULT 0")
             if not has_column('subscriptions', 'downloaded_videos'):
                 conn.exec_driver_sql("ALTER TABLE subscriptions ADD COLUMN downloaded_videos INTEGER DEFAULT 0")
+            # 新增：远端期望总数及其同步时间
+            if not has_column('subscriptions', 'expected_total'):
+                conn.exec_driver_sql("ALTER TABLE subscriptions ADD COLUMN expected_total INTEGER DEFAULT 0")
+            if not has_column('subscriptions', 'expected_total_synced_at'):
+                conn.exec_driver_sql("ALTER TABLE subscriptions ADD COLUMN expected_total_synced_at DATETIME")
 
             # cookies 表缺失列
             if not has_column('cookies', 'updated_at'):

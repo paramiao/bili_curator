@@ -45,6 +45,7 @@ _paused_nocookie = False
 
 # 订阅级互斥
 _subscription_locks: Dict[int, asyncio.Lock] = {}
+_dedup_keys: Dict[str, str] = {}  # dedup_key -> job_id
 
 
 def get_subscription_lock(subscription_id: int) -> asyncio.Lock:
@@ -67,6 +68,7 @@ class RequestJob:
     type: str  # expected_total | parse | list_fetch | download | other
     subscription_id: Optional[int]
     requires_cookie: bool
+    video_id: Optional[str] = None
     status: str = JobStatus.QUEUED
     created_at: datetime = field(default_factory=datetime.now)
     started_at: Optional[datetime] = None
@@ -86,15 +88,33 @@ class RequestQueueManager:
         self._order: List[str] = []  # 简单双端队列可扩展为优先级队列
         self._lock = asyncio.Lock()
 
-    async def enqueue(self, job_type: str, subscription_id: Optional[int], requires_cookie: bool, priority: Optional[int] = None) -> str:
+    async def enqueue(self, job_type: str, subscription_id: Optional[int], requires_cookie: bool, priority: Optional[int] = None, dedup_key: Optional[str] = None, video_id: Optional[str] = None) -> str:
+        # 计算去重键：默认使用 job_type:subscription_id（若提供）
+        key = None
+        if dedup_key and isinstance(dedup_key, str) and dedup_key.strip():
+            key = dedup_key.strip()
+        elif subscription_id is not None:
+            key = f"{job_type}:{subscription_id}"
+
         job_id = str(uuid.uuid4())
-        job = RequestJob(id=job_id, type=job_type, subscription_id=subscription_id, requires_cookie=requires_cookie)
+        job = RequestJob(id=job_id, type=job_type, subscription_id=subscription_id, requires_cookie=requires_cookie, video_id=video_id)
+        job.acquired_scope = None  # 明确初始化
         if priority is not None:
             try:
                 job.priority = int(priority)
             except Exception:
                 job.priority = 0
         async with self._lock:
+            # 基础去重：如已有相同 dedup_key 的任务处于队列或运行中，则直接返回现有 job_id
+            if key is not None:
+                exist = _dedup_keys.get(key)
+                if exist and exist in self._jobs:
+                    existing_job = self._jobs[exist]
+                    logger.info(f"去重: 已存在相同任务, key={key}, existing_job_id={exist}, status={existing_job.status}")
+                    return exist
+                # 预占去重键
+                _dedup_keys[key] = job_id
+            # 正常入队
             self._jobs[job_id] = job
             # 简单策略：有显式优先级则插入队首，否则追加到队尾
             if priority is not None:
@@ -208,6 +228,8 @@ class RequestQueueManager:
                 job.finished_at = datetime.now()
                 acquired = job.acquired_scope
                 job.acquired_scope = None
+                # 清理去重键
+                self._clear_dedup_for(job_id)
         # 在锁外释放信号量并递减计数
         if 'acquired' in locals() and acquired:
             (_sem_cookie if acquired == 'cookie' else _sem_nocookie).release()
@@ -226,6 +248,8 @@ class RequestQueueManager:
                 job.last_error = err
                 acquired = job.acquired_scope
                 job.acquired_scope = None
+                # 清理去重键
+                self._clear_dedup_for(job_id)
         if 'acquired' in locals() and acquired:
             # 释放信号量并递减运行计数，避免运行计数“卡死”
             (_sem_cookie if acquired == 'cookie' else _sem_nocookie).release()
@@ -241,6 +265,8 @@ class RequestQueueManager:
                 del self._jobs[job_id]
             if job_id in self._order:
                 self._order.remove(job_id)
+            # 清理去重键
+            self._clear_dedup_for(job_id)
 
     # 控制操作
     async def cancel(self, job_id: str, reason: str = ""):
@@ -256,6 +282,8 @@ class RequestQueueManager:
             job.last_error = reason or job.last_error
             acquired = job.acquired_scope
             job.acquired_scope = None
+            # 清理去重键
+            self._clear_dedup_for(job_id)
         if acquired:
             (_sem_cookie if acquired == 'cookie' else _sem_nocookie).release()
             global _run_cookie, _run_nocookie
@@ -344,6 +372,16 @@ class RequestQueueManager:
                 'available_nocookie': available_nocookie,
             }
         }
+
+    def _clear_dedup_for(self, job_id: str):
+        """清理与指定 job 关联的 dedup 键（若存在）"""
+        try:
+            # 线性扫描（当前任务量有限，足够用；后续可维护反向索引）
+            keys_to_del = [k for k, v in _dedup_keys.items() if v == job_id]
+            for k in keys_to_del:
+                _dedup_keys.pop(k, None)
+        except Exception:
+            pass
 
     async def set_capacity(self, requires_cookie: Optional[int] = None, no_cookie: Optional[int] = None):
         global _cap_cookie, _cap_nocookie

@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from typing import List, Tuple, Optional
 from sqlalchemy.orm import Session
 from .models import Video, get_db
+from .services.subscription_stats import recompute_all_subscriptions
 import os
 
 logger = logging.getLogger(__name__)
@@ -212,6 +213,13 @@ class VideoDetectionService:
                 logger.debug(f"✅ 导入视频: {metadata.get('title', video_id)}")
             
             db.commit()
+            # 导入完成后刷新所有订阅统计（检测服务无法可靠定位订阅归属时采用全量刷新）
+            try:
+                recompute_all_subscriptions(db, touch_last_check=False)
+                db.commit()
+            except Exception as e:
+                db.rollback()
+                logger.warning(f"刷新订阅统计失败(视频检测导入后)：{e}")
             
         except Exception as e:
             db.rollback()

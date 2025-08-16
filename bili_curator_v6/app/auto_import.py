@@ -8,6 +8,10 @@ from pathlib import Path
 from datetime import datetime
 from typing import List, Optional
 from .models import Database, Video, Subscription
+from .services.subscription_stats import (
+    recompute_all_subscriptions,
+    recompute_subscription_stats,
+)
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -18,6 +22,8 @@ class AutoImportService:
     def __init__(self, download_dir: str = "/app/downloads"):
         self.download_dir = Path(download_dir)
         self.db = Database()
+        # 状态文件位于下载目录，记录上次成功扫描时间戳（秒）
+        self.state_file = self.download_dir / ".auto_import_state.json"
     
     def scan_and_import(self) -> dict:
         """扫描目录并导入新视频"""
@@ -27,9 +33,22 @@ class AutoImportService:
             logger.warning(f"下载目录不存在: {self.download_dir}")
             return {"imported": 0, "skipped": 0, "errors": 0}
         
-        # 递归查找所有JSON文件
-        json_files = list(self.download_dir.rglob("*.json"))
-        logger.info(f"📄 找到 {len(json_files)} 个JSON文件")
+        # 递归查找所有JSON文件（支持增量扫描）
+        last_scan_ts = self._load_last_scan_ts()
+        all_json_files = list(self.download_dir.rglob("*.json"))
+        if last_scan_ts:
+            json_files = []
+            for p in all_json_files:
+                try:
+                    if p.stat().st_mtime > last_scan_ts:
+                        json_files.append(p)
+                except Exception:
+                    # 读取文件状态失败则跳过该文件
+                    continue
+            logger.info(f"📄 增量模式：总 {len(all_json_files)}，待处理 {len(json_files)}（last_scan_ts={last_scan_ts}）")
+        else:
+            json_files = all_json_files
+            logger.info(f"📄 首次/全量扫描：找到 {len(json_files)} 个JSON文件")
         
         session = self.db.get_session()
         try:
@@ -49,12 +68,25 @@ class AutoImportService:
                     if (imported_count + skipped_count) % 100 == 0:
                         session.commit()
                         logger.info(f"✅ 已处理 {imported_count + skipped_count} 个文件...")
-                        
+                
                 except Exception as e:
                     logger.error(f"处理文件 {json_file} 失败: {e}")
                     error_count += 1
             
             session.commit()
+            # 导入完成后刷新所有订阅统计（无法准确定位订阅归属时采用全量刷新）
+            try:
+                recompute_all_subscriptions(session, touch_last_check=False)
+                session.commit()
+            except Exception as e:
+                session.rollback()
+                logger.warning(f"刷新订阅统计失败(自动导入后)：{e}")
+
+            # 成功完成后更新扫描时间
+            try:
+                self._save_last_scan_ts(datetime.now())
+            except Exception as e:
+                logger.warning(f"保存增量扫描时间失败：{e}")
             
             result = {
                 "imported": imported_count,
@@ -71,6 +103,30 @@ class AutoImportService:
             raise
         finally:
             session.close()
+
+    def _load_last_scan_ts(self) -> float:
+        """读取上次扫描的时间戳（秒）。不存在或解析失败时返回 0。"""
+        try:
+            if not self.state_file.exists():
+                return 0
+            import json as _json
+            with open(self.state_file, 'r', encoding='utf-8') as f:
+                data = _json.load(f)
+            ts = float(data.get('last_scan_ts', 0))
+            return ts if ts > 0 else 0
+        except Exception:
+            return 0
+
+    def _save_last_scan_ts(self, dt: datetime) -> None:
+        """保存本次扫描完成时间戳（秒）。"""
+        try:
+            self.state_file.parent.mkdir(parents=True, exist_ok=True)
+            import json as _json
+            with open(self.state_file, 'w', encoding='utf-8') as f:
+                _json.dump({'last_scan_ts': dt.timestamp()}, f)
+        except Exception:
+            # 静默失败，不影响主流程
+            pass
     
     def _import_video_from_json(self, json_file: Path, session: Session) -> str:
         """从JSON文件导入单个视频"""
@@ -102,6 +158,18 @@ class AutoImportService:
             # 处理上传日期
             upload_date = self._parse_upload_date(metadata.get('upload_date'))
             
+            # 安全获取文件大小与修改时间（避免在 exists 与 stat 之间的竞态，并且只 stat 一次）
+            file_size = 0
+            downloaded_at = datetime.now()
+            if video_file and video_file.exists():
+                try:
+                    stat_res = video_file.stat()
+                    file_size = stat_res.st_size
+                    downloaded_at = datetime.fromtimestamp(stat_res.st_mtime)
+                except Exception:
+                    # 读取文件状态失败则使用默认值
+                    pass
+
             # 创建视频记录
             video = Video(
                 bilibili_id=video_id,
@@ -115,10 +183,10 @@ class AutoImportService:
                 video_path=str(video_file) if video_file else None,
                 json_path=str(json_file),
                 thumbnail_path=str(thumbnail_file) if thumbnail_file else None,
-                file_size=video_file.stat().st_size if video_file and video_file.exists() else 0,
+                file_size=file_size,
                 view_count=metadata.get('view_count', 0),
                 downloaded=True,
-                downloaded_at=datetime.fromtimestamp(video_file.stat().st_mtime) if video_file and video_file.exists() else datetime.now()
+                downloaded_at=downloaded_at
             )
             
             session.add(video)
@@ -186,8 +254,11 @@ class AutoImportService:
                         video.subscription_id = subscription.id
                         associated_count += 1
                 
-                # 更新订阅统计
-                subscription.downloaded_videos = len([v for v in matching_videos if v.downloaded])
+                # 统一通过统计服务刷新该订阅的统计字段
+                try:
+                    recompute_subscription_stats(session, subscription.id, touch_last_check=False)
+                except Exception as e:
+                    logger.warning(f"刷新订阅统计失败(自动关联阶段 sub={subscription.id})：{e}")
                 
             session.commit()
             

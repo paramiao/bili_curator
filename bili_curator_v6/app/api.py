@@ -1,30 +1,17 @@
 # UA 策略：无 Cookie 使用随机 UA，Cookie 模式可用稳定 UA
-_UA_POOL = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0',
-]
-
-def get_user_agent(requires_cookie: bool) -> str:
-    try:
-        if requires_cookie:
-            return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-        return random.choice(_UA_POOL)
-    except Exception:
-        return _UA_POOL[0]
+# UA 策略已抽取至 services.http_utils.get_user_agent
 
 """
 FastAPI API路由定义
 """
-from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func, case
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 import asyncio
 import random
@@ -41,25 +28,13 @@ from .cookie_manager import cookie_manager
 from .downloader import downloader
 from .video_detection_service import video_detection_service
 from .queue_manager import yt_dlp_semaphore, get_subscription_lock, request_queue
+from .services.http_utils import get_user_agent
+from .consistency_checker import consistency_checker, periodic_consistency_check
 
 # Logger
 logger = logging.getLogger(__name__)
 
-# UA 策略：无 Cookie 使用随机 UA，Cookie 模式使用稳定 UA
-_UA_POOL = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0',
-]
 
-def get_user_agent(requires_cookie: bool) -> str:
-    try:
-        if requires_cookie:
-            return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-        return random.choice(_UA_POOL)
-    except Exception:
-        return _UA_POOL[0]
 
 # Pydantic模型定义
 class SubscriptionCreate(BaseModel):
@@ -105,24 +80,35 @@ app = FastAPI(
 app.mount("/static", StaticFiles(directory="static"), name="static")
 app.mount("/web", StaticFiles(directory="web/dist"), name="web")
 
-# 根路径返回前端页面
+# 根路径返回前端页面（优先SPA，fallback到admin.html）
 @app.get("/", response_class=HTMLResponse)
 async def read_root():
-    """返回前端页面"""
+    """返回首页：优先 web/dist/index.html；缺失则回退 static/admin.html"""
     try:
         with open("web/dist/index.html", "r", encoding="utf-8") as f:
             return HTMLResponse(content=f.read())
     except FileNotFoundError:
-        return HTMLResponse(content="""
-        <html>
-            <head><title>bili_curator V6</title></head>
-            <body>
-                <h1>🎬 bili_curator V6</h1>
-                <p>前端页面正在构建中...</p>
-                <p>API文档: <a href="/docs">/docs</a></p>
-            </body>
-        </html>
-        """)
+        try:
+            with open("static/admin.html", "r", encoding="utf-8") as f:
+                return HTMLResponse(content=f.read())
+        except FileNotFoundError:
+            return HTMLResponse(content="""
+            <html>
+                <head><title>bili_curator V6</title></head>
+                <body>
+                    <h1>🎬 bili_curator V6</h1>
+                    <p>前端页面正在构建中...</p>
+                    <p>管理后台: <a href="/static/admin.html">/static/admin.html</a></p>
+                    <p>API文档: <a href="/docs">/docs</a></p>
+                </body>
+            </html>
+            """)
+
+@app.get("/admin")
+async def read_admin():
+    """兼容旧入口，301 重定向到根路径，避免重复入口"""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/", status_code=301)
 
 # 系统状态API
 @app.get("/api/status")
@@ -160,6 +146,34 @@ async def queue_stats():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/subscriptions/{subscription_id}/enqueue_video")
+async def enqueue_single_video(subscription_id: int, request: dict, db: Session = Depends(get_db)):
+    """将指定视频加入该订阅的下载队列（立即进入全局请求队列，按并发策略执行）。
+    请求体：{ video_id: str, title?: str, webpage_url?: str }
+    返回：下载执行结果（开始执行后即按现有流程入队并下载）。
+    """
+    try:
+        sub = db.query(Subscription).filter(Subscription.id == subscription_id).first()
+        if not sub:
+            raise HTTPException(status_code=404, detail="订阅不存在")
+        if sub.type != 'collection':
+            raise HTTPException(status_code=400, detail="仅支持合集订阅")
+
+        video_id = (request or {}).get('video_id')
+        if not video_id:
+            raise HTTPException(status_code=400, detail="缺少 video_id")
+        title = (request or {}).get('title')
+        url = (request or {}).get('webpage_url') or (f"https://www.bilibili.com/video/{video_id}")
+
+        # 复用单视频下载流程：内部会将 download 任务写入全局队列并受并发控制
+        video_info = { 'id': video_id, 'title': title, 'webpage_url': url, 'url': url }
+        result = await downloader._download_single_video(video_info, subscription_id, db)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/queue/list")
 async def queue_list():
     """返回所有任务的快照（包含 wait_ms、last_wait_reason 等诊断字段）。"""
@@ -171,40 +185,55 @@ async def queue_list():
 # 订阅管理API
 @app.get("/api/subscriptions")
 async def get_subscriptions(db: Session = Depends(get_db)):
-    """获取所有订阅"""
+    """获取所有订阅，包含远端总计与待下载估算（待下载=远端-本地目录视频数）。"""
     subscriptions = db.query(Subscription).all()
     result = []
-    
+
+    from .models import Settings
+    import json
+
     for sub in subscriptions:
-        # 计算统计信息
-        total_videos = db.query(Video).filter(Video.subscription_id == sub.id).count()
+        # 本地统计（口径A：以有文件为准）
+        total_videos_local_all = db.query(Video).filter(Video.subscription_id == sub.id).count()
         downloaded_videos = db.query(Video).filter(
             Video.subscription_id == sub.id,
             Video.video_path.isnot(None)
         ).count()
-        pending_videos = max(0, total_videos - downloaded_videos)
-        
-        # 更新数据库中的统计信息
-        sub.total_videos = total_videos
+        on_disk_total = downloaded_videos
+
+        # 远端总计读取：优先使用 downloader 写入的 sync:{id}:status（remote_total）
+        remote_total = None
+        try:
+            key = f"sync:{sub.id}:status"
+            s = db.query(Settings).filter(Settings.key == key).first()
+            if s and s.value:
+                data = json.loads(s.value)
+                rt = data.get("remote_total")
+                if isinstance(rt, int) and rt >= 0:
+                    remote_total = rt
+        except Exception:
+            remote_total = None
+
+        # 回退：如未获取到远端总计，则使用本地有文件数作为保守值
+        effective_total = remote_total if remote_total is not None else on_disk_total
+        # 待下载按“远端总计-本地有文件数”口径统一
+        pending_videos = max(0, effective_total - on_disk_total)
+
+        # 更新数据库中的统计信息（以本地有文件数为总数，保持与其他页面一致）
+        sub.total_videos = on_disk_total
         sub.downloaded_videos = downloaded_videos
-        
+
         result.append({
             "id": sub.id,
             "name": sub.name,
             "type": sub.type,
             "url": sub.url,
-            "uploader_id": sub.uploader_id,
-            "keyword": sub.keyword,
-            "specific_urls": sub.specific_urls,
-            "date_after": sub.date_after.isoformat() if sub.date_after else None,
-            "date_before": sub.date_before.isoformat() if sub.date_before else None,
-            "min_likes": sub.min_likes,
-            "min_favorites": sub.min_favorites,
-            "min_views": sub.min_views,
-            "total_videos": total_videos,
+            "is_active": sub.is_active,
+            "total_videos": on_disk_total,
+            "db_total_videos": total_videos_local_all,
+            "remote_total": remote_total,
             "downloaded_videos": downloaded_videos,
             "pending_videos": pending_videos,
-            "is_active": sub.is_active,
             "last_check": sub.last_check.isoformat() if sub.last_check else None,
             "created_at": sub.created_at.isoformat() if sub.created_at else None,
             "updated_at": sub.updated_at.isoformat() if sub.updated_at else None
@@ -212,6 +241,108 @@ async def get_subscriptions(db: Session = Depends(get_db)):
     
     db.commit()
     return result
+
+@app.get("/api/overview")
+async def get_overview(db: Session = Depends(get_db)):
+    """全局总览：Remote/Local/Pending 汇总，及队列分布与最近失败数。"""
+    try:
+        subs = db.query(Subscription).all()
+        from .models import Settings
+        import json as json_lib
+
+        remote_total_sum = 0
+        local_total_sum = 0
+        pending_total_sum = 0
+
+        for sub in subs:
+            local = db.query(Video).filter(Video.subscription_id == sub.id).count()
+            local_total_sum += local
+
+            remote = None
+            try:
+                key = f"sync:{sub.id}:status"
+                s = db.query(Settings).filter(Settings.key == key).first()
+                if s and s.value:
+                    data = json_lib.loads(s.value)
+                    rt = data.get("remote_total")
+                    if isinstance(rt, int) and rt >= 0:
+                        remote = rt
+            except Exception:
+                remote = None
+
+            effective_total = remote if remote is not None else local
+            remote_total_sum += (remote or 0)
+            pending_total_sum += max(0, effective_total - local)
+
+        # 队列统计
+        qstats = request_queue.stats()
+        qlist = request_queue.list()
+        now = datetime.now()
+        recent_failed_24h = sum(1 for j in qlist if j.get('status') == 'failed' and j.get('finished_at') and \
+                                 isinstance(j.get('finished_at'), datetime) and (now - j['finished_at']) <= timedelta(hours=24))
+
+        return {
+            'remote_total': remote_total_sum,
+            'local_total': local_total_sum,
+            'pending_total': pending_total_sum,
+            'queue': {
+                'queued': qstats.get('counts', {}).get('queued', 0),
+                'running': qstats.get('counts', {}).get('running', 0),
+                'done': qstats.get('counts', {}).get('done', 0),
+                'failed': qstats.get('counts', {}).get('failed', 0),
+            },
+            'recent_failed_24h': recent_failed_24h,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/queue/insights")
+async def queue_insights():
+    """队列诊断：等待原因分布、错误TopN、失败样本、容量与暂停状态。"""
+    try:
+        items = request_queue.list()
+        # 等待原因分布
+        wait_dist: Dict[str, int] = {}
+        for j in items:
+            reason = j.get('last_wait_reason') or ''
+            if reason:
+                wait_dist[reason] = wait_dist.get(reason, 0) + 1
+        # 错误 TopN
+        error_count: Dict[str, int] = {}
+        failed_samples = []
+        for j in items:
+            if j.get('status') == 'failed':
+                err = (j.get('last_error') or '').strip()
+                if err:
+                    error_count[err] = error_count.get(err, 0) + 1
+                # 收集样本
+                failed_samples.append({
+                    'id': j.get('id'),
+                    'type': j.get('type'),
+                    'subscription_id': j.get('subscription_id'),
+                    'video_id': j.get('video_id'),
+                    'finished_at': j.get('finished_at').isoformat() if j.get('finished_at') else None,
+                    'wait_ms': j.get('wait_ms'),
+                    'wait_cycles': j.get('wait_cycles'),
+                    'acquired_scope': j.get('acquired_scope'),
+                    'last_error': err,
+                })
+        errors_top = sorted([
+            {'error': k, 'count': v} for k, v in error_count.items()
+        ], key=lambda x: x['count'], reverse=True)[:10]
+
+        qstats = request_queue.stats()
+        # 只返回必要字段，避免泄漏内部细节
+        return {
+            'wait_reasons': wait_dist,
+            'errors_top': errors_top,
+            'failed_samples': failed_samples[-20:],
+            'paused': qstats.get('paused', {}),
+            'capacity': qstats.get('capacity', {}),
+            'counts': qstats.get('counts', {}),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/subscriptions")
 async def create_subscription(subscription: dict, db: Session = Depends(get_db)):
@@ -718,6 +849,26 @@ async def delete_subscription(subscription_id: int, db: Session = Depends(get_db
     
     return {"message": "订阅删除成功"}
 
+@app.get("/api/subscriptions/{subscription_id}/pending")
+async def get_subscription_pending(subscription_id: int, db: Session = Depends(get_db)):
+    """获取指定订阅的待下载视频列表（远端-本地差集），不触发下载。
+    仅对 type=collection 且存在 url 的订阅有效。
+    """
+    sub = db.query(Subscription).filter(Subscription.id == subscription_id).first()
+    if not sub:
+        raise HTTPException(status_code=404, detail="订阅不存在")
+    if sub.type != "collection" or not sub.url:
+        raise HTTPException(status_code=400, detail="该订阅不是合集或缺少URL")
+
+    try:
+        data = await downloader.compute_pending_list(subscription_id, db)
+        return data
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"获取待下载列表失败: {e}")
+        raise HTTPException(status_code=500, detail="获取待下载列表失败")
+
 @app.post("/api/subscriptions/parse-collection")
 async def parse_collection_info(request: dict, db: Session = Depends(get_db)):
     """解析合集URL，自动识别合集名称"""
@@ -998,6 +1149,32 @@ async def get_subscription_tasks(subscription_id: int):
     
     return enhanced_task_manager.get_subscription_tasks(subscription_id)
 
+# 一致性检查API
+@app.post("/api/system/consistency-check")
+async def trigger_consistency_check(db: Session = Depends(get_db)):
+    """手动触发一致性检查（同步执行，直接返回统计结果）。
+    前端会等待本接口返回统计数据，因此不再使用后台任务方式。
+    """
+    try:
+        stats = consistency_checker.check_and_sync(db)
+        logger.info(f"手动触发的一致性检查完成: {stats}")
+        # 附加一个时间戳，便于前端显示
+        stats_with_time = dict(stats)
+        stats_with_time["last_check_time"] = datetime.now().isoformat()
+        return stats_with_time
+    except Exception as e:
+        logger.error(f"手动一致性检查失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/system/consistency-stats")
+async def get_consistency_stats(db: Session = Depends(get_db)):
+    """获取一致性统计信息"""
+    try:
+        stats = consistency_checker.quick_stats(db)
+        return stats
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # 视频管理API
 @app.get("/api/videos")
 async def get_videos(
@@ -1082,12 +1259,12 @@ async def get_media_overview(scan: bool = False, db: Session = Depends(get_db)):
 
 @app.get("/api/media/subscription-stats")
 async def get_subscription_stats(db: Session = Depends(get_db)):
-    """按订阅聚合统计（数量、已下载、容量、最近上传）"""
-    # 数量与容量
+    """按订阅聚合统计（数量、已下载、容量、最近上传）- 使用远端总数口径"""
+    # 本地统计：已下载数量、容量、最近上传
     counts = (
         db.query(
             Video.subscription_id.label('sid'),
-            func.count(Video.id).label('total'),
+            func.count(Video.id).label('local_total'),
             func.sum(case((Video.video_path.isnot(None), 1), else_=0)).label('downloaded'),
             func.coalesce(func.sum(Video.file_size), 0).label('size'),
             func.max(Video.upload_date).label('latest_upload')
@@ -1096,38 +1273,62 @@ async def get_subscription_stats(db: Session = Depends(get_db)):
         .all()
     )
 
-    # 订阅名称
+    # 订阅信息
     subs = {s.id: s for s in db.query(Subscription).all()}
+    
+    # 构建本地统计字典
+    local_stats = {}
+    for row in counts:
+        local_stats[row.sid] = {
+            'local_total': int(row.local_total or 0),
+            'downloaded': int(row.downloaded or 0),
+            'size': int(row.size or 0),
+            'latest_upload': row.latest_upload.isoformat() if row.latest_upload else None,
+        }
+
+    from .models import Settings
+    import json as json_lib
 
     result = []
-    for row in counts:
-        sid = row.sid
-        sub = subs.get(sid)
+    for sid, sub in subs.items():
+        local = local_stats.get(sid, {
+            'local_total': 0,
+            'downloaded': 0,
+            'size': 0,
+            'latest_upload': None,
+        })
+        
+        # 读取远端总数
+        remote_total = None
+        try:
+            key = f"sync:{sid}:status"
+            s = db.query(Settings).filter(Settings.key == key).first()
+            if s and s.value:
+                data = json_lib.loads(s.value)
+                rt = data.get("remote_total")
+                if isinstance(rt, int) and rt >= 0:
+                    remote_total = rt
+        except Exception:
+            remote_total = None
+        
+        # 订阅统计口径改为“本地有文件的数量”，与目录统计一致
+        on_disk_total = local['downloaded']
+        
         result.append({
             "subscription_id": sid,
-            "subscription_name": sub.name if sub else None,
-            "type": sub.type if sub else None,
-            "total_videos": int(row.total or 0),
-            "downloaded_videos": int(row.downloaded or 0),
-            "total_size": int(row.size or 0),
-            "latest_upload": row.latest_upload.isoformat() if row.latest_upload else None,
+            "subscription_name": sub.name,
+            "type": sub.type,
+            "total_videos": on_disk_total,  # 与目录统计一致：仅统计有文件的数量
+            "remote_total": remote_total,
+            "downloaded_videos": local['downloaded'],
+            # 待下载口径：远端期望 - 本地有文件数
+            "pending_videos": max(0, (remote_total or on_disk_total) - on_disk_total),
+            "total_size": local['size'],
+            "latest_upload": local['latest_upload'],
         })
 
-    # 确保包含没有视频记录但存在的订阅（total=0）
-    for sid, sub in subs.items():
-        if not any(item["subscription_id"] == sid for item in result):
-            result.append({
-                "subscription_id": sid,
-                "subscription_name": sub.name,
-                "type": sub.type,
-                "total_videos": 0,
-                "downloaded_videos": 0,
-                "total_size": 0,
-                "latest_upload": None,
-            })
-
-    # 按下载数量或大小排序，便于前端默认展示
-    result.sort(key=lambda x: (x["downloaded_videos"], x["total_size"]), reverse=True)
+    # 排序：按总大小/有文件数量倒序
+    result.sort(key=lambda x: (x["total_size"], x["total_videos"]), reverse=True)
     return result
 
 
@@ -1632,15 +1833,21 @@ async def validate_cookie(cookie_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Cookie不存在")
     
     is_valid = await cookie_manager.validate_cookie(db_cookie)
+    
+    # 重新查询Cookie以获取最新状态
+    db.refresh(db_cookie)
+    
     # 根据结果更新失败计数或重置
     if is_valid:
         try:
             cookie_manager.reset_failures(db, db_cookie.id)
+            db.refresh(db_cookie)  # 刷新状态
         except Exception:
             pass
     else:
         try:
             cookie_manager.record_failure(db, db_cookie.id, "验证失败")
+            db.refresh(db_cookie)  # 刷新状态
         except Exception:
             # 老库不支持失败字段则可能已被直接禁用
             pass
@@ -1649,12 +1856,12 @@ async def validate_cookie(cookie_id: int, db: Session = Depends(get_db)):
     failure_info = {}
     if hasattr(db_cookie, 'failure_count'):
         failure_info = {
-            "failure_count": db_cookie.failure_count,
+            "failure_count": db_cookie.failure_count or 0,
             "last_failure_at": db_cookie.last_failure_at.isoformat() if db_cookie.last_failure_at else None,
             "is_active": db_cookie.is_active,
         }
     
-    return {"valid": is_valid, "message": "验证完成", **failure_info}
+    return {"valid": is_valid and db_cookie.is_active, "message": "验证完成", **failure_info}
 
 # 系统设置API
 @app.get("/api/settings")
@@ -1795,6 +2002,138 @@ async def update_video_detection_config(scan_interval: int = 300):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# 订阅同步状态相关API
+@app.get("/api/subscriptions/{subscription_id}/sync_status")
+async def get_sync_status(subscription_id: int, db: Session = Depends(get_db)):
+    """获取订阅同步状态"""
+    try:
+        key = f"sync:{subscription_id}:status"
+        setting = db.query(Settings).filter(Settings.key == key).first()
+        
+        if not setting or not setting.value:
+            return {
+                "subscription_id": subscription_id,
+                "status": "idle",
+                "started_at": None,
+                "updated_at": None,
+                "remote_total": 0,
+                "existing": 0,
+                "pending": 0
+            }
+        
+        try:
+            data = json.loads(setting.value)
+            return {
+                "subscription_id": subscription_id,
+                "status": data.get("status", "idle"),
+                "started_at": data.get("started_at"),
+                "updated_at": data.get("updated_at"),
+                "completed_at": data.get("completed_at"),
+                "remote_total": data.get("remote_total", 0),
+                "existing": data.get("existing", 0),
+                "pending": data.get("pending", 0),
+                "error": data.get("error")
+            }
+        except json.JSONDecodeError:
+            logger.warning(f"Corrupted sync status JSON for subscription {subscription_id}")
+            return {
+                "subscription_id": subscription_id,
+                "status": "idle",
+                "started_at": None,
+                "updated_at": None,
+                "remote_total": 0,
+                "existing": 0,
+                "pending": 0
+            }
+    except Exception as e:
+        logger.error(f"Failed to get sync status for subscription {subscription_id}: {e}")
+        raise HTTPException(status_code=500, detail="获取同步状态失败")
+
+@app.get("/api/subscriptions/{subscription_id}/sync_trace")
+async def get_sync_trace(subscription_id: int, db: Session = Depends(get_db)):
+    """获取订阅同步链路事件trace"""
+    try:
+        key = f"sync:{subscription_id}:trace"
+        setting = db.query(Settings).filter(Settings.key == key).first()
+        
+        if not setting or not setting.value:
+            return {
+                "subscription_id": subscription_id,
+                "events": []
+            }
+        
+        try:
+            events = json.loads(setting.value)
+            if not isinstance(events, list):
+                events = []
+            return {
+                "subscription_id": subscription_id,
+                "events": events
+            }
+        except json.JSONDecodeError:
+            logger.warning(f"Corrupted sync trace JSON for subscription {subscription_id}")
+            return {
+                "subscription_id": subscription_id,
+                "events": []
+            }
+    except Exception as e:
+        logger.error(f"Failed to get sync trace for subscription {subscription_id}: {e}")
+        raise HTTPException(status_code=500, detail="获取同步trace失败")
+
+@app.post("/api/subscriptions/sync_overview")
+async def get_sync_overview(request: dict, db: Session = Depends(get_db)):
+    """批量获取订阅同步状态概览"""
+    try:
+        subscription_ids = request.get('subscription_ids', [])
+        
+        # 限制批量大小，防止性能问题
+        if len(subscription_ids) > 100:
+            raise HTTPException(status_code=400, detail="最多支持100个订阅ID")
+        
+        if not subscription_ids:
+            return {"items": []}
+        
+        # 使用 IN 查询减少数据库请求
+        keys = [f"sync:{sid}:status" for sid in subscription_ids]
+        settings = db.query(Settings).filter(Settings.key.in_(keys)).all()
+        
+        # 构建结果映射
+        result_map = {}
+        for setting in settings:
+            try:
+                sid = int(setting.key.split(':')[1])
+                data = json.loads(setting.value)
+                result_map[sid] = {
+                    "id": sid,
+                    "status": data.get('status', 'idle'),
+                    "pending": data.get('pending', 0),
+                    "remote_total": data.get('remote_total', 0),
+                    "updated_at": data.get('updated_at')
+                }
+            except (ValueError, json.JSONDecodeError):
+                continue
+        
+        # 填充缺失的订阅（返回默认状态）
+        items = []
+        for sid in subscription_ids:
+            if sid in result_map:
+                items.append(result_map[sid])
+            else:
+                items.append({
+                    "id": sid,
+                    "status": "idle",
+                    "pending": 0,
+                    "remote_total": 0,
+                    "updated_at": None
+                })
+        
+        return {"items": items}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get sync overview: {e}")
+        raise HTTPException(status_code=500, detail="获取同步概览失败")
 
 # 健康检查
 @app.get("/health")

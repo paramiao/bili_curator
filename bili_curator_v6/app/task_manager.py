@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from loguru import logger
 
 from .models import DownloadTask, Video, Subscription, get_db
+from .services.subscription_stats import record_recompute_event, maybe_try_recompute_all
 from .downloader import downloader
 from .queue_manager import get_subscription_lock
 
@@ -134,6 +135,13 @@ class EnhancedTaskManager:
                 raise Exception(f"未知的订阅类型: {subscription.type}")
             
             task_progress.total_videos = len(video_list)
+            # 在获取远端列表后，记录期望总数并持久化同步时间
+            try:
+                subscription.expected_total = len(video_list)
+                subscription.expected_total_synced_at = datetime.now()
+                db.commit()
+            except Exception:
+                db.rollback()
             await self._update_task_log(task_id, f"发现 {len(video_list)} 个视频")
             
             # 阶段3: 检查重复视频（限定当前订阅目录，避免跨合集误判）
@@ -160,6 +168,13 @@ class EnhancedTaskManager:
             
             if len(new_videos) == 0:
                 await self._update_task_status(task_id, TaskStatus.COMPLETED, "没有新视频需要下载")
+                # 记录一次统计重算事件，并尝试按阈值触发全量重算
+                try:
+                    record_recompute_event(db)
+                    maybe_try_recompute_all(db, max_events=20, max_age_seconds=300)
+                    db.commit()
+                except Exception:
+                    db.rollback()
                 return
             
             # 阶段4: 开始下载
@@ -206,6 +221,13 @@ class EnhancedTaskManager:
                 TaskStatus.COMPLETED, 
                 f"下载完成: {task_progress.downloaded_videos}/{task_progress.new_videos}"
             )
+            # 记录一次统计重算事件，并尝试按阈值触发全量重算
+            try:
+                record_recompute_event(db)
+                maybe_try_recompute_all(db, max_events=20, max_age_seconds=300)
+                db.commit()
+            except Exception:
+                db.rollback()
             
         except Exception as e:
             logger.error(f"下载任务 {task_id} 失败: {e}")

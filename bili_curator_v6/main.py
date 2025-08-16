@@ -45,6 +45,20 @@ async def lifespan(app):
     # 初始化数据库
     logger.info("📊 初始化数据库...")
     
+    # 执行启动时一致性检查
+    logger.info("🔍 执行本地目录与数据库一致性检查...")
+    try:
+        from app.consistency_checker import startup_consistency_check
+        consistency_stats = startup_consistency_check()
+        if consistency_stats:
+            logger.info(f"✅ 一致性检查完成: 数据库记录 {consistency_stats['total_db_records']}, 本地文件 {consistency_stats['files_found']}")
+            if consistency_stats['files_missing'] > 0:
+                logger.warning(f"⚠️ 发现 {consistency_stats['files_missing']} 个文件丢失，已同步数据库状态")
+        else:
+            logger.warning("⚠️ 一致性检查失败，但不影响服务启动")
+    except Exception as e:
+        logger.error(f"❌ 一致性检查失败: {e}")
+    
     # 启动视频检测服务
     logger.info("🎬 启动视频检测服务...")
     try:

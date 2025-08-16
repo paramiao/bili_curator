@@ -10,6 +10,7 @@ from .models import Cookie, get_db
 import httpx
 import asyncio
 from loguru import logger
+from .services.http_utils import get_user_agent
 
 class SimpleCookieManager:
     def __init__(self):
@@ -123,7 +124,7 @@ class SimpleCookieManager:
         """验证Cookie是否有效"""
         try:
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+                'User-Agent': get_user_agent(True),
                 'Cookie': f'SESSDATA={cookie.sessdata}; bili_jct={cookie.bili_jct}; DedeUserID={cookie.dedeuserid}'
             }
             
@@ -154,21 +155,10 @@ class SimpleCookieManager:
     def get_cookie_headers(self, cookie: Cookie) -> Dict[str, str]:
         """获取Cookie请求头"""
         return {
-            'User-Agent': self._get_random_user_agent(),
+            'User-Agent': get_user_agent(True),
             'Cookie': f'SESSDATA={cookie.sessdata}; bili_jct={cookie.bili_jct}; DedeUserID={cookie.dedeuserid}',
             'Referer': 'https://www.bilibili.com/'
         }
-    
-    def _get_random_user_agent(self) -> str:
-        """获取随机User-Agent"""
-        user_agents = [
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0'
-        ]
-        return random.choice(user_agents)
     
     async def batch_validate_cookies(self, db: Session):
         """批量验证所有Cookie"""

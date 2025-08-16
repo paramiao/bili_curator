@@ -27,6 +27,10 @@ services:
       - TZ=Asia/Shanghai
       # 使用已存在的旧数据库文件，确保迁移在该库上执行
       - DB_PATH=/app/data/bilibili_curator.db
+      # 订阅维度去重与性能相关配置
+      - DEDUP_SCOPE=subscription
+      - DEDUP_SCAN_FILESYSTEM=0
+      - BATCH_IN_SIZE=500
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]

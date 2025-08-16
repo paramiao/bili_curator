@@ -35,6 +35,8 @@
             font-size: 14px;
         }
 
+        
+
         /* 任务管理样式 */
         .task-item {
             background: #f8f9fa;
@@ -406,6 +408,14 @@
                     <div id="system-status">加载中...</div>
                 </div>
 
+                <div id="global-overview" class="card" style="margin-top:8px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <h3>全局总览</h3>
+                        <button class="btn btn-outline" onclick="loadOverview()">刷新</button>
+                    </div>
+                    <div id="global-overview-content" style="margin-top:8px;">加载中...</div>
+                </div>
+
                 <div id="media-overview" class="card" style="margin-top:8px;">
                     <div style="display:flex; justify-content:space-between; align-items:center;">
                         <h3>媒体总览</h3>
@@ -448,6 +458,24 @@
                     <div id="media-dir-detail-content" style="margin-top:8px;">加载中...</div>
                 </div>
             </div>
+            <!-- 队列诊断模态 -->
+            <div id="queue-insights-modal" style="display:none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 1000;">
+                <div style="position: absolute; right: 0; top: 0; height: 100%; width: min(560px, 100%); background: #fff; box-shadow: -2px 0 8px rgba(0,0,0,0.15); display:flex; flex-direction:column;">
+                    <div style="padding:12px 16px; border-bottom:1px solid #eee; display:flex; align-items:center; justify-content:space-between;">
+                        <div style="display:flex; align-items:center; gap:8px;">
+                            <h3 style="margin:0;">队列诊断</h3>
+                            <small id="insights-meta" style="color:#666;"></small>
+                        </div>
+                        <div style="display:flex; gap:8px;">
+                            <button class="btn btn-outline" onclick="loadQueueInsights()">刷新</button>
+                            <button class="btn" onclick="hideQueueInsights()">关闭</button>
+                        </div>
+                    </div>
+                    <div id="queue-insights-content" style="padding: 12px 16px; overflow: auto; flex:1;">
+                        加载中...
+                    </div>
+                </div>
+            </div>
 
             <!-- 订阅管理 -->
             <div id="subscriptions" class="tab-content">
@@ -457,6 +485,7 @@
                         <button onclick="showAddSubscription()" class="btn btn-primary">添加订阅</button>
                         <button onclick="scanAll()" class="btn btn-secondary">全量扫描导入</button>
                         <button onclick="associateAll()" class="btn btn-outline">全量自动关联</button>
+                        <button onclick="triggerCheckSubscriptions()" class="btn">检查订阅</button>
                         <button onclick="loadSubscriptions()" class="btn btn-info">刷新列表</button>
                     </div>
                 </div>
@@ -534,6 +563,7 @@
                         <div style="display: flex; gap: 8px; align-items: center;">
                             <div style="color: #666; font-size: 14px;">每 2 秒自动刷新</div>
                             <button id="btn-refresh" class="btn btn-outline">立即刷新</button>
+                            <button id="btn-insights" class="btn" onclick="showQueueInsights()">诊断</button>
                         </div>
                     </div>
                     <div class="table-wrap">
@@ -639,6 +669,7 @@
             <div id="cookies" class="tab-content">
                 <h2>Cookie管理</h2>
                 <button class="btn" onclick="showAddCookie()">添加Cookie</button>
+                <button class="btn btn-outline" onclick="validateAllCookies()">全部验证</button>
                 <div id="cookie-list">加载中...</div>
                 
                 <div id="add-cookie" style="display:none; margin-top:1rem;">
@@ -666,8 +697,22 @@
 
             <!-- 系统设置 -->
             <div id="settings" class="tab-content">
-                <h2>系统设置</h2>
-                <div id="settings-list">加载中...</div>
+                <div class="card">
+                    <h2>系统设置</h2>
+                    <div id="settings-list">加载中...</div>
+                </div>
+                
+                <div class="card">
+                    <h2>数据一致性检查</h2>
+                    <p>检查本地目录与数据库记录的一致性，确保数据准确性。</p>
+                    <div style="margin: 1rem 0;">
+                        <button id="btn-consistency-check" class="btn" onclick="triggerConsistencyCheck()">执行一致性检查</button>
+                        <button class="btn btn-outline" onclick="loadConsistencyStats()">刷新统计</button>
+                    </div>
+                    <div id="consistency-stats" style="margin-top: 1rem;">
+                        <div class="status">点击"刷新统计"查看当前状态</div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -709,6 +754,7 @@
                 case 'dashboard':
                     // 合并后的总览：系统状态 + 媒体概览
                     loadDashboard();
+                    loadOverview();
                     loadVideos();
                     break;
                 case 'subscriptions':
@@ -848,9 +894,12 @@
                 const statusText = sub.is_active ? '活跃' : '暂停';
                 const lastCheck = sub.last_check ? new Date(sub.last_check).toLocaleString() : '从未';
                 
-                // 统计信息
-                const totalVideos = sub.total_videos || 0;
+                // 统计信息（优先使用后端提供的远端总计与待下载）
+                const totalVideos = sub.total_videos || 0; // 本地有文件数（口径A）
+                const dbTotalVideos = (typeof sub.db_total_videos === 'number') ? sub.db_total_videos : totalVideos; // 数据库记录总数
                 const downloadedVideos = sub.downloaded_videos || 0;
+                const remoteTotal = (typeof sub.remote_total === 'number') ? sub.remote_total : null;
+                const serverPending = (typeof sub.pending_videos === 'number') ? Math.max(sub.pending_videos, 0) : null;
                 const localPending = Math.max((totalVideos - downloadedVideos), 0);
                 
                 // 订阅类型显示
@@ -879,13 +928,14 @@
                     `;
                 }
                 
-                // 预填充远端总数（若有缓存且未过期）
+                // 远端信息优先级：后端 remote_total/pending_videos > 本地缓存 expected_total > 本地计算
                 const cached = getExpectedCache(sub.id);
                 const cachedOk = cached && (Date.now() - cached.at < 3600*1000);
-                const expectedText = cachedOk ? String(cached.value) : '未获取';
-                const remotePending = cachedOk ? Math.max((cached.value - downloadedVideos), 0) : null;
-                const pendingToShow = (remotePending !== null) ? remotePending : localPending;
-                const pendingSource = (remotePending !== null) ? '远端' : '本地';
+                const expectedText = (remoteTotal !== null) ? String(remoteTotal) : (cachedOk ? String(cached.value) : '未获取');
+                const expectedForPending = (remoteTotal !== null) ? remoteTotal : (cachedOk ? cached.value : null);
+                const pendingFromExpected = (expectedForPending !== null) ? Math.max((expectedForPending - downloadedVideos), 0) : null;
+                const pendingToShow = (serverPending !== null) ? serverPending : ((pendingFromExpected !== null) ? pendingFromExpected : localPending);
+                const pendingSource = (serverPending !== null) ? '后端' : ((expectedForPending !== null) ? '远端' : '本地');
 
                 html += `
                     <div class="subscription-item" id="sub-${sub.id}" data-total="${totalVideos}" data-downloaded="${downloadedVideos}">
@@ -897,6 +947,7 @@
                             <div class="subscription-controls">
                                 <button onclick="downloadSubscription(${sub.id})" class="btn btn-primary">开始下载</button>
                                 <button onclick="associateSubscription(${sub.id})" class="btn btn-outline">自动关联</button>
+                                <button onclick="viewPending(${sub.id})" class="btn btn-outline">查看待下载</button>
                                 <button onclick="viewSubscription(${sub.id})" class="btn btn-info">查看详情</button>
                                 <button onclick="editSubscription(${sub.id})" class="btn btn-secondary">编辑</button>
                                 <button onclick="toggleSubscription(${sub.id}, ${sub.is_active})" class="btn ${sub.is_active ? 'btn-warning' : 'btn-success'}">
@@ -907,16 +958,15 @@
                         </div>
                         
                         <div class="subscription-stats">
-                            <span class="stat-item stat-total">总计: ${totalVideos}</span>
+                            <span class="stat-item stat-total">本地(有文件): ${totalVideos}</span>
+                            <span class="stat-item" title="数据库中的视频记录总数（可能包含无本地文件的记录）">数据库记录: ${dbTotalVideos}</span>
                             <span class="stat-item stat-downloaded">已下载: ${downloadedVideos}</span>
                             <span class="stat-item stat-pending">待下载: <span id="pending-${sub.id}">${pendingToShow}</span> <small id="pending-src-${sub.id}" style="opacity:.7;">(${pendingSource})</small></span>
-                            ${sub.type === 'collection' ? `
-                                <span class="stat-item" id="expected-${sub.id}" style="background-color:#f3e5f5;color:#6a1b9a;">
-                                    远端总数: <span class="expected-count">${expectedText}</span>
-                                    <button class="btn btn-small btn-outline" style="margin-left:6px;" onclick="refreshExpected(${sub.id})">获取</button>
-                                    <button class="btn btn-small btn-outline" style="margin-left:6px;" onclick="refreshExpected(${sub.id}, true)">刷新</button>
-                                </span>
-                            ` : ''}
+                            <span class="stat-item" id="expected-${sub.id}" style="background-color:#f3e5f5;color:#6a1b9a;">
+                                远端总数: <span class="expected-count">${expectedText}</span>
+                                <button class="btn btn-small btn-outline" style="margin-left:6px;" onclick="refreshExpected(${sub.id})">获取</button>
+                                <button class="btn btn-small btn-outline" style="margin-left:6px;" onclick="refreshExpected(${sub.id}, true)">刷新</button>
+                            </span>
                         </div>
                         
                         <div style="margin-top: 8px; font-size: 14px; color: #666;">
@@ -930,6 +980,126 @@
             
             document.getElementById('subscription-list').innerHTML = html || '<p>暂无订阅</p>';
             // 不再自动拉取，依赖本地缓存与按钮触发，避免频繁请求
+        }
+
+        // 查看待下载（远端-本地差集）
+        async function viewPending(subscriptionId) {
+            // 先显示加载提示
+            const modal = document.createElement('div');
+            modal.style.cssText = `
+                position: fixed; top: 0; left: 0; width: 100%; height: 100%; 
+                background: rgba(0,0,0,0.5); display: flex; align-items: center; 
+                justify-content: center; z-index: 1000; overflow-y:auto;`;
+            modal.innerHTML = `
+                <div style="background: white; padding: 1rem 1.5rem; border-radius: 8px; max-width: 800px; width: 92%; max-height: 85%; overflow:auto;">
+                    <h3 style="margin-top:0;">待下载列表</h3>
+                    <div id="pending-content" style="margin: .5rem 0;">加载中...</div>
+                    <div style="text-align:right; margin-top: .5rem;">
+                        <button onclick="this.closest('div[style*=position]').remove()" class="btn">关闭</button>
+                    </div>
+                </div>`;
+            document.body.appendChild(modal);
+
+            const data = await apiRequest(`/api/subscriptions/${subscriptionId}/pending`);
+            const container = modal.querySelector('#pending-content');
+            if (!container) return;
+            if (!data || data.error) {
+                container.innerHTML = `<div class="error">获取失败: ${data?.error || '未知错误'}</div>`;
+                return;
+            }
+
+            const total = Number(data.remote_total || 0);
+            const existing = Number(data.existing || 0);
+            const pending = Number(data.pending || 0);
+            const list = Array.isArray(data.videos) ? data.videos : [];
+
+            const rows = list.map((v, idx) => {
+                const url = v.webpage_url || '#';
+                const title = (v.title || '').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+                const id = v.id || '';
+                const queuedBadge = v.is_queued ? `<span style="display:inline-block;margin-left:8px;padding:2px 6px;background:#e8f5e9;color:#1b5e20;border-radius:10px;font-size:11px;vertical-align:middle;">已在队列</span>` : '';
+                return `<tr>
+                    <td style="width:48px;text-align:right;color:#666;">${idx+1}</td>
+                    <td style="word-break:break-all;">
+                        <div style="font-weight:600;">${title || '(无标题)'} ${queuedBadge}</div>
+                        <div style="font-size:12px;color:#666;">ID: ${id}</div>
+                    </td>
+                    <td style="width:260px; text-align:right;">
+                        <a href="${url}" target="_blank" class="btn btn-small btn-outline">打开链接</a>
+                        ${v.is_queued ? `<button class="btn btn-small" disabled style="opacity:.7;cursor:not-allowed;">已在队列</button>` : `<button class="btn btn-small btn-primary" onclick="enqueuePendingVideo(${subscriptionId}, '${id}', this)">加入队列</button>`}
+                    </td>
+                </tr>`;
+            }).join('');
+
+            container.innerHTML = `
+                <div style="margin-bottom:.5rem; color:#333;">
+                    远端总数: <strong>${total}</strong> | 本地已有: <strong>${existing}</strong> | 待下载: <strong>${pending}</strong>
+                </div>
+                <div class="table-wrap">
+                    <table class="data">
+                        <thead>
+                            <tr><th>#</th><th>视频</th><th>操作</th></tr>
+                        </thead>
+                        <tbody>${rows || '<tr><td colspan="3" style="text-align:center;color:#666;">无待下载视频</td></tr>'}</tbody>
+                    </table>
+                </div>`;
+        }
+
+        // 将待下载条目加入队列
+        async function enqueuePendingVideo(subscriptionId, videoId, el) {
+            if (!subscriptionId || !videoId) return;
+            if (el) el.disabled = true;
+            try {
+                const res = await apiRequest(`/api/subscriptions/${subscriptionId}/enqueue_video`, {
+                    method: 'POST',
+                    body: JSON.stringify({ video_id: videoId })
+                });
+                if (res && res.error) {
+                    alert('加入队列失败: ' + res.error);
+                    if (el) el.disabled = false;
+                    return;
+                }
+                // 更新行内UI：标记徽章并禁用按钮
+                if (el) {
+                    const row = el.closest('tr');
+                    const titleDiv = row ? row.querySelector('td:nth-child(2) > div:first-child') : null;
+                    if (titleDiv && !titleDiv.querySelector('.queued-badge')) {
+                        const badge = document.createElement('span');
+                        badge.className = 'queued-badge';
+                        badge.style.cssText = 'display:inline-block;margin-left:8px;padding:2px 6px;background:#e8f5e9;color:#1b5e20;border-radius:10px;font-size:11px;vertical-align:middle;';
+                        badge.textContent = '已在队列';
+                        titleDiv.appendChild(badge);
+                    }
+                    el.textContent = '已在队列';
+                    el.classList.remove('btn-primary');
+                    el.classList.add('btn');
+                    el.disabled = true;
+                    el.style.opacity = '.7';
+                    el.style.cursor = 'not-allowed';
+                }
+            } catch (e) {
+                alert('加入队列失败: ' + (e?.message || e));
+                if (el) el.disabled = false;
+            }
+        }
+
+        // 触发后台检查订阅（差值入队并持续补齐）
+        async function triggerCheckSubscriptions() {
+            const btns = document.querySelectorAll('button[onclick="triggerCheckSubscriptions()"]');
+            btns.forEach(b => b.disabled = true);
+            try {
+                const res = await apiRequest('/api/scheduler/check-subscriptions', { method: 'POST' });
+                if (res && res.error) {
+                    alert('触发失败: ' + res.error);
+                } else {
+                    alert('已触发订阅检查，后台正在处理');
+                    loadSubscriptions();
+                }
+            } catch (e) {
+                alert('触发失败: ' + (e?.message || e));
+            } finally {
+                btns.forEach(b => b.disabled = false);
+            }
         }
         
         // 切换订阅状态
@@ -1437,6 +1607,44 @@
             `;
         }
 
+        // —— 全局总览（/api/overview） ——
+        async function loadOverview() {
+            const box = document.getElementById('global-overview-content');
+            if (!box) return;
+            box.innerHTML = '加载中...';
+            const data = await apiRequest('/api/overview');
+            if (data && data.error) { box.innerHTML = `<p class="status error">加载失败：${escapeHtml(data.error)}</p>`; return; }
+            const remote = data.remote_total ?? '-';
+            const local = data.local_total ?? '-';
+            const pending = data.pending_total ?? (typeof remote==='number' && typeof local==='number' ? Math.max(remote-local,0) : '-');
+            const q = data.queue || {};
+            const counts = q.counts || {};
+            const running = counts.running ?? counts.RUNNING ?? '-';
+            const queued = counts.queued ?? counts.QUEUED ?? '-';
+            const succeeded = counts.succeeded ?? counts.SUCCEEDED ?? '-';
+            const failed = counts.failed ?? counts.FAILED ?? '-';
+            const recentFail = data.recent_failed_24h ?? '-';
+            const paused = (q.paused && (q.paused.all || q.paused.requires_cookie || q.paused.no_cookie)) ? '是' : '否';
+            const cap = q.capacity || {};
+            box.innerHTML = `
+                <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap:12px;">
+                    <div class="stat-card"><div class="stat-title">Remote</div><div class="stat-number">${remote}</div></div>
+                    <div class="stat-card"><div class="stat-title">Local</div><div class="stat-number">${local}</div></div>
+                    <div class="stat-card"><div class="stat-title">Pending</div><div class="stat-number">${pending}</div></div>
+                    <div class="stat-card"><div class="stat-title">Queue 运行</div><div class="stat-number">${running}</div></div>
+                    <div class="stat-card"><div class="stat-title">Queue 排队</div><div class="stat-number">${queued}</div></div>
+                    <div class="stat-card"><div class="stat-title">Queue 成功</div><div class="stat-number">${succeeded}</div></div>
+                    <div class="stat-card"><div class="stat-title">Queue 失败</div><div class="stat-number">${failed}</div></div>
+                    <div class="stat-card"><div class="stat-title">暂停中</div><div class="stat-number">${paused}</div></div>
+                    <div class="stat-card"><div class="stat-title">最近24h失败</div><div class="stat-number">${recentFail}</div></div>
+                </div>
+                <details style="margin-top:8px;">
+                    <summary style="cursor:pointer;">查看原始数据(JSON)</summary>
+                    <pre style="margin-top:8px; color:#666; font-size:12px; background:#f8f9fa; padding:12px; border-radius:6px; overflow:auto;">${escapeHtml(JSON.stringify(data, null, 2))}</pre>
+                </details>
+            `;
+        }
+
         async function loadSubscriptionStats() {
             const content = document.getElementById('media-sub-stats-content');
             content.innerHTML = '加载中...';
@@ -1454,7 +1662,6 @@
             const content = document.getElementById('media-sub-stats-content');
             const kw = (document.getElementById('sub-filter').value || '').toLowerCase();
             const list = __subStatsCache.filter(x => !kw || (x.subscription_name || '').toLowerCase().includes(kw));
-            if (list.length === 0) { content.innerHTML = '<p>暂无数据</p>'; return; }
             const rows = list.map(x => `
                 <tr>
                     <td>${x.subscription_name || '-'}</td>
@@ -1463,7 +1670,7 @@
                     <td class="num">${x.downloaded_videos}</td>
                     <td class="num">${formatBytes(x.total_size || 0)}</td>
                     <td>${x.latest_upload ? new Date(x.latest_upload).toLocaleString() : '-'}</td>
-                    <td><button class="btn btn-small" onclick="showSubscriptionDetail(${x.subscription_id}, '${(x.subscription_name || '').replace(/'/g, "\'")}')">查看明细</button></td>
+                    <td><button class="btn btn-small" onclick="showSubscriptionDetail(${x.subscription_id})">查看视频</button></td>
                 </tr>
             `).join('');
             content.innerHTML = `
@@ -1473,9 +1680,9 @@
                       <tr>
                         <th>订阅名称</th>
                         <th>类型</th>
-                        <th class="num">总数</th>
-                        <th class="num">已下载</th>
-                        <th class="num">容量</th>
+                        <th>总数</th>
+                        <th>已下载</th>
+                        <th>容量</th>
                         <th>最近上传</th>
                         <th>操作</th>
                       </tr>
@@ -1706,6 +1913,33 @@
             loadCookies();
         }
 
+        // 批量验证Cookie
+        async function validateAllCookies() {
+            const triggers = document.querySelectorAll('button[onclick="validateAllCookies()"]');
+            triggers.forEach(b => b.disabled = true);
+            try {
+                const list = await apiRequest('/api/cookies');
+                const cookies = Array.isArray(list) ? list : [];
+                if (cookies.length === 0) {
+                    alert('暂无可验证的Cookie');
+                    return;
+                }
+                let ok = 0, fail = 0;
+                for (const c of cookies) {
+                    try {
+                        const res = await apiRequest(`/api/cookies/${c.id}/validate`, { method: 'POST' });
+                        if (res && res.valid) ok++; else fail++;
+                    } catch (_) { fail++; }
+                }
+                alert(`验证完成：有效 ${ok}，无效 ${fail}`);
+            } catch (e) {
+                alert('批量验证失败: ' + (e?.message || e));
+            } finally {
+                triggers.forEach(b => b.disabled = false);
+                loadCookies();
+            }
+        }
+
         // 启用/禁用 Cookie
         async function toggleCookieActive(id, current) {
             const payload = { is_active: !current };
@@ -1858,6 +2092,71 @@
             }
         }
 
+        // —— 队列诊断（/api/queue/insights） ——
+        function showQueueInsights() {
+            const modal = document.getElementById('queue-insights-modal');
+            if (!modal) return;
+            modal.style.display = 'block';
+            loadQueueInsights();
+        }
+
+        function hideQueueInsights() {
+            const modal = document.getElementById('queue-insights-modal');
+            if (!modal) return;
+            modal.style.display = 'none';
+        }
+
+        async function loadQueueInsights() {
+            const content = document.getElementById('queue-insights-content');
+            const meta = document.getElementById('insights-meta');
+            if (!content) return;
+            content.innerHTML = '加载中...';
+            const data = await apiRequest('/api/queue/insights');
+            if (data && data.error) { content.innerHTML = `<p class=\"status error\">加载失败：${escapeHtml(data.error)}</p>`; return; }
+            try { meta.textContent = `失败样本 ${Array.isArray(data.failed_samples)?data.failed_samples.length:0}`; } catch { /* noop */ }
+            content.innerHTML = renderInsightsHtml(data);
+        }
+
+        function renderInsightsHtml(d) {
+            const wr = d && d.wait_reasons || {};
+            const et = d && d.errors_top || [];
+            const fs = d && d.failed_samples || [];
+            const paused = d && d.paused || {};
+            const cap = d && d.capacity || {};
+            const counts = d && d.counts || {};
+            const waitRows = Object.entries(wr).map(([k,v]) => `<tr><td>${escapeHtml(k)}</td><td class=\"num\">${v}</td></tr>`).join('');
+            const errRows = et.map(x => `<tr><td class=\"mono\" style=\"max-width:260px; overflow:hidden; text-overflow:ellipsis;\" title=\"${escapeHtml(x.message || '')}\">${escapeHtml(x.message || '')}</td><td class=\"num\">${x.count || 0}</td></tr>`).join('');
+            const failRows = fs.map(x => `<tr><td class=\"mono\" style=\"max-width:120px;\">${escapeHtml(x.id || '')}</td><td>${escapeHtml(x.type || '')}</td><td>${x.subscription_id ?? ''}</td><td class=\"mono\" title=\"${escapeHtml(x.last_error || '')}\" style=\"max-width:240px; overflow:hidden; text-overflow:ellipsis;\">${escapeHtml(x.last_error || '')}</td><td>${x.finished_at ? new Date(x.finished_at).toLocaleString() : '-'}</td></tr>`).join('');
+            return `
+                <div style=\"display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:12px;\">
+                    <div class=\"stat-card\"><div class=\"stat-title\">运行</div><div class=\"stat-number\">${counts.running ?? '-'}</div></div>
+                    <div class=\"stat-card\"><div class=\"stat-title\">排队</div><div class=\"stat-number\">${counts.queued ?? '-'}</div></div>
+                    <div class=\"stat-card\"><div class=\"stat-title\">成功</div><div class=\"stat-number\">${counts.succeeded ?? '-'}</div></div>
+                    <div class=\"stat-card\"><div class=\"stat-title\">失败</div><div class=\"stat-number\">${counts.failed ?? '-'}</div></div>
+                    <div class=\"stat-card\"><div class=\"stat-title\">暂停</div><div class=\"stat-number\">${(paused.all || paused.requires_cookie || paused.no_cookie) ? '是' : '否'}</div></div>
+                    <div class=\"stat-card\"><div class=\"stat-title\">并发(需Cookie/无需)</div><div class=\"stat-number\">${cap.requires_cookie ?? '-'} / ${cap.no_cookie ?? '-'}</div></div>
+                </div>
+                <div class=\"card\" style=\"margin-top:12px;\">
+                    <h4>等待原因分布</h4>
+                    <div class=\"table-wrap\">
+                        <table class=\"data\"><thead><tr><th>原因</th><th class=\"num\">数量</th></tr></thead><tbody>${waitRows || '<tr><td colspan=2>暂无数据</td></tr>'}</tbody></table>
+                    </div>
+                </div>
+                <div class=\"card\" style=\"margin-top:12px;\">
+                    <h4>错误Top</h4>
+                    <div class=\"table-wrap\">
+                        <table class=\"data\"><thead><tr><th>错误</th><th class=\"num\">次数</th></tr></thead><tbody>${errRows || '<tr><td colspan=2>暂无数据</td></tr>'}</tbody></table>
+                    </div>
+                </div>
+                <div class=\"card\" style=\"margin-top:12px;\">
+                    <h4>失败样本</h4>
+                    <div class=\"table-wrap\">
+                        <table class=\"data\"><thead><tr><th>job_id</th><th>类型</th><th>订阅</th><th>错误</th><th>结束时间</th></tr></thead><tbody>${failRows || '<tr><td colspan=5>暂无数据</td></tr>'}</tbody></table>
+                    </div>
+                </div>
+            `;
+        }
+
         // 队列管理事件绑定
         document.addEventListener('DOMContentLoaded', function() {
             // 队列控制按钮事件
@@ -1921,7 +2220,87 @@
                 };
             }
 
-            // 合并后总览需要同时加载系统状态与媒体数据
+            // 一致性检查相关函数
+            window.triggerConsistencyCheck = async function() {
+                const btn = document.getElementById('btn-consistency-check');
+                const originalText = btn.textContent;
+                
+                try {
+                    btn.textContent = '检查中...';
+                    btn.disabled = true;
+                    
+                    const result = await apiRequest('/api/system/consistency-check', 'POST');
+                    
+                    // 显示检查结果
+                    const statsDiv = document.getElementById('consistency-stats');
+                    statsDiv.innerHTML = `
+                        <div class="status success">一致性检查完成</div>
+                        <div class="stats-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-top: 1rem;">
+                            <div class="stat-item">
+                                <strong>数据库记录数:</strong> ${result.total_db_records || 0}
+                            </div>
+                            <div class="stat-item">
+                                <strong>本地文件数:</strong> ${result.files_found || 0}
+                            </div>
+                            <div class="stat-item">
+                                <strong>缺失文件数:</strong> ${result.files_missing || 0}
+                            </div>
+                            <div class="stat-item">
+                                <strong>更新记录数:</strong> ${result.records_updated || 0}
+                            </div>
+                            <div class="stat-item">
+                                <strong>清理记录数:</strong> ${result.records_cleaned || 0}
+                            </div>
+                            <div class="stat-item">
+                                <strong>孤立文件数:</strong> ${result.orphan_files || 0}
+                            </div>
+                            <div class="stat-item">
+                                <strong>导入视频数:</strong> ${result.imported_videos || 0}
+                            </div>
+                        </div>
+                    `;
+                    
+                } catch (error) {
+                    const statsDiv = document.getElementById('consistency-stats');
+                    statsDiv.innerHTML = `<div class="status error">检查失败: ${error.message}</div>`;
+                } finally {
+                    btn.textContent = originalText;
+                    btn.disabled = false;
+                }
+            };
+            
+            window.loadConsistencyStats = async function() {
+                try {
+                    const result = await apiRequest('/api/system/consistency-stats');
+                    
+                    const statsDiv = document.getElementById('consistency-stats');
+                    statsDiv.innerHTML = `
+                        <div class="status">当前一致性状态</div>
+                        <div class="stats-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-top: 1rem;">
+                            <div class="stat-item">
+                                <strong>总视频数:</strong> ${result.total_videos || 0}
+                            </div>
+                            <div class="stat-item">
+                                <strong>已下载数:</strong> ${result.downloaded_videos || 0}
+                            </div>
+                            <div class="stat-item">
+                                <strong>有路径记录:</strong> ${result.with_path || 0}
+                            </div>
+                            <div class="stat-item">
+                                <strong>无路径记录:</strong> ${result.without_path || 0}
+                            </div>
+                        </div>
+                        <div style="margin-top: 1rem; font-size: 0.9em; color: #666;">
+                            最后检查时间: ${result.last_check_time || '未知'}
+                        </div>
+                    `;
+                    
+                } catch (error) {
+                    const statsDiv = document.getElementById('consistency-stats');
+                    statsDiv.innerHTML = `<div class="status error">加载失败: ${error.message}</div>`;
+                }
+            };
+
             loadTabData('dashboard');
         });
     </script>

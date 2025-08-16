@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>订阅同步详情</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; margin: 16px; color: #1f2937; }
+    h1 { font-size: 20px; margin: 0 0 12px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+    .card { border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; background: #fff; margin-bottom: 12px; }
+    .card h2 { margin: 0 0 8px; font-size: 16px; }
+    button { padding: 6px 10px; border-radius: 6px; border: 1px solid #d1d5db; background: #f9fafb; cursor: pointer; }
+    button.primary { background: #2563eb; color: #fff; border-color: #1d4ed8; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .muted { color: #6b7280; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+    .status { font-weight: 600; }
+    .status.running { color: #10b981; }
+    .status.completed { color: #6b7280; }
+    .status.failed { color: #ef4444; }
+    .status.idle { color: #9ca3af; }
+    
+    /* 状态卡片 */
+    .status-card { border-left: 4px solid #e5e7eb; }
+    .status-card.running { border-left-color: #10b981; }
+    .status-card.failed { border-left-color: #ef4444; }
+    .status-card.completed { border-left-color: #6b7280; }
+    
+    .status-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+    .status-title { font-size: 18px; font-weight: 600; }
+    .status-badge { padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; }
+    .status-badge.running { background: #ecfdf5; color: #065f46; }
+    .status-badge.completed { background: #f3f4f6; color: #374151; }
+    .status-badge.failed { background: #fef2f2; color: #991b1b; }
+    .status-badge.idle { background: #f9fafb; color: #6b7280; }
+    
+    .status-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; }
+    .status-stat { text-align: center; }
+    .status-stat-value { font-size: 24px; font-weight: 700; color: #111827; }
+    .status-stat-value.warn { color: #dc2626; }
+    .status-stat-value.ok { color: #059669; }
+    .status-stat-label { font-size: 12px; color: #6b7280; margin-top: 4px; }
+    
+    .status-times { margin-top: 12px; font-size: 12px; color: #6b7280; }
+    .status-notice { margin-top: 12px; padding: 8px; background: #fef3c7; border: 1px solid #fcd34d; border-radius: 4px; font-size: 12px; color: #92400e; }
+    
+    /* 事件时间线 */
+    .timeline { max-height: 400px; overflow-y: auto; }
+    .timeline-item { display: flex; gap: 12px; margin-bottom: 12px; }
+    .timeline-marker { width: 8px; height: 8px; border-radius: 50%; margin-top: 6px; flex-shrink: 0; }
+    .timeline-marker.success { background: #10b981; }
+    .timeline-marker.error { background: #ef4444; }
+    .timeline-marker.info { background: #3b82f6; }
+    
+    .timeline-content { flex: 1; }
+    .timeline-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+    .timeline-type { font-weight: 600; font-size: 14px; }
+    .timeline-time { font-size: 12px; color: #6b7280; }
+    .timeline-details { font-size: 12px; color: #6b7280; }
+    .timeline-error { font-size: 12px; color: #dc2626; margin-top: 4px; }
+    
+    /* 加载状态 */
+    .loading { text-align: center; padding: 20px; color: #6b7280; }
+    .error { text-align: center; padding: 20px; color: #dc2626; }
+    
+    /* 返回按钮 */
+    .back-btn { margin-bottom: 16px; }
+  </style>
+</head>
+<body>
+  <div class="container" style="max-width: 1000px; margin: 0 auto;">
+    <div class="back-btn">
+      <button onclick="history.back()">← 返回</button>
+    </div>
+    
+    <h1 id="page-title">订阅同步详情</h1>
+    
+    <!-- 状态卡片 -->
+    <div class="card status-card" id="status-card">
+      <div class="status-header">
+        <div class="status-title">同步状态</div>
+        <div class="status-badge" id="status-badge">加载中...</div>
+      </div>
+      
+      <div class="status-stats" id="status-stats">
+        <!-- 统计数据将在这里渲染 -->
+      </div>
+      
+      <div class="status-times" id="status-times">
+        <!-- 时间信息将在这里渲染 -->
+      </div>
+      
+      <div class="status-notice">
+        💡 提示："本轮同步完成"仅代表本次闭环结束，并不代表"全量已下载完成"，请参考"待下载"数量
+      </div>
+      
+      <div class="row" style="margin-top: 12px;">
+        <button id="btn-refresh" class="primary">刷新状态</button>
+        <button id="btn-trigger" disabled>立即同步</button>
+      </div>
+    </div>
+    
+    <!-- 事件时间线 -->
+    <div class="card">
+      <h2>同步事件时间线</h2>
+      <div class="timeline" id="timeline">
+        <div class="loading">加载中...</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    
+    let subscriptionId = null;
+    let poller = null;
+    let pollInterval = 5000;
+    
+    // 从URL参数获取订阅ID
+    function getSubscriptionId() {
+      const params = new URLSearchParams(window.location.search);
+      const id = params.get('id');
+      return id ? parseInt(id) : null;
+    }
+    
+    function formatTime(timeStr) {
+      if (!timeStr) return '未知';
+      try {
+        return new Date(timeStr).toLocaleString();
+      } catch {
+        return timeStr;
+      }
+    }
+    
+    function getStatusText(status) {
+      const statusMap = {
+        'idle': '空闲',
+        'running': '同步中...',
+        'completed': '本轮已完成',
+        'failed': '同步失败'
+      };
+      return statusMap[status] || status;
+    }
+    
+    function getEventTypeText(type) {
+      const typeMap = {
+        'list_start': '开始获取列表',
+        'chunk_ok': '分页获取成功',
+        'chunk_failed': '分页获取失败',
+        'list_done': '列表获取完成',
+        'list_failed': '列表获取失败'
+      };
+      return typeMap[type] || type;
+    }
+    
+    async function loadSyncStatus() {
+      try {
+        const response = await fetch(`/api/subscriptions/${subscriptionId}/sync_status`);
+        if (!response.ok) throw new Error(await response.text());
+        
+        const data = await response.json();
+        renderSyncStatus(data);
+        
+        // 如果状态是completed或failed，停止轮询
+        if (data.status === 'completed' || data.status === 'failed') {
+          stopPolling();
+        }
+        
+      } catch (e) {
+        console.error('Failed to load sync status:', e);
+        $('status-card').innerHTML = `<div class="error">加载状态失败: ${e.message}</div>`;
+      }
+    }
+    
+    async function loadSyncTrace() {
+      try {
+        const response = await fetch(`/api/subscriptions/${subscriptionId}/sync_trace`);
+        if (!response.ok) throw new Error(await response.text());
+        
+        const data = await response.json();
+        renderSyncTrace(data.events || []);
+        
+      } catch (e) {
+        console.error('Failed to load sync trace:', e);
+        $('timeline').innerHTML = `<div class="error">加载事件失败: ${e.message}</div>`;
+      }
+    }
+    
+    function renderSyncStatus(data) {
+      const card = $('status-card');
+      const badge = $('status-badge');
+      const stats = $('status-stats');
+      const times = $('status-times');
+      
+      // 更新状态徽章
+      badge.textContent = getStatusText(data.status);
+      badge.className = `status-badge ${data.status}`;
+      
+      // 更新卡片样式
+      card.className = `card status-card ${data.status}`;
+      
+      // 更新统计数据
+      stats.innerHTML = `
+        <div class="status-stat">
+          <div class="status-stat-value ${data.pending > 0 ? 'warn' : 'ok'}">${data.pending || 0}</div>
+          <div class="status-stat-label">待下载</div>
+        </div>
+        <div class="status-stat">
+          <div class="status-stat-value">${data.remote_total || 0}</div>
+          <div class="status-stat-label">远端总数</div>
+        </div>
+        <div class="status-stat">
+          <div class="status-stat-value">${data.existing || 0}</div>
+          <div class="status-stat-label">已存在</div>
+        </div>
+      `;
+      
+      // 更新时间信息
+      const timeInfo = [];
+      if (data.started_at) timeInfo.push(`开始时间: ${formatTime(data.started_at)}`);
+      if (data.updated_at) timeInfo.push(`更新时间: ${formatTime(data.updated_at)}`);
+      if (data.completed_at) timeInfo.push(`完成时间: ${formatTime(data.completed_at)}`);
+      if (data.error) timeInfo.push(`错误: ${data.error}`);
+      
+      times.innerHTML = timeInfo.join(' | ');
+    }
+    
+    function renderSyncTrace(events) {
+      const timeline = $('timeline');
+      
+      if (!events.length) {
+        timeline.innerHTML = '<div class="muted" style="text-align: center; padding: 20px;">暂无同步事件</div>';
+        return;
+      }
+      
+      // 按时间倒序排列（最新的在前）
+      const sortedEvents = [...events].sort((a, b) => {
+        const timeA = new Date(a.ts || 0).getTime();
+        const timeB = new Date(b.ts || 0).getTime();
+        return timeB - timeA;
+      });
+      
+      timeline.innerHTML = sortedEvents.map(event => {
+        const isError = event.type.includes('failed') || event.error;
+        const markerClass = isError ? 'error' : (event.type.includes('ok') || event.type.includes('done') ? 'success' : 'info');
+        
+        let details = [];
+        if (event.range) details.push(`范围: ${event.range}`);
+        if (event.count) details.push(`数量: ${event.count}`);
+        if (event.duration_ms) details.push(`耗时: ${event.duration_ms}ms`);
+        if (event.attempts && event.attempts > 1) details.push(`重试: ${event.attempts}次`);
+        
+        return `
+          <div class="timeline-item">
+            <div class="timeline-marker ${markerClass}"></div>
+            <div class="timeline-content">
+              <div class="timeline-header">
+                <div class="timeline-type">${getEventTypeText(event.type)}</div>
+                <div class="timeline-time">${formatTime(event.ts)}</div>
+              </div>
+              ${details.length ? `<div class="timeline-details">${details.join(' | ')}</div>` : ''}
+              ${event.error ? `<div class="timeline-error">错误: ${event.error}</div>` : ''}
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+    
+    function startPolling() {
+      if (poller) return;
+      
+      poller = setInterval(() => {
+        loadSyncStatus();
+        loadSyncTrace();
+      }, pollInterval);
+    }
+    
+    function stopPolling() {
+      if (poller) {
+        clearInterval(poller);
+        poller = null;
+      }
+    }
+    
+    // 事件处理
+    $('btn-refresh').onclick = () => {
+      loadSyncStatus();
+      loadSyncTrace();
+    };
+    
+    $('btn-trigger').onclick = async () => {
+      try {
+        const response = await fetch(`/api/subscriptions/${subscriptionId}/sync_trigger`, {
+          method: 'POST'
+        });
+        
+        if (!response.ok) throw new Error(await response.text());
+        
+        alert('同步任务已提交，请稍后查看状态');
+        setTimeout(() => {
+          loadSyncStatus();
+          loadSyncTrace();
+        }, 1000);
+        
+      } catch (e) {
+        alert(`触发同步失败: ${e.message}`);
+      }
+    };
+    
+    // 页面初始化
+    function init() {
+      subscriptionId = getSubscriptionId();
+      
+      if (!subscriptionId) {
+        document.body.innerHTML = '<div class="error" style="text-align: center; margin-top: 50px;">缺少订阅ID参数</div>';
+        return;
+      }
+      
+      $('page-title').textContent = `订阅 #${subscriptionId} 同步详情`;
+      
+      // 加载数据
+      loadSyncStatus();
+      loadSyncTrace();
+      
+      // 开始轮询
+      startPolling();
+    }
+    
+    // 页面卸载时停止轮询
+    window.addEventListener('beforeunload', stopPolling);
+    
+    // 启动
+    init();
+  </script>
+</body>
+</html>
