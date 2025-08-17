@@ -352,7 +352,7 @@
             color: #000;
         }
 
-        .type-specific-urls {
+        .type-specific_urls {
             background-color: #6f42c1;
         }
 
@@ -411,7 +411,10 @@
                 <div id="global-overview" class="card" style="margin-top:8px;">
                     <div style="display:flex; justify-content:space-between; align-items:center;">
                         <h3>全局总览</h3>
-                        <button class="btn btn-outline" onclick="loadOverview()">刷新</button>
+                        <div style="display:flex; gap:8px; align-items:center;">
+                            <button class="btn btn-outline" onclick="loadOverview()">刷新</button>
+                            <button id="btn-sync-global" class="btn" onclick="triggerLiteSyncGlobal()">轻量同步</button>
+                        </div>
                     </div>
                     <div id="global-overview-content" style="margin-top:8px;">加载中...</div>
                 </div>
@@ -486,6 +489,7 @@
                         <button onclick="scanAll()" class="btn btn-secondary">全量扫描导入</button>
                         <button onclick="associateAll()" class="btn btn-outline">全量自动关联</button>
                         <button onclick="triggerCheckSubscriptions()" class="btn">检查订阅</button>
+                        <button onclick="triggerLiteSyncGlobal()" class="btn">轻量同步(全局)</button>
                         <button onclick="loadSubscriptions()" class="btn btn-info">刷新列表</button>
                     </div>
                 </div>
@@ -498,6 +502,37 @@
                     <h2>下载任务</h2>
                     <button onclick="refreshTasks()" class="btn btn-secondary">刷新</button>
                     <button onclick="clearCompletedTasks()" class="btn btn-outline">清理完成任务</button>
+                </div>
+                <div class="card" id="download-aggregate" style="margin-bottom:12px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <h3>下载汇总（按订阅）</h3>
+                        <div style="display:flex; gap:8px; align-items:center;">
+                            <button id="agg-collapse-btn" class="btn btn-outline" onclick="DownloadAggregateManager.toggleCollapse()" title="折叠/展开">折叠</button>
+                            <button class="btn btn-outline" onclick="DownloadAggregateManager.load()">刷新</button>
+                            <label style="color:#666; font-size:12px; display:flex; align-items:center; gap:6px;">
+                                <input type="checkbox" id="agg-autorefresh" onchange="DownloadAggregateManager.toggleAuto(this.checked)"> 自动刷新(15s)
+                            </label>
+                        </div>
+                    </div>
+                    <div id="agg-content">
+                        <div id="agg-totals" class="subscription-stats" style="margin:8px 0;">-</div>
+                        <div class="table-wrap">
+                            <table class="data">
+                                <thead>
+                                    <tr>
+                                        <th>订阅名</th>
+                                        <th class="num">Downloaded</th>
+                                        <th class="num">Pending</th>
+                                        <th class="num">Queued</th>
+                                        <th class="num">Running</th>
+                                        <th class="num">RemoteTotal</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="agg-tbody"></tbody>
+                            </table>
+                        </div>
+                        <div style="margin-top:6px; color:#6b7280; font-size:12px;">注：Pending 为估算值；无远端总数(remote_total)时按 0 处理，口径“以本地为主”。</div>
+                    </div>
                 </div>
                 <div id="task-list">加载中...</div>
             </div>
@@ -594,7 +629,7 @@
                             <option value="collection">合集订阅</option>
                             <option value="uploader">UP主订阅</option>
                             <option value="keyword">关键词订阅</option>
-                            <option value="specific-urls">特定视频订阅</option>
+                            <option value="specific_urls">特定视频订阅</option>
                         </select>
                     </div>
                     
@@ -745,10 +780,19 @@
             // 切换到非任务标签时停止轮询
             if (tabName !== 'tasks') {
                 stopTasksPolling();
+                if (typeof DownloadAggregateManager !== 'undefined') DownloadAggregateManager.stop();
             }
             // 切换到非队列标签时停止队列轮询
             if (tabName !== 'queue') {
                 stopQueuePolling();
+            }
+            // 切换到非订阅标签时停止订阅同步轮询
+            if (tabName !== 'subscriptions') {
+                stopSubscriptionsSyncPolling();
+            }
+            // 切换到非设置标签时停止一致性轮询
+            if (tabName !== 'settings') {
+                stopConsistencyPolling();
             }
             switch(tabName) {
                 case 'dashboard':
@@ -759,9 +803,11 @@
                     break;
                 case 'subscriptions':
                     loadSubscriptions();
+                    startSubscriptionsSyncPolling();
                     break;
                 case 'tasks':
                     startTasksPolling();
+                    if (typeof DownloadAggregateManager !== 'undefined') DownloadAggregateManager.start();
                     break;
                 case 'cookies':
                     loadCookies();
@@ -771,6 +817,8 @@
                     break;
                 case 'settings':
                     loadSettings();
+                    window.loadConsistencyStats();
+                    startConsistencyPolling();
                     break;
             }
         }
@@ -833,15 +881,15 @@
             }
             if (countEl) countEl.textContent = '加载中...';
             const data = await apiRequest(`/api/subscriptions/${subscriptionId}/expected-total`);
-            if (data && typeof data.expected_total_videos === 'number') {
-                if (countEl) countEl.textContent = String(data.expected_total_videos);
-                setExpectedCache(subscriptionId, data.expected_total_videos);
+            if (data && typeof data.expected_total === 'number') {
+                if (countEl) countEl.textContent = String(data.expected_total);
+                setExpectedCache(subscriptionId, data.expected_total);
                 // 同步更新待下载展示（优先远端）
                 try {
                     const subEl = document.getElementById(`sub-${subscriptionId}`);
                     if (subEl) {
                         const downloaded = parseInt(subEl.getAttribute('data-downloaded') || '0', 10);
-                        const pending = Math.max((data.expected_total_videos - downloaded), 0);
+                        const pending = Math.max((data.expected_total - downloaded), 0);
                         const pEl = document.getElementById(`pending-${subscriptionId}`);
                         const sEl = document.getElementById(`pending-src-${subscriptionId}`);
                         if (pEl) pEl.textContent = String(pending);
@@ -907,7 +955,7 @@
                     'collection': '合集订阅',
                     'uploader': 'UP主订阅', 
                     'keyword': '关键词订阅',
-                    'specific-urls': '特定视频订阅'
+                    'specific_urls': '特定视频订阅'
                 };
                 const typeText = typeTexts[sub.type] || sub.type;
                 
@@ -954,6 +1002,7 @@
                                     ${sub.is_active ? '暂停' : '启用'}
                                 </button>
                                 <button onclick="deleteSubscription(${sub.id})" class="btn btn-danger">删除</button>
+                                <button onclick="triggerLiteSyncSubscription(${sub.id}, this)" class="btn">轻量同步</button>
                             </div>
                         </div>
                         
@@ -962,6 +1011,7 @@
                             <span class="stat-item" title="数据库中的视频记录总数（可能包含无本地文件的记录）">数据库记录: ${dbTotalVideos}</span>
                             <span class="stat-item stat-downloaded">已下载: ${downloadedVideos}</span>
                             <span class="stat-item stat-pending">待下载: <span id="pending-${sub.id}">${pendingToShow}</span> <small id="pending-src-${sub.id}" style="opacity:.7;">(${pendingSource})</small></span>
+                            <span class="stat-item" id="retry-${sub.id}" style="background:#fff0f0;color:#b91c1c;">失败回补队列: <span class="retry-count">-</span></span>
                             <span class="stat-item" id="expected-${sub.id}" style="background-color:#f3e5f5;color:#6a1b9a;">
                                 远端总数: <span class="expected-count">${expectedText}</span>
                                 <button class="btn btn-small btn-outline" style="margin-left:6px;" onclick="refreshExpected(${sub.id})">获取</button>
@@ -979,7 +1029,121 @@
             });
             
             document.getElementById('subscription-list').innerHTML = html || '<p>暂无订阅</p>';
+            // 高亮跳转的订阅（来自下载汇总点击）
+            try {
+                const sid = localStorage.getItem('highlight_subscription');
+                if (sid) {
+                    const el = document.getElementById('sub-' + sid);
+                    if (el && typeof DownloadAggregateManager !== 'undefined' && DownloadAggregateManager.highlightEl) {
+                        DownloadAggregateManager.highlightEl(el);
+                    } else if (el) {
+                        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    }
+                    localStorage.removeItem('highlight_subscription');
+                }
+            } catch (_) {}
             // 不再自动拉取，依赖本地缓存与按钮触发，避免频繁请求
+            // 但会有轻量的状态轮询，用于刷新 pending_estimated / retry 队列长度
+        }
+
+        // 轻量同步：API 客户端与轮询
+        let __subsSyncTimer = null;
+        const __subsSyncIntervalMs = 15000;
+
+        function startSubscriptionsSyncPolling() {
+            stopSubscriptionsSyncPolling();
+            // 立即跑一次
+            refreshSubscriptionsSyncStatus();
+            __subsSyncTimer = setInterval(refreshSubscriptionsSyncStatus, __subsSyncIntervalMs);
+        }
+
+        function stopSubscriptionsSyncPolling() {
+            if (__subsSyncTimer) {
+                clearInterval(__subsSyncTimer);
+                __subsSyncTimer = null;
+            }
+        }
+
+        // —— 一致性检查（设置页） ——
+        let __consistencyTimer = null;
+        const __consistencyIntervalMs = 15000;
+
+        function startConsistencyPolling() {
+            stopConsistencyPolling();
+            // 立即刷新一次
+            window.loadConsistencyStats();
+            __consistencyTimer = setInterval(() => window.loadConsistencyStats(), __consistencyIntervalMs);
+        }
+
+        function stopConsistencyPolling() {
+            if (__consistencyTimer) {
+                clearInterval(__consistencyTimer);
+                __consistencyTimer = null;
+            }
+        }
+
+        async function triggerLiteSyncGlobal() {
+            const btn = document.getElementById('btn-sync-global');
+            if (btn) btn.disabled = true;
+            try {
+                const res = await apiRequest('/api/sync/trigger', { method: 'POST', body: JSON.stringify({}) });
+                if (res && res.error) {
+                    alert('轻量同步触发失败: ' + res.error);
+                } else {
+                    // 触发后轻量刷新几个区域
+                    loadOverview();
+                    if (typeof DownloadAggregateManager !== 'undefined') DownloadAggregateManager.load();
+                    refreshSubscriptionsSyncStatus();
+                }
+            } catch (e) {
+                alert('轻量同步触发失败: ' + (e?.message || e));
+            } finally {
+                if (btn) btn.disabled = false;
+            }
+        }
+
+        async function triggerLiteSyncSubscription(subscriptionId, el) {
+            if (el) el.disabled = true;
+            try {
+                const res = await apiRequest('/api/sync/trigger', { method: 'POST', body: JSON.stringify({ sid: subscriptionId }) });
+                if (res && res.error) {
+                    alert('订阅轻量同步失败: ' + res.error);
+                } else {
+                    // 触发后刷新该订阅的 expected 与 pending 展示
+                    refreshExpected(subscriptionId, true);
+                    // 立即拉取一次状态
+                    await refreshSubscriptionsSyncStatus(subscriptionId);
+                }
+            } catch (e) {
+                alert('订阅轻量同步失败: ' + (e?.message || e));
+            } finally {
+                if (el) el.disabled = false;
+            }
+        }
+
+        async function refreshSubscriptionsSyncStatus(onlySid) {
+            try {
+                let url = '/api/sync/status';
+                if (typeof onlySid === 'number') url += `?sid=${onlySid}`;
+                const data = await apiRequest(url);
+                const items = (data && data.items) ? data.items : [];
+                items.forEach(stat => {
+                    const sid = stat.subscription_id;
+                    // pending_estimated 优先展示
+                    if (typeof stat.pending_estimated === 'number') {
+                        const pEl = document.getElementById(`pending-${sid}`);
+                        const sEl = document.getElementById(`pending-src-${sid}`);
+                        if (pEl) pEl.textContent = String(Math.max(0, stat.pending_estimated));
+                        if (sEl) sEl.textContent = '(后端)';
+                    }
+                    // retry 队列长度
+                    const rEl = document.getElementById(`retry-${sid}`);
+                    if (rEl) {
+                        const rc = rEl.querySelector('.retry-count');
+                        if (rc) rc.textContent = String(stat.retry_queue_len || 0);
+                    }
+                });
+            } catch (_) {}
         }
 
         // 查看待下载（远端-本地差集）
@@ -1134,7 +1298,7 @@
                 document.getElementById('uploader-fields').style.display = 'block';
             } else if (type === 'keyword') {
                 document.getElementById('keyword-fields').style.display = 'block';
-            } else if (type === 'specific-urls') {
+            } else if (type === 'specific_urls') {
                 document.getElementById('specific-urls-fields').style.display = 'block';
             }
             
@@ -1223,7 +1387,7 @@
                     name = '关键词订阅 - ' + keyword;
                 }
                 
-            } else if (type === 'specific-urls') {
+            } else if (type === 'specific_urls') {
                 const specificUrls = document.getElementById('sub-specific-urls').value;
                 if (!specificUrls.trim()) {
                     alert('请输入至少一个视频URL');
@@ -1324,6 +1488,135 @@
                 loadSubscriptions();
             }
         }
+
+        // —— 下载汇总（按订阅） ——
+        const DownloadAggregateManager = {
+            timer: null,
+            intervalMs: 15000,
+            start() {
+                try {
+                    // 若勾选自动刷新则启动定时器
+                    // 初始化自动刷新勾选状态
+                    const auto = document.getElementById('agg-autorefresh');
+                    if (auto) {
+                        const persisted = localStorage.getItem('agg_autorefresh') === '1';
+                        auto.checked = persisted;
+                    }
+                    // 初始化折叠状态
+                    this.applyCollapseFromStore();
+                    // 立即加载一次
+                    this.load();
+                    // 重置并根据勾选启动轮询
+                    this.stop();
+                    if (auto && auto.checked) this.timer = setInterval(() => this.load(), this.intervalMs);
+                } catch (_) {}
+            },
+            stop() {
+                if (this.timer) { clearInterval(this.timer); this.timer = null; }
+            },
+            toggleAuto(on) {
+                if (on) {
+                    this.stop();
+                    this.timer = setInterval(() => this.load(), this.intervalMs);
+                } else {
+                    this.stop();
+                }
+                try { localStorage.setItem('agg_autorefresh', on ? '1' : '0'); } catch (_) {}
+            },
+            applyCollapseFromStore() {
+                const collapsed = localStorage.getItem('agg_collapsed') === '1';
+                const content = document.getElementById('agg-content');
+                const btn = document.getElementById('agg-collapse-btn');
+                if (content) content.style.display = collapsed ? 'none' : '';
+                if (btn) btn.textContent = collapsed ? '展开' : '折叠';
+            },
+            toggleCollapse() {
+                const content = document.getElementById('agg-content');
+                const btn = document.getElementById('agg-collapse-btn');
+                if (!content) return;
+                const collapsed = content.style.display === 'none';
+                content.style.display = collapsed ? '' : 'none';
+                if (btn) btn.textContent = collapsed ? '折叠' : '展开';
+                try { localStorage.setItem('agg_collapsed', (!collapsed) ? '1' : '0'); } catch (_) {}
+            },
+            async load() {
+                const totalsEl = document.getElementById('agg-totals');
+                const tbody = document.getElementById('agg-tbody');
+                if (!totalsEl || !tbody) return;
+                totalsEl.textContent = '加载中...';
+                try {
+                    const data = await apiRequest('/api/download/aggregate');
+                    if (!data || data.error) {
+                        totalsEl.innerHTML = `<span style="color:#b91c1c;">加载失败：${(data && data.error) || '未知错误'}</span> <button class="btn btn-small btn-outline" onclick="DownloadAggregateManager.load()">重试</button>`;
+                        return;
+                    }
+                    this.render(data);
+                } catch (e) {
+                    totalsEl.innerHTML = `<span style="color:#b91c1c;">加载异常：${e?.message || e}</span> <button class=\"btn btn-small btn-outline\" onclick=\"DownloadAggregateManager.load()\">重试</button>`;
+                }
+            },
+            render(data) {
+                const totals = data.totals || {};
+                const items = Array.isArray(data.items) ? data.items.slice() : [];
+                // 排序：活跃度(queued+running) 降序，其次 pending_estimated 降序
+                items.sort((a,b) => {
+                    const aAct = (a.queue?.queued||0) + (a.queue?.running||0);
+                    const bAct = (b.queue?.queued||0) + (b.queue?.running||0);
+                    if (bAct !== aAct) return bAct - aAct;
+                    const ap = a.pending_estimated ?? 0;
+                    const bp = b.pending_estimated ?? 0;
+                    return bp - ap;
+                });
+
+                const totalHtml = `
+                    <span class="stat-item stat-downloaded">Downloaded: ${totals.downloaded || 0}</span>
+                    <span class="stat-item stat-pending">Pending: ${totals.pending_estimated || 0}</span>
+                    <span class="stat-item">Queued: ${totals.queued || 0}</span>
+                    <span class="stat-item">Running: ${totals.running || 0}</span>
+                `;
+                document.getElementById('agg-totals').innerHTML = totalHtml;
+
+                const rows = items.map(x => {
+                    const name = (x.subscription && x.subscription.name) || `#${x.subscription_id || ''}`;
+                    const sid = (x.subscription && x.subscription.id) || x.subscription_id;
+                    const remote = (typeof x.remote_total === 'number') ? x.remote_total : '-';
+                    const onClick = sid ? `onclick=\"DownloadAggregateManager.gotoSubscription(${sid})\"` : '';
+                    return `
+                        <tr>
+                            <td ${onClick} style=\"cursor:${sid?'pointer':'default'};\">${name}</td>
+                            <td class=\"num\">${x.downloaded ?? 0}</td>
+                            <td class=\"num\">${x.pending_estimated ?? 0}</td>
+                            <td class=\"num\">${(x.queue && x.queue.queued) ?? 0}</td>
+                            <td class=\"num\">${(x.queue && x.queue.running) ?? 0}</td>
+                            <td class=\"num\">${remote}</td>
+                        </tr>`;
+                }).join('');
+                document.getElementById('agg-tbody').innerHTML = rows || '<tr><td colspan="6" style="text-align:center; color:#666;">暂无数据</td></tr>';
+            },
+            gotoSubscription(sid) {
+                if (!sid) return;
+                try { localStorage.setItem('highlight_subscription', String(sid)); } catch (_) {}
+                showTab('subscriptions');
+                // 若列表已在，直接尝试高亮
+                setTimeout(() => {
+                    const el = document.getElementById('sub-' + sid);
+                    if (el) this.highlightEl(el);
+                }, 300);
+            },
+            highlightEl(el) {
+                if (!el) return;
+                el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                const prevBg = el.style.backgroundColor;
+                const prevShadow = el.style.boxShadow;
+                el.style.transition = 'background-color .3s ease, box-shadow .3s ease';
+                el.style.backgroundColor = '#fff7ed';
+                el.style.boxShadow = '0 0 0 3px rgba(249,115,22,0.35) inset';
+                setTimeout(() => {
+                    el.style.backgroundColor = prevBg || '';
+                    el.style.boxShadow = prevShadow || '';
+                }, 4000);
+            }
+        };
 
         // 任务轮询与渲染
         let tasksPollTimer = null;
@@ -1437,7 +1730,7 @@
                 'collection': '合集订阅',
                 'uploader': 'UP主订阅', 
                 'keyword': '关键词订阅',
-                'specific-urls': '特定视频订阅'
+                'specific_urls': '特定视频订阅'
             };
             
             let detailsHtml = `
