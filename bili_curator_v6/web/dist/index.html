@@ -993,7 +993,6 @@
                                 <span class="subscription-type type-${sub.type}">${typeText}</span>
                             </div>
                             <div class="subscription-controls">
-                                <button onclick="downloadSubscription(${sub.id})" class="btn btn-primary">开始下载</button>
                                 <button onclick="associateSubscription(${sub.id})" class="btn btn-outline">自动关联</button>
                                 <button onclick="viewPending(${sub.id})" class="btn btn-outline">查看待下载</button>
                                 <button onclick="viewSubscription(${sub.id})" class="btn btn-info">查看详情</button>
@@ -1003,6 +1002,7 @@
                                 </button>
                                 <button onclick="deleteSubscription(${sub.id})" class="btn btn-danger">删除</button>
                                 <button onclick="triggerLiteSyncSubscription(${sub.id}, this)" class="btn">轻量同步</button>
+                                <span class="hint" style="margin-left:8px;color:#666;font-size:12px;">启用=自动入队下载（由调度器执行）</span>
                             </div>
                         </div>
                         
@@ -1438,22 +1438,7 @@
             }
         }
 
-        // 下载订阅
-        async function downloadSubscription(id) {
-            const result = await apiRequest(`/api/subscriptions/${id}/download`, { method: 'POST' });
-            if (result.error) {
-                alert('启动下载失败: ' + result.error);
-            } else {
-                alert('下载任务已启动');
-                // 切换到下载任务标签并开始轮询
-                const tasksTab = Array.from(document.querySelectorAll('.tab')).find(t => t.textContent.includes('下载任务'));
-                if (tasksTab) {
-                    tasksTab.click();
-                } else {
-                    loadTabData('tasks');
-                }
-            }
-        }
+        // 已移除“开始下载”：下载由启用订阅后调度器自动执行
 
         // 全量扫描导入
         async function scanAll() {

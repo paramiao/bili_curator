@@ -121,16 +121,9 @@ GET /api/subscriptions/{id}/expected-total
 
 ## 3. 下载任务接口
 
-### 开始下载
-```http
-POST /api/subscriptions/{id}/download
-Content-Type: application/json
-
-{
-  "priority": 5,
-  "force": false
-}
-```
+### 下载行为说明（无手动开始下载 API）
+启用订阅后（`is_active = true`），调度器会定期获取新增视频并自动入队、下载；暂停订阅（`is_active = false`）将停止入队与下载。
+因此，不提供手动“开始下载”的 API。
 
 ### 获取订阅任务列表
 ```http

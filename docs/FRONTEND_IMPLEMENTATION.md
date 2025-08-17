@@ -4,31 +4,24 @@
 
 ## 当前实现状态
 
-### 静态页面实现（V6.0）
-当前版本采用静态 HTML 页面 + JavaScript 的轻量级实现：
+> 前端入口已统一为单页应用（SPA）：`bili_curator_v6/web/dist/index.html`。
+> 历史分散页面 `bili_curator_v6/static/*.html` 已废弃（不再直接访问），功能均收敛到首页内的路由与模块。
+
+### 统一入口（V6.1）
+当前版本采用单页应用（构建产物）作为唯一入口：
 
 ```
-bili_curator_v6/static/
-├── queue_admin.html      # 队列管理界面
-├── video_detection.html  # 视频检测界面  
-└── test.html            # API 测试页面
+bili_curator_v6/web/
+└── dist/
+    └── index.html  # 唯一入口（SPA）
 ```
 
-### 主要功能页面
-- **队列管理**：`/static/queue_admin.html`
-  - 任务列表展示，支持状态筛选
-  - 队列统计信息（运行中/等待中/失败）
-  - 任务操作：暂停/恢复/取消/优先级调整
-  - 实时刷新（轮询模式）
-
-- **视频检测**：`/static/video_detection.html`
-  - 视频检测服务状态监控
-  - 检测结果展示
-  - 手动触发检测功能
-
-- **API 测试**：`/static/test.html`
-  - 基础 API 接口测试
-  - 开发调试工具
+### 主要功能模块（均在首页内路由切换）
+- **队列管理**：任务列表/状态筛选、统计、暂停/恢复/取消/优先级、轮询刷新
+- **视频检测**：检测服务状态、结果展示、手动触发
+- **订阅管理**：列表/详情、增删改、手动触发
+- **媒体总览**：订阅统计、目录统计与明细
+- **系统设置 / Cookie 管理**：Cookie 添加/验证/状态、下载与超时配置
 
 ## 2. API 对接
 - 列表与统计：`GET /api/subscriptions`
@@ -45,10 +38,10 @@ bili_curator_v6/static/
 - 统一以订阅为主键：每个订阅维持 `status/progress/logs` 的 UI 状态。
 - 日志仅展示最近 N 条（建议 10–50 条），更多查看容器日志。
 
-## 规划中的前端架构（V6.1+）
+## 规划中的前端架构（V6.2+）
 
 ### 现代化 Web 界面
-计划迁移到 `web/src/` 目录，采用现代前端框架：
+继续在 `web/src/` 中演进模块化、路由与状态管理，构建输出统一到 `web/dist/index.html`：
 
 ```
 bili_curator_v6/web/
@@ -67,7 +60,7 @@ bili_curator_v6/web/
 └── dist/                  # 构建输出
 ```
 
-### 计划功能页面
+### 计划功能页面（SPA 内部路由）
 - **总览仪表板**：系统状态、订阅统计、下载进度
 - **订阅管理**：卡片/表格视图，展示名称/类型/状态、本地统计、远端总数
 - **订阅详情**：进度条、当前视频、已完成/待下载、最近日志、历史任务
@@ -87,12 +80,12 @@ bili_curator_v6/web/
 
 ## 开发优先级
 
-### Phase 1: 基础 Web 界面（规划中）
+### Phase 1: 基础 Web 界面（已切换统一入口）
 - [ ] 订阅管理页面：列表展示、添加/编辑订阅
 - [ ] 总览仪表板：系统状态、统计信息
 - [ ] Cookie 管理页面：添加/验证/状态监控
 
-### Phase 2: 任务监控（规划中）
+### Phase 2: 任务监控（进行中）
 - [ ] 任务队列页面：实时状态、操作控制
 - [ ] 下载进度展示：进度条、日志显示
 - [ ] 错误处理界面：友好错误提示
@@ -132,10 +125,17 @@ setInterval(async () => {
 
 ## 5. 交互细节
 - 远端总数与本地统计并列展示；若差值>0，显式提示“有 N 个可下载”。
-- 点击“开始下载”后显示任务面板；失败时给出 Cookie/网络/目录权限等提示。
+- 通过“启用/暂停”控制下载：启用订阅后由调度器自动入队与下载；失败时在任务面板给出 Cookie/网络/目录权限等提示。
 - 一键化“扫描→自动关联→统计刷新”。
 - 队列总览卡片：显示 Cookie/NoCookie 两通道的并发配置、运行计数、可用容量，以及“排队”数（`counts_by_channel.queued_cookie/queued_nocookie`）。
 
 ## 6. 家用优化
+
+## 附：历史页面（已废弃）
+- `bili_curator_v6/static/admin.html`
+- `bili_curator_v6/static/queue_admin.html`
+- `bili_curator_v6/static/subscription_detail.html`
+- `bili_curator_v6/static/video_detection.html`
+- `bili_curator_v6/static/test.html`
 - 全局设置：并发=1、检查间隔=6–12h、失败重试=2。
 - UI 提示：Cookie 失效/无写权限/403/401 显著提示。

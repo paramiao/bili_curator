@@ -49,6 +49,9 @@ docker-compose logs -f
 
 ## 🌐 Web 界面功能
 
+> 前端入口已统一：请通过 `bili_curator_v6/web/dist/index.html` 访问首页（单页应用，SPA）。
+> 旧的 `bili_curator_v6/static/*.html` 已废弃（不再推荐直接访问这些页面）。
+
 ### 主要页面
 - **总览仪表板**：系统状态、订阅统计、下载进度
 - **订阅管理**：添加/编辑订阅、状态监控、手动触发
@@ -152,9 +155,6 @@ curl -s -X POST http://localhost:8080/api/subscriptions/1/associate
 # 刷新并查看远端总数（与本地统计口径独立）
 curl -s http://localhost:8080/api/subscriptions/1/expected-total
 
-# 启动某订阅下载（示例：ID=1）
-curl -s -X POST http://localhost:8080/api/subscriptions/1/download
-
 # 查看订阅与其任务
 curl -s http://localhost:8080/api/subscriptions | jq .
 curl -s http://localhost:8080/api/subscriptions/1/tasks | jq .
@@ -194,7 +194,13 @@ curl -s -X PATCH http://localhost:8080/api/cookies/1 \
 - 并发下载：建议设为 1，减少 NAS 负载。
 - 定时检查：每 6–12 小时检查一次，如有新增再下载。
 - 遇到统计不一致：先执行“扫描 + 自动关联”，再看订阅统计。
-- 若点击“开始下载”秒完成：请先升级到包含“目录内去重”修复的版本并重启容器。
+- 启停下载：通过更新订阅 `is_active` 字段控制（启用=自动入队下载；暂停=停止入队），例如：
+
+```bash
+curl -s -X PATCH http://localhost:8080/api/subscriptions/1 \
+  -H 'Content-Type: application/json' \
+  -d '{"is_active": true}'
+```
 
 ### 💾 运行时存储与迁移
 - 数据库路径：环境变量 `DB_PATH`（默认 `/app/data/bili_curator.db`）。应用启动时会自动创建数据目录。
