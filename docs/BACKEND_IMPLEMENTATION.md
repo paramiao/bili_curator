@@ -1,6 +1,25 @@
 # 后端实现说明（Backend Implementation）
+## 1.1 启动流程与自动修复（本地优先，V6 新增）
 
-更新时间：2025-08-15 17:49 (Asia/Shanghai)
+- 触发方式：`FastAPI` 启动事件 `@app.on_event("startup")`。
+- 行为概述（非阻塞）：
+  - 启动轻量调度器：`scheduler.start()`。
+  - 在后台线程执行启动一致性检查：`asyncio.to_thread(startup_consistency_check)`，避免阻塞事件循环。
+  - 全量重算订阅统计：`recompute_all_subscriptions()`，统计口径遵循“本地优先”。
+- 本地优先统计口径：
+  - 以磁盘实际存在的产物（视频/配套 JSON）为权威来源。
+  - DB 作为缓存/索引，在启动修复与自动关联后被刷新，杜绝“DB 大于本地”的统计偏差。
+- 失败与重试：
+  - 启动阶段异常会记录日志，不阻塞进程；可在运行中通过本地扫描/自动关联等操作自愈。
+- 与轻量同步的关系：
+  - 启动修复只处理“本地一致性与统计”。
+  - 远端计数/轻量同步通过 `/api/sync/trigger` 与 `/api/sync/status` 独立完成，避免启动阶段外网阻塞。
+- 前端入口与旧页面：
+  - 单页应用（SPA）入口统一为 `web/dist/index.html`。
+  - 历史分散页面（`static/*.html`）已标记为废弃，推荐从 SPA 入口统一访问与导航。
+
+
+更新时间：2025-08-17 16:28 (Asia/Shanghai)
 
 ## 1. 关键代码路径
 - API：`bili_curator_v6/app/api.py`
@@ -174,3 +193,93 @@ javascript:alert(document.cookie.match(/SESSDATA=([^;]+)/)[1])
   - `DOWNLOAD_CMD_TIMEOUT=3600`（下载子进程超时秒数）。
   - `META_CMD_TIMEOUT=60`（视频元数据子进程超时秒数）。
   - `EXPECTED_TOTAL_TIMEOUT=20`（expected-total 快速探测超时秒数）。
+
+## 12. 订阅管理（前端交互与 API 映射）— 近期变更
+
+本节记录订阅管理页面近期的交互调整与对应后端接口，便于端到端联调与维护。
+
+### 12.1 UI 变更摘要
+
+- 合并操作入口：将“查看详情”和“编辑”合并为单一按钮“详情/编辑”。
+  - 点击后打开统一的编辑模态框，顶部显示只读详情（ID、类型、创建时间、最后检查），下方为可编辑字段。
+- 弹窗关闭逻辑加固：支持“取消”按钮、点击遮罩、按 ESC 任意方式关闭；统一 `closeEditModal()` 清理监听。
+- 按钮顺序优化：在订阅卡片的 `subscription-controls` 区域，将“启用/暂停”按钮置于第一个位置。
+- 精简工具栏：移除“刷新列表”按钮。列表刷新由各操作成功后自动调用 `loadSubscriptions()` 统一完成。
+
+对应实现参考：`bili_curator_v6/web/dist/index.html`
+
+### 12.2 前端按钮 → 后端 API 映射
+
+- 订阅卡片内：
+  - 启用/暂停：`toggleSubscription(id, is_active)` → `PUT /api/subscriptions/{id}`，payload `{ is_active: boolean }`
+  - 查看待下载：`viewPending(id)` → 读取待下载状态（内部查询，若有单独 API 请在此补充）
+  - 详情/编辑：`editSubscription(id)` → `GET /api/subscriptions/{id}` 拉取详情；保存时 `PUT /api/subscriptions/{id}` 提交修改
+  - 删除：`deleteSubscription(id)` → `DELETE /api/subscriptions/{id}`
+  - 本地同步（按订阅）：`localSyncSubscription(id)` → 触发“仅该订阅目录”的扫描与自动关联（前端顺序调用两步或后端聚合端点，见下）
+  - 远端同步（按订阅，轻量）：`triggerLiteSyncSubscription(id)` → 触发快速远端计数或轻量同步端点（根据实现对齐）
+
+- 顶部工具栏：
+  - 添加订阅：`addSubscription()` → `POST /api/subscriptions`
+  - 本地同步（全局）：`localSync()` → 触发全局扫描与自动关联（前端顺序调用或后端聚合端点，见下）
+  - 检查订阅：`triggerCheckSubscriptions()` → `POST /api/scheduler/check-subscriptions`（差值入队并持续补齐）
+  - 远端同步（全局，轻量）：`triggerLiteSyncGlobal()` → 触发全局轻量远端同步（根据实现对齐）
+
+### 12.3 本地同步与自动关联（全局 / 按订阅）
+
+当前支持两种触发路径，选择其一按需对齐后端：
+
+- 方案 A（后端聚合端点，推荐）：
+  - 全局：`POST /api/auto-import/scan-associate`（扫描 + 自动关联 + 统计重算）
+  - 按订阅：`POST /api/subscriptions/{id}/scan-associate`
+
+- 方案 B（前端顺序调用两端点）：
+  - 扫描：`POST /api/auto-import/scan`（可选传 `subscription_id` 仅扫描该目录）
+  - 自动关联：
+    - 全局：`POST /api/auto-import/associate`
+    - 按订阅：`POST /api/subscriptions/{id}/associate`
+
+两方案均需保证并发互斥（全局 vs. 按订阅）与用户提示（禁用按钮、运行中状态、完成/错误提示）。
+
+#### 12.3.1 远端同步（轻量）端点与前端映射
+
+- 端点：
+  - 触发：`POST /api/sync/trigger`（全局或携带 `sid` 针对某订阅）
+  - 状态：`GET /api/sync/status`（可选 `?sid=xxx` 仅拉取单订阅状态）
+- 前端绑定（`bili_curator_v6/web/dist/index.html`）：
+  - 全局触发：`triggerLiteSyncGlobal()` → `POST /api/sync/trigger`（body `{}`）
+  - 单订阅触发：`triggerLiteSyncSubscription(id, el)` → `POST /api/sync/trigger`（body `{ sid: id }`）
+  - 状态拉取：`refreshSubscriptionsSyncStatus(onlySid?)` → `GET /api/sync/status[?sid=onlySid]`
+- 响应结构（建议）：
+  - 触发：`{ "message": "triggered" }`
+  - 状态：`{ "items": [{ "subscription_id": 1, "status": "running|idle|failed", "last_synced_at": "ISO8601", "message": "..." }] }`
+
+#### 12.3.2 并发与互斥建议
+
+- 远端同步与“检查订阅”可以并行，但需共享全局 yt-dlp 信号量限制外部请求频次。
+- 建议在前端禁用触发按钮直至返回，避免重复触发：
+  - 全局：禁用 `#btn-sync-global`
+  - 单订阅：禁用当前按钮 `el.disabled = true`，结束后恢复
+- 若后端存在订阅级互斥锁 `get_subscription_lock(subscription_id)`，应复用，避免同订阅状态抖动。
+
+### 12.4 列表刷新策略
+
+- 移除独立的“刷新列表”按钮后，以下操作成功后均会自动 `loadSubscriptions()`：
+  - 添加、编辑、删除、启用/暂停、检查订阅、（本地/远端）同步触发。
+  - 编辑弹窗保存成功后自动关闭并刷新。
+
+### 12.5 错误处理与用户提示
+
+- 订阅更新/删除/启停/检查/同步均在错误时 `alert()` 提示具体原因；成功时给出反馈并刷新列表。
+- 编辑弹窗：保存失败不关闭，保留表单便于用户修正。
+
+### 12.6 相关代码位置索引
+
+- 前端：`bili_curator_v6/web/dist/index.html`
+  - `loadSubscriptions()`：拉取并渲染订阅列表
+  - `editSubscription()` / `updateSubscription()`：编辑弹窗打开/保存
+  - `toggleSubscription()` / `deleteSubscription()`：启停与删除
+  - `triggerCheckSubscriptions()`：触发后台检查
+  - `localSync()` / `localSyncSubscription()`：本地扫描 + 自动关联触发
+  - `triggerLiteSyncGlobal()` / `triggerLiteSyncSubscription()`：轻量远端同步
+
+后续若变更 API 路径或参数，请同步更新本节与 `docs/API_SPECIFICATION.md`。

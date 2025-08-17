@@ -9,7 +9,7 @@ GET /api/queue/list
 ```
 # API 接口规范（API Specification）
 
-更新时间：2025-08-17 11:24 (Asia/Shanghai)
+更新时间：2025-08-17 16:20 (Asia/Shanghai)
 
 ## 基础信息
 
@@ -29,6 +29,56 @@ GET /health
   "status": "healthy",
   "timestamp": "2025-08-17T11:24:00+08:00",
   "version": "6.0.0"
+}
+```
+
+### 系统状态
+```http
+GET /api/status
+```
+**说明**: 返回后端运行状态与核心统计（订阅/视频/Cookie等）。
+**响应**:
+```json
+{
+  "status": "running",
+  "timestamp": "2025-08-17T16:20:00+08:00",
+  "version": "6.0.0",
+  "statistics": {
+    "total_subscriptions": 12,
+    "active_subscriptions": 8,
+    "total_videos": 963,
+    "downloaded_videos": 963,
+    "active_cookies": 1
+  }
+}
+```
+
+### 扫描并自动关联（全局聚合端点）
+```http
+POST /api/auto-import/scan-associate
+```
+**说明**: 一次请求内完成“扫描本地文件 + 自动关联 + 统计重算”的聚合操作，便于前端单按钮触发。
+**响应**:
+```json
+{
+  "message": "完成",
+  "scan": { "scanned_files": 150, "imported_files": 12 },
+  "associate": { "associated_count": 8 }
+}
+```
+
+### 扫描并自动关联（仅针对某订阅）
+```http
+POST /api/subscriptions/{id}/scan-associate
+```
+**说明**: 仅扫描并关联该订阅下载目录下的视频产物，并重算该订阅统计。
+**响应**:
+```json
+{
+  "subscription_id": 1,
+  "message": "完成",
+  "scan": { "scanned_files": 34, "imported_files": 2 },
+  "associate": { "associated_count": 2 }
 }
 ```
 
@@ -116,6 +166,42 @@ GET /api/subscriptions/{id}/expected-total
   "subscription_id": 1,
   "expected_total": 200,
   "last_updated": "2025-01-15T21:00:00Z"
+}
+```
+
+### 轻量远端同步（触发）
+```http
+POST /api/sync/trigger
+```
+**说明**: 触发轻量同步。若 body 未携带 `sid`，则触发全局轻量同步与入队协调。
+**请求体（可选）**:
+```json
+{ "sid": 1, "mode": "lite_head" }
+```
+**响应**:
+```json
+{ "triggered": true, "scope": "subscription", "sid": 1 }
+```
+
+### 轻量远端同步（状态）
+```http
+GET /api/sync/status?sid=1
+```
+**说明**: 查询轻量同步状态与缓存的指标，如 `remote_total`、`pending_estimated` 等。无 `sid` 时返回所有启用订阅。
+**响应**:
+```json
+{
+  "items": [
+    {
+      "subscription_id": 1,
+      "name": "某订阅",
+      "remote_total": 120,
+      "pending_estimated": 7,
+      "retry_queue_len": 0,
+      "status": "running",
+      "updated_at": "2025-08-17T16:18:00+08:00"
+    }
+  ]
 }
 ```
 

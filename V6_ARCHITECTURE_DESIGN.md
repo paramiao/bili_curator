@@ -27,13 +27,25 @@
 
 ### 技术栈选择
 ```
-Frontend:  纯静态页面（HTML/CSS/JS，仓库内置 `static/` 与 `web/`）
+Frontend:  单页应用（SPA，构建产物位于 `web/dist/index.html`；`static/` 为历史页面，已废弃）
 Backend:   FastAPI + Python 3.11
 Database:  SQLite（本地文件 DB_PATH）
 Queue:     内置轻量队列（Python 队列/状态机），无 Redis/Celery
 Container: Docker + Docker Compose（单服务）
 Monitor:   健康检查 / 日志（无 Prometheus）
 ```
+
+### 启动事件与本地优先一致性修复（V6 新增）
+
+- 触发：服务启动时（FastAPI `startup` 事件）。
+- 行为：
+  - 启动内部调度器（APScheduler/后台循环）。
+  - 后台线程执行“一致性检查 + 统计重算”，统计以“磁盘实际存在产物”为准，刷新 DB 缓存。
+  - 不阻塞应用对外提供 API。
+- 与远端同步的边界：
+  - 启动阶段不访问外网获取远端总数；远端计数/轻量同步由 `/api/sync/trigger`、`/api/sync/status` 负责，按需触发。
+- 前端入口：
+  - 统一单页应用（SPA）入口 `web/dist/index.html`，历史 `static/*.html` 为兼容保留，已不建议直接访问。
 
 ### 服务架构
 ```
@@ -174,17 +186,21 @@ bili_curator_v6/app/
 3. **队列管理**：任务列表、进度追踪、手动控制
 4. **设置**：Cookie 管理、下载参数配置
 
-### 前端架构（当前实现）
+### 前端架构（当前实现：统一首页）
 ```
 bili_curator_v6/
-├── static/                   # 静态页面（HTML/CSS/JS）
-│   ├── queue_admin.html     # 队列管理界面
-│   ├── video_detection.html # 视频检测界面
-│   └── test.html            # 测试页面
-└── web/                     # 构建产物
-    ├── dist/                # 前端构建输出
-    └── src/                 # 源码（空，待开发）
+└── web/
+    ├── dist/
+    │   └── index.html        # 唯一入口（SPA）
+    └── src/                  # 源码（逐步完善）
 ```
+
+> 历史分散页面（已废弃，仅保留文件不再直接访问）：
+> - `bili_curator_v6/static/admin.html`
+> - `bili_curator_v6/static/queue_admin.html`
+> - `bili_curator_v6/static/subscription_detail.html`
+> - `bili_curator_v6/static/video_detection.html`
+> - `bili_curator_v6/static/test.html`
 
 ### 家用简化版特性
 - **设计理念**：简单 > 复杂，易用 > 功能全面，稳定 > 高性能
@@ -192,7 +208,7 @@ bili_curator_v6/
   - SQLite 替代 PostgreSQL
   - 内置队列替代 Redis + Celery
   - 单容器替代多服务编排
-  - 静态页面替代复杂前端框架
+  - 统一单页应用（SPA）入口，减少多页面维护复杂度
 - **部署简化**：一键脚本，最小化配置，本地文件存储
 
 ## 🔐 超时与Cookie（简化）

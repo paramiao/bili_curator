@@ -1,6 +1,6 @@
 # 数据模型设计（Data Model Design）
 
-更新时间：2025-08-17 11:29 (Asia/Shanghai)
+更新时间：2025-08-17 16:22 (Asia/Shanghai)
 
 ## 数据库表结构
 
@@ -32,6 +32,8 @@ CREATE TABLE subscriptions (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 ```
+
+> 统计口径（本地优先）：`subscriptions.total_videos/downloaded_videos` 的计算以“磁盘真实存在的产物”为准（视频或配套 JSON），应用启动与关联操作后会按本地为准刷新统计，避免 DB 计数大于本地的情况。
 
 ### 2. 视频表（videos）
 
@@ -103,6 +105,21 @@ CREATE TABLE cookies (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 ```
+
+### 5. 设置表（settings，KV 缓存）
+
+```sql
+CREATE TABLE settings (
+    key TEXT PRIMARY KEY,
+    value TEXT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+用途：
+- 缓存轻量同步状态与统计：`sync:{sid}:status`（JSON），示例：`{"status":"running","remote_total":120,"updated_at":"..."}`
+- 缓存待下载估算：`agg:{sid}:pending_estimated`（字符串整数）
+- 缓存失败重试队列：`retry:{sid}:failed_backfill`（JSON 数组）
 
 ## 数据关系图
 
