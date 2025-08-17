@@ -1,6 +1,15 @@
+### 队列诊断信息
+```http
+GET /api/queue/insights
+```
+
+### 获取队列快照（所有请求项）
+```http
+GET /api/queue/list
+```
 # API 接口规范（API Specification）
 
-更新时间：2025-01-15 21:05 (Asia/Shanghai)
+更新时间：2025-08-17 11:24 (Asia/Shanghai)
 
 ## 基础信息
 
@@ -17,8 +26,8 @@ GET /health
 **响应**:
 ```json
 {
-  "status": "ok",
-  "timestamp": "2025-01-15T21:05:00Z",
+  "status": "healthy",
+  "timestamp": "2025-08-17T11:24:00+08:00",
   "version": "6.0.0"
 }
 ```
@@ -30,21 +39,23 @@ GET /health
 GET /api/subscriptions
 ```
 **响应**:
+注意：实现直接返回数组（未包裹在对象中）。
 ```json
-{
-  "subscriptions": [
-    {
-      "id": 1,
-      "name": "订阅名称",
-      "subscription_type": "collection",
-      "url": "https://space.bilibili.com/...",
-      "target_directory": "/path/to/download",
-      "is_active": true,
-      "created_at": "2025-01-15T10:00:00Z",
-      "updated_at": "2025-01-15T10:00:00Z"
-    }
-  ]
-}
+[
+  {
+    "id": 1,
+    "name": "订阅名称",
+    "type": "collection",
+    "url": "https://www.bilibili.com/list/xxx",
+    "is_active": true,
+    "total_videos": 120,
+    "remote_total": 150,
+    "downloaded_videos": 120,
+    "pending_videos": 30,
+    "created_at": "2025-01-15T10:00:00Z",
+    "updated_at": "2025-01-15T10:00:00Z"
+  }
+]
 ```
 
 ### 获取订阅详情
@@ -56,9 +67,8 @@ GET /api/subscriptions/{id}
 {
   "id": 1,
   "name": "订阅名称",
-  "subscription_type": "collection",
+  "type": "collection",
   "url": "https://space.bilibili.com/...",
-  "target_directory": "/path/to/download",
   "is_active": true,
   "video_count": 150,
   "downloaded_count": 120,
@@ -74,9 +84,8 @@ Content-Type: application/json
 
 {
   "name": "订阅名称",
-  "subscription_type": "collection",
+  "type": "collection",
   "url": "https://space.bilibili.com/...",
-  "target_directory": "/path/to/download",
   "is_active": true
 }
 ```
@@ -149,7 +158,7 @@ GET /api/subscriptions/{id}/tasks
 
 ### 获取任务状态
 ```http
-GET /api/tasks/{task_id}/status
+GET /api/tasks/{task_id}
 ```
 **响应**:
 ```json
@@ -212,7 +221,8 @@ POST /api/queue/capacity
 Content-Type: application/json
 
 {
-  "capacity": 3
+  "requires_cookie": 1,
+  "no_cookie": 1
 }
 ```
 
@@ -223,15 +233,16 @@ GET /api/requests
 **响应**:
 ```json
 {
-  "requests": [
+  "count": 4,
+  "items": [
     {
-      "id": "req_123",
+      "id": "job_xxx",
+      "type": "download",
       "subscription_id": 1,
-      "status": "running",
+      "status": "queued",
       "priority": 5,
       "channel": "cookie",
-      "created_at": "2025-01-15T20:00:00Z",
-      "started_at": "2025-01-15T20:01:00Z"
+      "created_at": "2025-01-15T20:00:00Z"
     }
   ]
 }
@@ -325,7 +336,7 @@ Content-Type: application/json
   "name": "Cookie名称",
   "sessdata": "SESSDATA值",
   "bili_jct": "bili_jct值",
-  "buvid3": "buvid3值"
+  "dedeuserid": "DedeUserID"
 }
 ```
 

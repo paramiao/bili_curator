@@ -78,6 +78,125 @@ app = FastAPI(
 
 # 挂载静态文件
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# ------------------------------
+# 轻量同步 API（触发 + 状态）
+# ------------------------------
+
+class SyncTriggerBody(BaseModel):
+    sid: Optional[int] = None
+    mode: Optional[str] = "lite_head"  # lite_head | backfill_failures | full_head_small (保留向前兼容)
+
+@app.post("/api/sync/trigger")
+async def api_sync_trigger(body: SyncTriggerBody, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """触发轻量同步：
+    - 指定 sid：后台刷新该订阅的 pending 估算（compute_pending_list）并写入缓存；可作为“刷新按钮”的轻量操作。
+    - 未指定 sid：调用一次 enqueue_coordinator（按轮转/节流策略），触发全局轻量同步与入队协调。
+    返回立刻，不阻塞前端。
+    """
+
+    async def _run_for_sid(sid: int):
+        ldb = next(get_db())
+        try:
+            try:
+                info = await downloader.compute_pending_list(sid, ldb)
+                # 将 pending 写入缓存（与调度器行为一致，确保前端立刻可见）
+                pend_key = f"agg:{sid}:pending_estimated"
+                pend_val = str(info.get('pending') or 0)
+                s = ldb.query(Settings).filter(Settings.key == pend_key).first()
+                if not s:
+                    s = Settings(key=pend_key, value=pend_val)
+                    ldb.add(s)
+                else:
+                    s.value = pend_val
+                ldb.commit()
+            except Exception as e:
+                logger.warning(f"sync trigger (sid={sid}) failed: {e}")
+        finally:
+            ldb.close()
+
+    async def _run_global():
+        try:
+            await scheduler.enqueue_coordinator()
+        except Exception as e:
+            logger.warning(f"sync trigger (global) failed: {e}")
+
+    # 注意：不要把 asyncio.create_task 交给 BackgroundTasks（其在线程池里无事件循环）
+    if body and body.sid:
+        asyncio.create_task(_run_for_sid(body.sid))
+        return {"triggered": True, "scope": "subscription", "sid": body.sid}
+    else:
+        asyncio.create_task(_run_global())
+        return {"triggered": True, "scope": "global"}
+
+
+@app.get("/api/sync/status")
+async def api_sync_status(sid: Optional[int] = None, db: Session = Depends(get_db)):
+    """查询同步状态：返回 last_sync 状态、remote_total、pending_estimated、retry_backfill 队列长度等。
+    - 若提供 sid，则仅返回该订阅；否则返回所有启用订阅。
+    """
+    try:
+        subs = []
+        if sid is not None:
+            s = db.query(Subscription).filter(Subscription.id == sid).first()
+            if s:
+                subs = [s]
+        else:
+            subs = db.query(Subscription).filter(Subscription.is_active == True).all()
+        if not subs:
+            return {"items": []}
+
+        ids = [s.id for s in subs]
+        keys = []
+        for i in ids:
+            keys.append(f"sync:{i}:status")
+            keys.append(f"agg:{i}:pending_estimated")
+            keys.append(f"retry:{i}:failed_backfill")
+        rows = db.query(Settings).filter(Settings.key.in_(keys)).all()
+        smap = {r.key: r.value for r in rows if r and r.key}
+
+        items = []
+        for s in subs:
+            stat = {
+                "subscription_id": s.id,
+                "name": s.name,
+                "remote_total": None,
+                "pending_estimated": None,
+                "retry_queue_len": 0,
+                "status": None,
+                "updated_at": None,
+            }
+            # sync status
+            try:
+                sval = smap.get(f"sync:{s.id}:status")
+                if sval:
+                    data = json.loads(sval)
+                    stat["status"] = data.get("status")
+                    stat["remote_total"] = data.get("remote_total")
+                    stat["updated_at"] = data.get("updated_at") or data.get("ts")
+            except Exception:
+                pass
+            # pending cached
+            try:
+                pc = smap.get(f"agg:{s.id}:pending_estimated")
+                if pc is not None:
+                    stat["pending_estimated"] = int(str(pc).strip())
+            except Exception:
+                pass
+            # retry queue length
+            try:
+                rq = smap.get(f"retry:{s.id}:failed_backfill")
+                if rq:
+                    arr = json.loads(rq)
+                    if isinstance(arr, list):
+                        stat["retry_queue_len"] = len(arr)
+            except Exception:
+                pass
+            items.append(stat)
+
+        return {"items": items}
+    finally:
+        db.close()
 app.mount("/web", StaticFiles(directory="web/dist"), name="web")
 
 # 根路径返回前端页面（优先SPA，fallback到admin.html）
@@ -98,7 +217,7 @@ async def read_root():
                 <body>
                     <h1>🎬 bili_curator V6</h1>
                     <p>前端页面正在构建中...</p>
-                    <p>管理后台: <a href="/static/admin.html">/static/admin.html</a></p>
+                    <p>入口: <a href="/">/</a></p>
                     <p>API文档: <a href="/docs">/docs</a></p>
                 </body>
             </html>
@@ -143,6 +262,132 @@ async def queue_stats():
     """返回队列容量/运行/暂停与各通道排队数。"""
     try:
         return request_queue.stats()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# 聚合下载管理 API：按订阅返回本地已下载、估算待下载、队列排队/运行中计数
+@app.get("/api/download/aggregate")
+async def download_aggregate(db: Session = Depends(get_db)):
+    """返回每个启用订阅的聚合下载状态。
+    字段：
+    - subscription: { id, name, type }
+    - downloaded: 本地有文件数（以目录为准）
+    - pending_estimated: 估算待下载数（remote_total - 本地有文件数；remote_total 缺失时按0处理）
+    - queue: { queued, running }
+    - remote_total: 最近一次同步记录中的远端总数（如有）
+    """
+    try:
+        # 1) 取启用订阅
+        active_subs = db.query(Subscription).filter(Subscription.is_active == True).all()
+        if not active_subs:
+            return { 'items': [], 'totals': { 'downloaded': 0, 'pending_estimated': 0, 'queued': 0, 'running': 0 } }
+
+        sub_ids = [s.id for s in active_subs]
+
+        # 2) 队列快照 -> (sid -> queued/running)
+        q_items = request_queue.list()
+        q_index: Dict[int, Dict[str, int]] = {}
+        for j in q_items:
+            try:
+                if j.get('type') != 'download':
+                    continue
+                sid = j.get('subscription_id')
+                if sid is None:
+                    continue
+                status = j.get('status')
+                if status not in ('queued', 'running'):
+                    continue
+                bucket = q_index.setdefault(int(sid), {'queued': 0, 'running': 0})
+                bucket[status] += 1
+            except Exception:
+                continue
+
+        # 3) 已下载计数（本地有文件）分组统计
+        downloaded_rows = (
+            db.query(Video.subscription_id, func.count(Video.id))
+              .filter(Video.video_path.isnot(None), Video.subscription_id.in_(sub_ids))
+              .group_by(Video.subscription_id)
+              .all()
+        )
+        downloaded_map: Dict[int, int] = {sid: int(cnt) for sid, cnt in downloaded_rows}
+
+        # 4) 批量读取 Settings：
+        #    - sync:{id}:status -> remote_total
+        #    - agg:{id}:pending_estimated -> 缓存的待下载估算
+        keys = []
+        for sid in sub_ids:
+            keys.append(f"sync:{sid}:status")
+            keys.append(f"agg:{sid}:pending_estimated")
+        settings_rows = db.query(Settings).filter(Settings.key.in_(keys)).all()
+        settings_map = {s.key: s.value for s in settings_rows if s and s.key}
+
+        result = []
+        total_downloaded = 0
+        total_pending = 0
+        total_queued = 0
+        total_running = 0
+
+        for sub in active_subs:
+            downloaded = int(downloaded_map.get(sub.id, 0))
+            total_downloaded += downloaded
+
+            # 读取 remote_total
+            remote_total = None
+            try:
+                key = f"sync:{sub.id}:status"
+                sval = settings_map.get(key)
+                if sval:
+                    data = json.loads(sval)
+                    rt = data.get("remote_total")
+                    if isinstance(rt, int) and rt >= 0:
+                        remote_total = rt
+            except Exception:
+                remote_total = None
+
+            # 优先使用缓存的 pending 估算值
+            pending_cached = None
+            try:
+                pc_val = settings_map.get(f"agg:{sub.id}:pending_estimated")
+                if pc_val is not None:
+                    pending_cached = int(str(pc_val).strip())
+            except Exception:
+                pending_cached = None
+
+            pending_estimated = None
+            if isinstance(pending_cached, int):
+                pending_estimated = max(0, pending_cached)
+            else:
+                pending_estimated = max(0, int(remote_total) - downloaded) if remote_total is not None else 0
+
+            qbucket = q_index.get(sub.id, {'queued': 0, 'running': 0})
+            total_pending += pending_estimated
+            total_queued += qbucket['queued']
+            total_running += qbucket['running']
+
+            result.append({
+                'subscription': {
+                    'id': sub.id,
+                    'name': sub.name,
+                    'type': sub.type,
+                },
+                'downloaded': downloaded,
+                'pending_estimated': pending_estimated,
+                'queue': {
+                    'queued': qbucket['queued'],
+                    'running': qbucket['running'],
+                },
+                'remote_total': remote_total,
+            })
+
+        return {
+            'items': result,
+            'totals': {
+                'downloaded': total_downloaded,
+                'pending_estimated': total_pending,
+                'queued': total_queued,
+                'running': total_running,
+            }
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -214,10 +459,8 @@ async def get_subscriptions(db: Session = Depends(get_db)):
         except Exception:
             remote_total = None
 
-        # 回退：如未获取到远端总计，则使用本地有文件数作为保守值
-        effective_total = remote_total if remote_total is not None else on_disk_total
-        # 待下载按“远端总计-本地有文件数”口径统一
-        pending_videos = max(0, effective_total - on_disk_total)
+        # 待下载仅以远端为准：remote_total 缺失时按 0 处理（不再用本地回退）
+        pending_videos = max(0, (remote_total or 0) - on_disk_total)
 
         # 更新数据库中的统计信息（以本地有文件数为总数，保持与其他页面一致）
         sub.total_videos = on_disk_total
@@ -270,9 +513,11 @@ async def get_overview(db: Session = Depends(get_db)):
             except Exception:
                 remote = None
 
-            effective_total = remote if remote is not None else local
+            # 远端汇总严格以远端为准：仅累加已有远端数据
             remote_total_sum += (remote or 0)
-            pending_total_sum += max(0, effective_total - local)
+            # 待下载总数仅在远端存在时计算；缺失远端时不再用本地回退
+            if remote is not None:
+                pending_total_sum += max(0, remote - local)
 
         # 队列统计
         qstats = request_queue.stats()

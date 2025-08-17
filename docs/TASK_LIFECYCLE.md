@@ -1,8 +1,24 @@
 # 任务生命周期设计（Task Lifecycle）
 
-更新时间：2025-01-15 21:10 (Asia/Shanghai)
+更新时间：2025-08-17 11:29 (Asia/Shanghai)
 
-## 任务状态流转图
+## 双域模型说明
+
+本系统存在两套状态域（实现分别位于 `request_queue` 与 `task_manager/enhanced_task_manager`）：
+
+- 全局请求队列（Request Queue，下载主链路）
+  - 状态：`queued` → `running` → `done | failed`
+  - 支持操作：暂停/恢复整队列（`/api/queue/pause|resume`），容量设置（`/api/queue/capacity`），请求级取消/提权（`/api/requests/{id}/cancel|prioritize`）
+  - 通道隔离：`requires_cookie` 与 `no_cookie` 双通道，各自独立容量
+  - 订阅互斥：同一订阅任务串行
+
+- 手动任务管理器（Manual Tasks，后台维护/手动触发）
+  - 状态：`pending`/`queued`/`running`/`completed`/`failed`/`cancelled`/`paused`
+  - 对应 API：`/api/tasks/*` 与 `/api/subscriptions/{id}/download`、`/api/subscriptions/{id}/tasks`
+
+以下 Mermaid 流转图适用于“手动任务管理器”域。
+
+## 任务状态流转图（手动任务管理器）
 
 ```mermaid
 graph TD
@@ -69,7 +85,7 @@ graph TD
 - **触发条件**：用户暂停或系统暂停
 - **可转换状态**：`pending`, `cancelled`
 
-## 任务类型与超时配置
+## 任务类型与超时配置（手动任务管理器）
 
 ### 下载任务（download）
 - **默认超时**：1800秒（30分钟）
@@ -91,7 +107,7 @@ graph TD
 - **重试次数**：1次
 - **重试间隔**：固定5秒
 
-## 优先级调度策略
+## 优先级与调度
 
 ### 优先级范围
 - **1-3**：高优先级（用户手动触发）
@@ -101,8 +117,8 @@ graph TD
 ### 调度规则
 1. **优先级优先**：数字越小优先级越高
 2. **FIFO原则**：同优先级按创建时间排序
-3. **通道隔离**：Cookie和NoCookie通道独立调度
-4. **订阅互斥**：同一订阅的任务串行执行
+3. **通道隔离（全局请求队列）**：`requires_cookie`/`no_cookie` 通道独立容量与并发
+4. **订阅互斥（全局请求队列）**：同一订阅串行，避免竞争
 
 ## 错误处理与重试机制
 
@@ -143,12 +159,12 @@ def calculate_retry_delay(attempt: int, base_delay: int = 60) -> int:
 - **成功率统计**：按任务类型统计成功率
 - **资源使用监控**：CPU、内存、磁盘IO监控
 
-## 并发控制
+## 并发与容量控制（全局请求队列）
 
-### 全局并发限制
-- **默认容量**：2个并发任务
-- **动态调整**：支持运行时调整容量
-- **通道隔离**：Cookie/NoCookie通道独立计数
+### 队列容量
+- **通道容量**：通过 `POST /api/queue/capacity` 设置，参数：`requires_cookie`、`no_cookie`
+- **运行时调整**：支持在线调整容量并即时生效
+- **暂停/恢复**：`POST /api/queue/pause|resume`（支持 scope）
 
 ### 订阅级互斥
 - **互斥锁**：同一订阅任务串行执行
