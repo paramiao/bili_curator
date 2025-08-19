@@ -10,6 +10,7 @@
 - **🛠️ 数据维护工具**：一致性检查、容量回填、同步缓存管理，确保数据准确性
 - **🍪 Cookie 池管理**：Web 界面管理多账号，自动轮换，支持会员内容下载
 - **📦 Docker 一键部署**：单容器部署，零配置启动，内置健康检查
+- **🔧 数据一致性优化**：远端总数缓存自动刷新，失败视频可视化管理，数据准确性保障
 
 ## ✨ V6 核心特性
 
@@ -63,11 +64,12 @@ docker-compose logs -f
 
 ### 核心功能模块
 - **📈 总览仪表板**：系统状态、媒体统计、订阅概览、目录分析
-- **📺 订阅管理**：添加/编辑订阅、状态监控、手动触发同步
+- **📺 订阅管理**：添加/编辑订阅、状态监控、手动触发同步、失败视频清理
 - **⏳ 任务队列**：实时任务监控、进度追踪、错误处理
 - **🍪 Cookie 管理**：多账号管理、有效性验证、自动轮换
 - **⚙️ 系统设置**：下载配置、同步状态、数据维护工具
 - **📊 系统监控**：健康状态、任务执行、队列状态、资源使用
+- **🔧 数据维护**：一致性检查、缓存刷新、数据修复工具
 
 ### API 使用示例
 
@@ -92,6 +94,15 @@ curl -s http://localhost:8080/api/system/consistency-stats | jq .
 
 # 容量数据回填
 curl -s -X POST http://localhost:8080/api/media/refresh-sizes | jq .
+
+# 数据维护API端点
+curl -s -X POST http://localhost:8080/api/maintenance/check-consistency | jq .
+
+# 刷新远端总数缓存
+curl -s -X POST http://localhost:8080/api/maintenance/refresh-remote-totals | jq .
+
+# 清理失败视频记录
+curl -s -X POST http://localhost:8080/api/subscriptions/1/clear-failed | jq .
 ```
 
 

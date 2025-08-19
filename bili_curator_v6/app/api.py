@@ -34,6 +34,8 @@ from .queue_manager import yt_dlp_semaphore, get_subscription_lock, request_queu
 from .services.http_utils import get_user_agent
 from .consistency_checker import consistency_checker, periodic_consistency_check, startup_consistency_check
 from .services.remote_sync_service import remote_sync_service
+from .services.pending_list_service import pending_list_service
+from .services.data_consistency_service import data_consistency_service
 from .auto_import import auto_import_service
 
 # Logger
@@ -1862,7 +1864,7 @@ async def create_subscription(subscription: dict, db: Session = Depends(get_db))
 
 @app.get("/api/subscriptions/{subscription_id}/expected-total")
 async def get_subscription_expected_total(subscription_id: int, db: Session = Depends(get_db)):
-    """获取远端合集应有总计视频数（不依赖本地DB），用于校准显示。
+    """获取远端合集应有总计视频数（带1小时缓存），用于校准显示。
     仅对 type=collection 且存在 url 的订阅有效。
     """
     sub = db.query(Subscription).filter(Subscription.id == subscription_id).first()
@@ -1870,6 +1872,22 @@ async def get_subscription_expected_total(subscription_id: int, db: Session = De
         raise HTTPException(status_code=404, detail="订阅不存在")
     if sub.type != "collection" or not sub.url:
         raise HTTPException(status_code=400, detail="该订阅不是合集或缺少URL")
+
+    # 检查1小时内的缓存
+    cache_key = f"remote_total:{subscription_id}"
+    cached_setting = db.query(Settings).filter(Settings.key == cache_key).first()
+    if cached_setting:
+        try:
+            cache_data = json.loads(cached_setting.value)
+            cache_time = datetime.fromisoformat(cache_data.get('timestamp', ''))
+            if datetime.now() - cache_time < timedelta(hours=1):
+                return {
+                    "expected_total_videos": cache_data.get('total', 0),
+                    "cached": True,
+                    "cache_time": cache_data.get('timestamp')
+                }
+        except Exception:
+            pass
 
     try:
         import tempfile, os, json as json_lib
@@ -2051,13 +2069,25 @@ async def get_subscription_expected_total(subscription_id: int, db: Session = De
             if expected2 is None:
                 await request_queue.mark_failed(job_c, "cookie_fallback_failed")
                 raise HTTPException(status_code=502, detail="无法解析合集总数（Cookie 回退失败）")
-            # Cookie 使用统计
-            try:
-                cookie_manager.update_cookie_usage(db, cookie.id)
-            except Exception:
-                pass
+            # 缓存成功结果1小时
+            cache_data = {
+                "total": int(expected2),
+                "timestamp": datetime.now().isoformat(),
+                "url": sub.url
+            }
+            cache_setting = db.query(Settings).filter(Settings.key == cache_key).first()
+            if cache_setting:
+                cache_setting.value = json.dumps(cache_data)
+            else:
+                cache_setting = Settings(key=cache_key, value=json.dumps(cache_data))
+                db.add(cache_setting)
+            db.commit()
             await request_queue.mark_done(job_c)
-            return {"expected_total_videos": int(expected2), "job_id": job_c}
+            return {
+                "expected_total_videos": int(expected2), 
+                "job_id": job_c,
+                "cached": False
+            }
         finally:
             try:
                 if cookies_path and os.path.exists(cookies_path):
@@ -2065,12 +2095,9 @@ async def get_subscription_expected_total(subscription_id: int, db: Session = De
             except Exception:
                 pass
 
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.warning(f"获取合集总数失败: {e}")
-        # 外层兜底异常，此时内部已尽力标记 job_nc/job_c 的状态
-        raise HTTPException(status_code=500, detail="获取合集总数失败")
+        logger.warning(f"获取远端总数失败: {e}")
+        raise HTTPException(status_code=502, detail="获取合集总数失败")
 
 @app.get("/api/subscriptions/{subscription_id}")
 async def get_subscription(subscription_id: int, db: Session = Depends(get_db)):
@@ -2153,8 +2180,8 @@ async def delete_subscription(subscription_id: int, db: Session = Depends(get_db
     return {"message": "订阅删除成功"}
 
 @app.get("/api/subscriptions/{subscription_id}/pending")
-async def get_subscription_pending(subscription_id: int, db: Session = Depends(get_db)):
-    """获取指定订阅的待下载视频列表（远端-本地差集），不触发下载。
+async def get_subscription_pending(subscription_id: int, force_refresh: bool = False, db: Session = Depends(get_db)):
+    """获取指定订阅的待下载视频列表（智能缓存+本地维护）。
     仅对 type=collection 且存在 url 的订阅有效。
     """
     sub = db.query(Subscription).filter(Subscription.id == subscription_id).first()
@@ -2164,7 +2191,7 @@ async def get_subscription_pending(subscription_id: int, db: Session = Depends(g
         raise HTTPException(status_code=400, detail="该订阅不是合集或缺少URL")
 
     try:
-        data = await downloader.compute_pending_list(subscription_id, db)
+        data = await pending_list_service.get_pending_videos(subscription_id, db, force_refresh)
         return data
     except HTTPException:
         raise
@@ -2316,6 +2343,65 @@ async def parse_collection_info(request: dict, db: Session = Depends(get_db)):
     except Exception as e:
         # 内部已对 job_nc/job_c 做状态标记，这里仅返回错误
         return {"error": f"解析合集信息失败: {str(e)}"}
+
+@app.post("/api/subscriptions/{subscription_id}/sync")
+async def sync_subscription(subscription_id: int, db: Session = Depends(get_db)):
+    """手动触发指定订阅的同步任务"""
+    subscription = db.query(Subscription).filter(Subscription.id == subscription_id).first()
+    if not subscription:
+        raise HTTPException(status_code=404, detail="订阅不存在")
+    
+    try:
+        # 触发远端快照刷新
+        await remote_sync_service.refresh_subscription_snapshot(subscription_id, db)
+        
+        # 清理失败视频
+        cleaned_count = pending_list_service.check_and_clean_failed_videos(db, subscription_id)
+        
+        # 强制刷新待下载列表缓存
+        await pending_list_service.get_pending_videos(subscription_id, db, force_refresh=True)
+        
+        # 触发数据一致性修复
+        consistency_result = await data_consistency_service.check_and_fix_remote_totals(db)
+        
+        return {
+            "message": "订阅同步已触发",
+            "cleaned_failed_videos": cleaned_count,
+            "consistency_check": consistency_result
+        }
+    except Exception as e:
+        logger.error(f"手动同步订阅失败: {e}")
+        raise HTTPException(status_code=500, detail="同步失败")
+
+@app.post("/api/subscriptions/{subscription_id}/clear-failed")
+async def clear_failed_videos(subscription_id: int, db: Session = Depends(get_db)):
+    """清理订阅的失败视频记录"""
+    try:
+        # 获取失败视频数量
+        failed_count = db.query(Video).filter(
+            Video.subscription_id == subscription_id,
+            Video.download_failed == True
+        ).count()
+        
+        if failed_count == 0:
+            return {"cleared_count": 0, "message": "没有失败视频需要清理"}
+        
+        # 删除失败视频记录
+        db.query(Video).filter(
+            Video.subscription_id == subscription_id,
+            Video.download_failed == True
+        ).delete()
+        
+        db.commit()
+        
+        return {
+            "cleared_count": failed_count,
+            "message": f"成功清理了 {failed_count} 个失败视频记录"
+        }
+        
+    except Exception as e:
+        logger.error(f"清理失败视频记录失败: {e}")
+        raise HTTPException(status_code=500, detail="清理失败")
 
 @app.post("/api/subscriptions/{subscription_id}/download")
 async def start_download(subscription_id: int, db: Session = Depends(get_db)):
@@ -2562,13 +2648,14 @@ async def get_media_overview(scan: bool = False, db: Session = Depends(get_db)):
 
 @app.get("/api/media/subscription-stats")
 async def get_subscription_stats(db: Session = Depends(get_db)):
-    """按订阅聚合统计（数量、已下载、容量、最近上传）- 使用远端总数口径"""
-    # 本地统计：已下载数量、最近上传（容量需要单独计算）
+    """按订阅聚合统计（数量、已下载、容量、最近上传、失败数）- 使用远端总数口径"""
+    # 本地统计：已下载数量、最近上传、失败数量（容量需要单独计算）
     counts = (
         db.query(
             Video.subscription_id.label('sid'),
             func.count(Video.id).label('local_total'),
             func.sum(case((Video.video_path.isnot(None), 1), else_=0)).label('downloaded'),
+            func.sum(case((Video.download_failed == True, 1), else_=0)).label('failed'),
             func.max(Video.upload_date).label('latest_upload')
         )
         .group_by(Video.subscription_id)
@@ -2578,13 +2665,17 @@ async def get_subscription_stats(db: Session = Depends(get_db)):
     # 订阅信息
     subs = {s.id: s for s in db.query(Subscription).all()}
     
-    # 构建本地统计字典（不包含容量，需要单独计算）
-    local_stats = {}
-    for row in counts:
-        local_stats[row.sid] = {
-            'local_total': int(row.local_total or 0),
-            'downloaded': int(row.downloaded or 0),
-            'latest_upload': row.latest_upload.isoformat() if row.latest_upload else None,
+    # 构建本地统计字典（包含失败数量）
+    stats_dict = {}
+    for c in counts:
+        sid = c.sid
+        if sid is None:
+            continue
+        stats_dict[sid] = {
+            'local_total': int(c.local_total or 0),
+            'downloaded': int(c.downloaded or 0),
+            'failed': int(c.failed or 0),
+            'latest_upload': c.latest_upload.isoformat() if c.latest_upload else None,
         }
     
     # 单独计算每个订阅的容量（与目录统计逻辑一致）
@@ -2616,38 +2707,53 @@ async def get_subscription_stats(db: Session = Depends(get_db)):
                     size_sum = 0
             total_size += int(size_sum or 0)
         
-        if sid in local_stats:
-            local_stats[sid]['size'] = total_size
+        if sid in stats_dict:
+            stats_dict[sid]['size'] = total_size
         else:
-            local_stats[sid] = {
+            stats_dict[sid] = {
                 'local_total': 0,
                 'downloaded': 0,
+                'failed': 0,
                 'size': total_size,
                 'latest_upload': None,
             }
 
     from .models import Settings
     import json as json_lib
+    from datetime import datetime, timedelta
 
     result = []
     for sid, sub in subs.items():
-        local = local_stats.get(sid, {
+        local = stats_dict.get(sid, {
             'local_total': 0,
             'downloaded': 0,
+            'failed': 0,
             'size': 0,
             'latest_upload': None,
         })
         
-        # 读取远端总数
+        # 读取远端总数 - 优先使用实时查询结果
         remote_total = None
         try:
-            key = f"sync:{sid}:status"
-            s = db.query(Settings).filter(Settings.key == key).first()
-            if s and s.value:
-                data = json_lib.loads(s.value)
-                rt = data.get("remote_total")
-                if isinstance(rt, int) and rt >= 0:
-                    remote_total = rt
+            # 先尝试从expected-total缓存获取最新数据
+            cache_key = f"expected_total:{sid}"
+            cache_setting = db.query(Settings).filter(Settings.key == cache_key).first()
+            if cache_setting:
+                cache_data = json_lib.loads(cache_setting.value)
+                cache_time = datetime.fromisoformat(cache_data.get('timestamp', ''))
+                # 如果缓存在1小时内，使用缓存数据
+                if datetime.now() - cache_time < timedelta(hours=1):
+                    remote_total = cache_data.get('total', 0)
+            
+            # 如果没有有效缓存，尝试从sync状态获取
+            if remote_total is None:
+                key = f"sync:{sid}:status"
+                s = db.query(Settings).filter(Settings.key == key).first()
+                if s and s.value:
+                    data = json_lib.loads(s.value)
+                    rt = data.get("remote_total")
+                    if isinstance(rt, int) and rt >= 0:
+                        remote_total = rt
         except Exception:
             remote_total = None
         
@@ -2658,13 +2764,15 @@ async def get_subscription_stats(db: Session = Depends(get_db)):
             "subscription_id": sid,
             "subscription_name": sub.name,
             "type": sub.type,
-            "total_videos": on_disk_total,  # 与目录统计一致：仅统计有文件的数量
+            "total_videos": on_disk_total,  # 本地有文件的数量
+            "local_total": local['local_total'],  # 数据库记录总数
             "remote_total": remote_total,
             "downloaded_videos": local['downloaded'],
             # 待下载口径：远端期望 - 本地有文件数
             "pending_videos": max(0, (remote_total or on_disk_total) - on_disk_total),
             "total_size": local['size'],
             "latest_upload": local['latest_upload'],
+            "failed": local.get('failed', 0),
         })
 
     # 排序：按总大小/有文件数量倒序

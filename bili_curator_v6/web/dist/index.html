@@ -296,6 +296,48 @@
             border-radius: 4px;
             font-weight: 600;
         }
+        
+        /* 流程可视化样式 */
+        .flow-step {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+            min-width: 100px;
+        }
+        
+        .flow-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 18px;
+            font-weight: bold;
+        }
+        
+        .flow-text {
+            text-align: center;
+        }
+        
+        .flow-title {
+            font-weight: 600;
+            font-size: 14px;
+            margin-bottom: 2px;
+        }
+        
+        .flow-desc {
+            font-size: 12px;
+            color: #6b7280;
+        }
+        
+        .flow-arrow {
+            font-size: 20px;
+            color: #9ca3af;
+            font-weight: bold;
+        }
 
         .stat-total {
             background-color: #e3f2fd;
@@ -482,13 +524,61 @@
             <!-- 下载任务 -->
             <div id="tasks" class="tab-content">
                 <div class="section-header">
-                    <h2>下载任务</h2>
+                    <h2>下载任务流程监控</h2>
                     <button onclick="refreshTasks()" class="btn btn-secondary">刷新</button>
                     <button onclick="clearCompletedTasks()" class="btn btn-outline">清理完成任务</button>
                 </div>
+
+                <!-- 业务流程可视化 -->
+                <div class="card" style="margin-bottom:16px;">
+                    <h3>订阅→下载业务流程</h3>
+                    <div style="display:flex; align-items:center; gap:12px; margin:12px 0; padding:12px; background:#f8f9fa; border-radius:8px; overflow-x:auto;">
+                        <div class="flow-step">
+                            <div class="flow-icon" style="background:#3b82f6;">📋</div>
+                            <div class="flow-text">
+                                <div class="flow-title">订阅检查</div>
+                                <div class="flow-desc">定时检查远端更新</div>
+                            </div>
+                        </div>
+                        <div class="flow-arrow">→</div>
+                        <div class="flow-step">
+                            <div class="flow-icon" style="background:#10b981;">🔍</div>
+                            <div class="flow-text">
+                                <div class="flow-title">远端查询</div>
+                                <div class="flow-desc">获取视频列表</div>
+                            </div>
+                        </div>
+                        <div class="flow-arrow">→</div>
+                        <div class="flow-step">
+                            <div class="flow-icon" style="background:#f59e0b;">⚖️</div>
+                            <div class="flow-text">
+                                <div class="flow-title">本地比对</div>
+                                <div class="flow-desc">筛选待下载</div>
+                            </div>
+                        </div>
+                        <div class="flow-arrow">→</div>
+                        <div class="flow-step">
+                            <div class="flow-icon" style="background:#8b5cf6;">📝</div>
+                            <div class="flow-text">
+                                <div class="flow-title">订阅队列</div>
+                                <div class="flow-desc">按订阅组织任务</div>
+                            </div>
+                        </div>
+                        <div class="flow-arrow">→</div>
+                        <div class="flow-step">
+                            <div class="flow-icon" style="background:#ef4444;">⬇️</div>
+                            <div class="flow-text">
+                                <div class="flow-title">全局下载</div>
+                                <div class="flow-desc">并发执行下载</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 订阅级任务汇总 -->
                 <div class="card" id="download-aggregate" style="margin-bottom:12px;">
                     <div style="display:flex; justify-content:space-between; align-items:center;">
-                        <h3>下载汇总（按订阅）</h3>
+                        <h3>订阅任务汇总</h3>
                         <div style="display:flex; gap:8px; align-items:center;">
                             <button id="agg-collapse-btn" class="btn btn-outline" onclick="DownloadAggregateManager.toggleCollapse()" title="折叠/展开">折叠</button>
                             <button class="btn btn-outline" onclick="DownloadAggregateManager.load()">刷新</button>
@@ -504,20 +594,32 @@
                                 <thead>
                                     <tr>
                                         <th>订阅名</th>
-                                        <th class="num">Downloaded</th>
-                                        <th class="num">Pending</th>
-                                        <th class="num">Queued</th>
-                                        <th class="num">Running</th>
-                                        <th class="num">RemoteTotal</th>
+                                        <th class="num">已下载</th>
+                                        <th class="num">待下载</th>
+                                        <th class="num">队列中</th>
+                                        <th class="num">下载中</th>
+                                        <th class="num">远端总数</th>
+                                        <th class="num">无法下载</th>
+                                        <th>最后同步</th>
+                                        <th>操作</th>
                                     </tr>
                                 </thead>
                                 <tbody id="agg-tbody"></tbody>
                             </table>
                         </div>
-                        <div style="margin-top:6px; color:#6b7280; font-size:12px;">注：Pending 为估算值；无远端总数(remote_total)时按 0 处理，口径“以本地为主”。</div>
+                        <div style="margin-top:6px; color:#6b7280; font-size:12px;">
+                            <div>• 远端总数缓存1小时，避免频繁请求</div>
+                            <div>• 待下载数基于本地文件系统实时计算</div>
+                            <div>• 无法下载指永久失败的视频（已删除/私有等）</div>
+                        </div>
                     </div>
                 </div>
-                <div id="task-list">加载中...</div>
+
+                <!-- 全局任务列表 -->
+                <div class="card">
+                    <h3>全局任务执行</h3>
+                    <div id="task-list">加载中...</div>
+                </div>
             </div>
 
             <!-- 队列管理 -->
@@ -591,12 +693,14 @@
                                     <th>job_id</th>
                                     <th>类型</th>
                                     <th>订阅ID</th>
-                                    <th>需Cookie</th>
-                                    <th>状态</th>
-                                    <th>创建</th>
-                                    <th>开始</th>
-                                    <th>结束</th>
-                                    <th>错误</th>
+                                    <th>已下载</th>
+                                    <th>待下载</th>
+                                    <th>排队中</th>
+                                    <th>下载中</th>
+                                    <th>远端总数</th>
+                                    <th>无法下载</th>
+                                    <th>最后同步</th>
+                                    <th>操作</th>
                                 </tr>
                             </thead>
                             <tbody id="queue-tbody"></tbody>
@@ -1928,17 +2032,24 @@
                     const sid = (x.subscription && x.subscription.id) || x.subscription_id;
                     const remote = (typeof x.remote_total === 'number') ? x.remote_total : '-';
                     const onClick = sid ? `onclick=\"DownloadAggregateManager.gotoSubscription(${sid})\"` : '';
+                    const failed = x.failed ?? 0;
+                    const lastSync = x.last_sync_time ? new Date(x.last_sync_time).toLocaleString('zh-CN', {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'}) : '-';
                     return `
                         <tr>
-                            <td ${onClick} style=\"cursor:${sid?'pointer':'default'};\">${name}</td>
-                            <td class=\"num\">${x.downloaded ?? 0}</td>
-                            <td class=\"num\">${x.pending_estimated ?? 0}</td>
-                            <td class=\"num\">${(x.queue && x.queue.queued) ?? 0}</td>
-                            <td class=\"num\">${(x.queue && x.queue.running) ?? 0}</td>
-                            <td class=\"num\">${remote}</td>
+                            <td ${onClick} style="cursor:${sid?'pointer':'default'};">${name}</td>
+                            <td class="num">${x.downloaded ?? 0}</td>
+                            <td class="num">${x.pending_estimated ?? 0}</td>
+                            <td class="num">${(x.queue && x.queue.queued) ?? 0}</td>
+                            <td class="num">${(x.queue && x.queue.running) ?? 0}</td>
+                            <td class="num">${remote}</td>
+                            <td class="num" style="color:${failed > 0 ? '#ef4444' : '#6b7280'}">${failed}</td>
+                            <td style="font-size:12px;">${lastSync}</td>
+                            <td>
+                                <button class="btn btn-outline" style="font-size:12px; padding:2px 6px;" onclick="triggerSubscriptionSync(${sid})">同步</button>
+                            </td>
                         </tr>`;
                 }).join('');
-                document.getElementById('agg-tbody').innerHTML = rows || '<tr><td colspan="6" style="text-align:center; color:#666;">暂无数据</td></tr>';
+                document.getElementById('agg-tbody').innerHTML = rows || '<tr><td colspan="9" style="text-align:center; color:#666;">暂无数据</td></tr>';
             },
             gotoSubscription(sid) {
                 if (!sid) return;
@@ -1964,6 +2075,32 @@
                 }, 4000);
             }
         };
+
+        // 订阅同步触发函数
+        async function triggerSubscriptionSync(subscriptionId) {
+            if (!subscriptionId) return;
+            
+            try {
+                const response = await fetch(`/api/subscriptions/${subscriptionId}/sync`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                
+                if (response.ok) {
+                    showToast('订阅同步已触发', 'success');
+                    // 刷新汇总表格
+                    if (window.DownloadAggregateManager) {
+                        setTimeout(() => DownloadAggregateManager.load(), 1000);
+                    }
+                } else {
+                    const error = await response.text();
+                    showToast(`同步失败: ${error}`, 'error');
+                }
+            } catch (error) {
+                console.error('触发订阅同步失败:', error);
+                showToast('同步请求失败', 'error');
+            }
+        }
 
         // 任务轮询与渲染
         let tasksPollTimer = null;
@@ -2537,17 +2674,29 @@
             const content = document.getElementById('media-sub-stats-content');
             const kw = (document.getElementById('sub-filter').value || '').toLowerCase();
             const list = __subStatsCache.filter(x => !kw || (x.subscription_name || '').toLowerCase().includes(kw));
-            const rows = list.map(x => `
+            const rows = list.map(x => {
+                const failedDisplay = x.failed > 0 ? 
+                    `<span style="color: #dc3545; font-weight: bold;">${x.failed}</span>` : 
+                    `<span style="color: #6c757d;">${x.failed || 0}</span>`;
+                
+                return `
                 <tr>
                     <td>${x.subscription_name || '-'}</td>
                     <td>${x.type || '-'}</td>
                     <td class="num">${x.total_videos}</td>
+                    <td class="num">${x.local_total || x.total_videos}</td>
                     <td class="num">${x.downloaded_videos}</td>
+                    <td class="num">${x.pending_videos || 0}</td>
+                    <td class="num">${failedDisplay}</td>
                     <td class="num">${formatBytes(x.total_size || 0)}</td>
                     <td>${x.latest_upload ? new Date(x.latest_upload).toLocaleString() : '-'}</td>
-                    <td><button class="btn btn-small" onclick="showSubscriptionDetail(${x.subscription_id})">查看视频</button></td>
-                </tr>
-            `).join('');
+                    <td>
+                        <button class="btn btn-small" onclick="showSubscriptionDetail(${x.subscription_id})">查看视频</button>
+                        <button class="btn btn-small" onclick="syncSubscription(${x.subscription_id})" style="margin-left: 4px;">同步</button>
+                        ${x.failed > 0 ? `<button class="btn btn-small" onclick="clearFailedVideos(${x.subscription_id})" style="margin-left: 4px; background: #dc3545; color: white;">清理失败</button>` : ''}
+                    </td>
+                </tr>`;
+            }).join('');
             content.innerHTML = `
                 <div class="table-wrap">
                   <table class="data">
@@ -2555,8 +2704,11 @@
                       <tr>
                         <th>订阅名称</th>
                         <th>类型</th>
-                        <th>总数</th>
+                        <th>本地文件</th>
+                        <th>数据库记录</th>
                         <th>已下载</th>
+                        <th>待下载</th>
+                        <th>无法下载</th>
                         <th>容量</th>
                         <th>最近上传</th>
                         <th>操作</th>
@@ -2566,6 +2718,56 @@
                   </table>
                 </div>
             `;
+        }
+
+        async function syncSubscription(subscriptionId) {
+            try {
+                const response = await fetch(`/api/subscriptions/${subscriptionId}/sync`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                if (response.ok) {
+                    const result = await response.json();
+                    alert(`订阅同步成功！清理了 ${result.cleaned_failed_videos} 个失败视频`);
+                    // 刷新订阅统计数据
+                    await loadSubscriptionStats();
+                } else {
+                    const error = await response.json();
+                    alert(`同步失败: ${error.detail || '未知错误'}`);
+                }
+            } catch (error) {
+                alert(`同步失败: ${error.message}`);
+            }
+        }
+
+        async function clearFailedVideos(subscriptionId) {
+            if (!confirm('确定要清理该订阅的所有失败视频记录吗？')) {
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/api/subscriptions/${subscriptionId}/clear-failed`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                if (response.ok) {
+                    const result = await response.json();
+                    alert(`成功清理了 ${result.cleared_count} 个失败视频记录`);
+                    // 刷新订阅统计数据
+                    await loadSubscriptionStats();
+                } else {
+                    const error = await response.json();
+                    alert(`清理失败: ${error.detail || '未知错误'}`);
+                }
+            } catch (error) {
+                alert(`清理失败: ${error.message}`);
+            }
         }
 
         async function showSubscriptionDetail(sid, name) {

@@ -75,6 +75,12 @@ class Video(Base):
     downloaded = Column(Boolean, default=False)
     downloaded_at = Column(DateTime)  # 下载完成时间
     
+    # 下载失败跟踪
+    download_failed = Column(Boolean, default=False)  # 是否永久下载失败
+    failure_reason = Column(String(255))  # 失败原因（已删除/私有/地区限制等）
+    failure_count = Column(Integer, default=0)  # 失败次数
+    last_failure_at = Column(DateTime)  # 最后失败时间
+    
     # 关联信息
     subscription_id = Column(Integer, ForeignKey('subscriptions.id'))  # 关联的订阅ID
     created_at = Column(DateTime, default=datetime.now)

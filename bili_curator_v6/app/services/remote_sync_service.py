@@ -209,4 +209,9 @@ class RemoteSyncService:
             raise
 
 
+    async def refresh_subscription_snapshot(self, subscription_id: int, db: Session, cap: int = 200, reset_cursor: bool = True):
+        """刷新订阅快照的别名方法，保持向后兼容"""
+        return await self.refresh_head_snapshot(subscription_id, db, cap, reset_cursor)
+
+
 remote_sync_service = RemoteSyncService()
