@@ -104,6 +104,70 @@ class AutoImportService:
         finally:
             session.close()
 
+    def scan_and_import_for_subscription(self, subscription_id: int) -> dict:
+        """仅扫描指定订阅对应目录并导入新视频，最后只重算该订阅统计。
+        注意：为避免与全局增量状态耦合，此处不使用 last_scan_ts，固定按订阅目录全量扫描。
+        """
+        logger.info(f"🔄 [sub={subscription_id}] 开始按订阅目录扫描并导入新视频...")
+
+        session = self.db.get_session()
+        try:
+            # 定位订阅与其目录
+            sub: Optional[Subscription] = session.query(Subscription).filter(Subscription.id == subscription_id).first()
+            if not sub:
+                logger.warning(f"订阅不存在: {subscription_id}")
+                return {"imported": 0, "skipped": 0, "errors": 0}
+
+            sub_dir = self._compute_subscription_dir(sub)
+            if not sub_dir.exists():
+                logger.info(f"订阅目录不存在或无内容: {sub_dir}")
+                return {"imported": 0, "skipped": 0, "errors": 0}
+
+            json_files = list(sub_dir.rglob("*.json"))
+            logger.info(f"📄 [sub={subscription_id}] 订阅目录扫描：找到 {len(json_files)} 个JSON文件")
+
+            imported_count = 0
+            skipped_count = 0
+            error_count = 0
+
+            for json_file in json_files:
+                try:
+                    result = self._import_video_from_json(json_file, session)
+                    if result == "imported":
+                        imported_count += 1
+                    elif result == "skipped":
+                        skipped_count += 1
+                    if (imported_count + skipped_count) % 100 == 0:
+                        session.commit()
+                except Exception as e:
+                    logger.error(f"[sub={subscription_id}] 处理文件 {json_file} 失败: {e}")
+                    error_count += 1
+
+            # 提交导入
+            session.commit()
+
+            # 仅重算该订阅统计
+            try:
+                recompute_subscription_stats(session, subscription_id, touch_last_check=False)
+                session.commit()
+            except Exception as e:
+                session.rollback()
+                logger.warning(f"[sub={subscription_id}] 刷新订阅统计失败(自动导入后)：{e}")
+
+            result = {
+                "imported": imported_count,
+                "skipped": skipped_count,
+                "errors": error_count,
+            }
+            logger.info(f"🎉 [sub={subscription_id}] 自动导入完成: 成功 {imported_count}, 跳过 {skipped_count}, 错误 {error_count}")
+            return result
+        except Exception as e:
+            session.rollback()
+            logger.error(f"[sub={subscription_id}] 自动导入过程出错: {e}")
+            raise
+        finally:
+            session.close()
+
     def _load_last_scan_ts(self) -> float:
         """读取上次扫描的时间戳（秒）。不存在或解析失败时返回 0。"""
         try:

@@ -35,7 +35,6 @@
             font-size: 14px;
         }
 
-        
 
         /* 任务管理样式 */
         .task-item {
@@ -394,6 +393,7 @@
         <div class="card">
             <div class="tabs">
                 <div class="tab" onclick="showTab(this,'dashboard')">总览</div>
+                <div class="tab" onclick="showTab(this,'monitor')">系统监控</div>
                 <div class="tab" onclick="showTab(this,'subscriptions')">订阅管理</div>
                 <div class="tab" onclick="showTab(this,'tasks')">下载任务</div>
                 <div class="tab" onclick="showTab(this,'queue')">队列管理</div>
@@ -401,23 +401,8 @@
                 <div class="tab" onclick="showTab(this,'settings')">系统设置</div>
             </div>
 
-            <!-- 总览（合并仪表盘 + 视频管理） -->
+            <!-- 总览（媒体数据概览） -->
             <div id="dashboard" class="tab-content active">
-                <div class="card">
-                    <h2>系统状态</h2>
-                    <div id="system-status">加载中...</div>
-                </div>
-
-                <div id="global-overview" class="card" style="margin-top:8px;">
-                    <div style="display:flex; justify-content:space-between; align-items:center;">
-                        <h3>全局总览</h3>
-                        <div style="display:flex; gap:8px; align-items:center;">
-                            <button class="btn btn-outline" onclick="loadOverview()">刷新</button>
-                            <button id="btn-sync-global" class="btn" onclick="triggerLiteSyncGlobal()">轻量同步</button>
-                        </div>
-                    </div>
-                    <div id="global-overview-content" style="margin-top:8px;">加载中...</div>
-                </div>
 
                 <div id="media-overview" class="card" style="margin-top:8px;">
                     <div style="display:flex; justify-content:space-between; align-items:center;">
@@ -486,11 +471,9 @@
                     <h2>订阅管理</h2>
                     <div style="display:flex; gap:8px; flex-wrap: wrap; align-items:center;">
                         <button onclick="showAddSubscription()" class="btn btn-primary">添加订阅</button>
-                        <button onclick="scanAll()" class="btn btn-secondary">全量扫描导入</button>
-                        <button onclick="associateAll()" class="btn btn-outline">全量自动关联</button>
+                        <button onclick="localSync()" class="btn btn-secondary">本地同步</button>
                         <button onclick="triggerCheckSubscriptions()" class="btn">检查订阅</button>
-                        <button onclick="triggerLiteSyncGlobal()" class="btn">轻量同步(全局)</button>
-                        <button onclick="loadSubscriptions()" class="btn btn-info">刷新列表</button>
+                        <button onclick="triggerLiteSyncGlobal()" class="btn">远端同步(全局)</button>
                     </div>
                 </div>
                 <div id="subscription-list"></div>
@@ -699,6 +682,81 @@
                 </div>
             </div>
 
+            <!-- 系统监控（整合任务情况和系统设置） -->
+            <div id="monitor" class="tab-content">
+                <!-- 系统健康状态 -->
+                <div class="card">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <h3>🔍 系统健康监控</h3>
+                        <div style="display:flex; gap:8px; align-items:center;">
+                            <span id="health-indicator" class="badge">检查中...</span>
+                            <button class="btn btn-outline" onclick="loadSystemHealth()">刷新状态</button>
+                        </div>
+                    </div>
+                    <div id="system-health-content" style="margin-top:8px;">加载中...</div>
+                </div>
+
+                <!-- 任务执行概览 -->
+                <div class="card">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <h3>⚡ 任务执行概览</h3>
+                        <div style="display:flex; gap:8px; align-items:center;">
+                            <button class="btn btn-outline" onclick="loadTaskOverview()">刷新</button>
+                            <button id="btn-sync-global" class="btn" onclick="triggerLiteSyncGlobal()">远端同步</button>
+                        </div>
+                    </div>
+                    <div id="task-overview-content" style="margin-top:8px;">加载中...</div>
+                </div>
+
+                <!-- 队列状态监控 -->
+                <div class="card">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <h3>🚀 队列状态监控</h3>
+                        <div style="display:flex; gap:8px; align-items:center;">
+                            <span id="queue-status-indicator" class="badge">监控中...</span>
+                            <button class="btn btn-outline" onclick="loadQueueStatus()">刷新</button>
+                            <button class="btn" onclick="showTab(this,'queue')">详细管理</button>
+                        </div>
+                    </div>
+                    <div id="queue-status-content" style="margin-top:8px;">加载中...</div>
+                </div>
+
+                <!-- 系统配置状态 -->
+                <div class="card">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <h3>⚙️ 系统配置状态</h3>
+                        <div style="display:flex; gap:8px; align-items:center;">
+                            <button class="btn btn-outline" onclick="loadConfigStatus()">检查配置</button>
+                            <button class="btn" onclick="showTab(this,'settings')">配置管理</button>
+                        </div>
+                    </div>
+                    <div id="config-status-content" style="margin-top:8px;">加载中...</div>
+                </div>
+
+                <!-- 数据一致性监控 -->
+                <div class="card">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <h3>📊 数据一致性监控</h3>
+                        <div style="display:flex; gap:8px; align-items:center;">
+                            <button class="btn btn-outline" onclick="loadConsistencyStatus()">检查状态</button>
+                            <button id="btn-consistency-check" class="btn" onclick="triggerConsistencyCheck()">执行检查</button>
+                        </div>
+                    </div>
+                    <div id="consistency-status-content" style="margin-top:8px;">加载中...</div>
+                </div>
+
+                <!-- 资源使用监控 -->
+                <div class="card">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <h3>💾 资源使用监控</h3>
+                        <div style="display:flex; gap:8px; align-items:center;">
+                            <button class="btn btn-outline" onclick="loadResourceStatus()">刷新</button>
+                            <button class="btn" onclick="loadMediaOverview(true)">扫描磁盘</button>
+                        </div>
+                    </div>
+                    <div id="resource-status-content" style="margin-top:8px;">加载中...</div>
+                </div>
+            </div>
 
             <!-- Cookie管理 -->
             <div id="cookies" class="tab-content">
@@ -732,21 +790,91 @@
 
             <!-- 系统设置 -->
             <div id="settings" class="tab-content">
+                <!-- 基础配置 -->
                 <div class="card">
-                    <h2>系统设置</h2>
-                    <div id="settings-list">加载中...</div>
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <h3>📁 基础配置</h3>
+                        <button class="btn btn-outline" onclick="loadBasicSettings()">刷新</button>
+                    </div>
+                    <p style="color:#666; margin-bottom:1rem;">系统运行的基本配置参数</p>
+                    <div id="basic-settings-content">加载中...</div>
                 </div>
-                
+
+                <!-- 下载配置 -->
                 <div class="card">
-                    <h2>数据一致性检查</h2>
-                    <p>检查本地目录与数据库记录的一致性，确保数据准确性。</p>
-                    <div style="margin: 1rem 0;">
-                        <button id="btn-consistency-check" class="btn" onclick="triggerConsistencyCheck()">执行一致性检查</button>
-                        <button class="btn btn-outline" onclick="loadConsistencyStats()">刷新统计</button>
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <h3>⬇️ 下载配置</h3>
+                        <button class="btn btn-outline" onclick="loadDownloadSettings()">刷新</button>
                     </div>
-                    <div id="consistency-stats" style="margin-top: 1rem;">
-                        <div class="status">点击"刷新统计"查看当前状态</div>
+                    <p style="color:#666; margin-bottom:1rem;">视频下载相关的配置选项</p>
+                    <div id="download-settings-content">加载中...</div>
+                </div>
+
+                <!-- 同步状态 -->
+                <div class="card">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <h3>🔄 同步状态</h3>
+                        <div>
+                            <button class="btn btn-outline" onclick="loadSyncStatus()">刷新状态</button>
+                            <button class="btn" onclick="clearSyncCache()">清理缓存</button>
+                        </div>
                     </div>
+                    <p style="color:#666; margin-bottom:1rem;">各订阅的远端同步状态和缓存信息</p>
+                    <div id="sync-status-content">加载中...</div>
+                </div>
+
+                <!-- 数据维护 -->
+                <div class="card">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <h3>🛠️ 数据维护</h3>
+                        <button class="btn btn-outline" onclick="loadMaintenanceStatus()">刷新状态</button>
+                    </div>
+                    <p style="color:#666; margin-bottom:1rem;">数据库维护和一致性检查工具</p>
+                    
+                    <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap:16px; margin-top:16px;">
+                        <!-- 一致性检查 -->
+                        <div style="border:1px solid #e5e7eb; border-radius:8px; padding:16px;">
+                            <h4 style="margin:0 0 8px 0; color:#374151;">数据一致性检查</h4>
+                            <p style="color:#6b7280; font-size:14px; margin-bottom:12px;">检查本地目录与数据库记录的一致性</p>
+                            <div style="display:flex; gap:8px; margin-bottom:12px;">
+                                <button class="btn" onclick="triggerConsistencyCheck()">执行检查</button>
+                                <button class="btn btn-outline" onclick="loadConsistencyStats()">查看状态</button>
+                            </div>
+                            <div id="consistency-stats">
+                                <div class="status">点击"查看状态"获取最新信息</div>
+                            </div>
+                        </div>
+
+                        <!-- 容量回填 -->
+                        <div style="border:1px solid #e5e7eb; border-radius:8px; padding:16px;">
+                            <h4 style="margin:0 0 8px 0; color:#374151;">容量数据回填</h4>
+                            <p style="color:#6b7280; font-size:14px; margin-bottom:12px;">回填缺失的视频文件大小信息</p>
+                            <div style="display:flex; gap:8px; margin-bottom:12px;">
+                                <button class="btn" onclick="triggerRefreshSizes()">执行回填</button>
+                                <button class="btn btn-outline" onclick="checkRefreshSizesStatus()">查看进度</button>
+                            </div>
+                            <div id="refresh-sizes-status">
+                                <div class="status">点击"查看进度"获取状态信息</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 高级设置 -->
+                <div class="card">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <h3>⚙️ 高级设置</h3>
+                        <button class="btn btn-outline" onclick="loadAdvancedSettings()">刷新</button>
+                    </div>
+                    <p style="color:#666; margin-bottom:1rem;">系统内部配置和调试选项</p>
+                    <div style="background:#fff7e6; border:1px solid #ffe7ba; border-radius:6px; padding:12px; margin-bottom:16px;">
+                        <div style="color:#b26a00; font-weight:600; margin-bottom:4px;">⚠️ 注意</div>
+                        <div style="color:#b26a00; font-size:14px;">高级设置项主要用于系统调试，一般用户无需修改</div>
+                    </div>
+                    <details>
+                        <summary style="cursor:pointer; color:#0066cc; font-weight:600;">展开查看所有设置项</summary>
+                        <div id="advanced-settings-content" style="margin-top:12px;">加载中...</div>
+                    </details>
                 </div>
             </div>
         </div>
@@ -790,16 +918,30 @@
             if (tabName !== 'subscriptions') {
                 stopSubscriptionsSyncPolling();
             }
+            // 切换到非总览标签时停止Dashboard轮询
+            if (tabName !== 'dashboard') {
+                if (typeof stopDashboardPolling === 'function') stopDashboardPolling();
+            }
             // 切换到非设置标签时停止一致性轮询
             if (tabName !== 'settings') {
                 stopConsistencyPolling();
             }
             switch(tabName) {
                 case 'dashboard':
-                    // 合并后的总览：系统状态 + 媒体概览
-                    loadDashboard();
-                    loadOverview();
+                    // 媒体数据总览
+                    loadMediaOverview();
+                    loadSubscriptionStats();
+                    loadDirectoryStats();
                     loadVideos();
+                    break;
+                case 'monitor':
+                    // 系统监控模块
+                    loadSystemHealth();
+                    loadTaskOverview();
+                    loadQueueStatus();
+                    loadConfigStatus();
+                    loadConsistencyStatus();
+                    loadResourceStatus();
                     break;
                 case 'subscriptions':
                     loadSubscriptions();
@@ -816,10 +958,146 @@
                     loadQueueData();
                     break;
                 case 'settings':
-                    loadSettings();
-                    window.loadConsistencyStats();
-                    startConsistencyPolling();
+                    loadBasicSettings();
+                    loadDownloadSettings();
+                    loadSyncStatus();
+                    loadAdvancedSettings();
+                    loadMaintenanceStatus();
                     break;
+            }
+        }
+
+        // —— 浮动 Cookie 管理面板（对接新接口 /api/cookie/*） ——
+        function showCookiePanel() {
+            let overlay = document.getElementById('cookie-panel-overlay');
+            if (overlay) { overlay.style.display = 'block'; loadCookiePanelData(); return; }
+            overlay = document.createElement('div');
+            overlay.id = 'cookie-panel-overlay';
+            overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.35); z-index:9999; display:flex; align-items:center; justify-content:center;';
+            overlay.addEventListener('click', (e) => { if (e.target === overlay) hideCookiePanel(); });
+            const panel = document.createElement('div');
+            panel.style.cssText = 'background:#fff; width:min(920px, 92vw); max-height:86vh; overflow:auto; border-radius:10px; box-shadow:0 10px 30px rgba(0,0,0,0.2); padding:16px;';
+            panel.innerHTML = `
+              <div style="display:flex; justify-content:space-between; align-items:center;">
+                <h3 style="margin:0;">Cookie 管理</h3>
+                <div>
+                  <button class="btn btn-outline" onclick="triggerCookieValidateAllNew()">批量验证</button>
+                  <button class="btn" style="margin-left:8px;" onclick="hideCookiePanel()">关闭</button>
+                </div>
+              </div>
+              <div id="cookie-panel-summary" style="margin-top:8px; color:#444; font-size:14px;">加载中...</div>
+              <div class="card" style="margin-top:12px;">
+                <h4 style="margin-top:0;">Cookie 列表</h4>
+                <div id="cookie-panel-list">加载中...</div>
+              </div>
+              <div class="card" style="margin-top:12px;">
+                <h4 style="margin-top:0;">上传/新增 Cookie</h4>
+                <div class="form-group"><label>名称</label><input id="cp-name" type="text" placeholder="名称"></div>
+                <div class="form-group"><label>SESSDATA</label><input id="cp-sessdata" type="text" placeholder="SESSDATA"></div>
+                <div class="form-group"><label>bili_jct</label><input id="cp-jct" type="text" placeholder="bili_jct"></div>
+                <div class="form-group"><label>DedeUserID</label><input id="cp-uid" type="text" placeholder="DedeUserID"></div>
+                <div><button class="btn" onclick="cookieUploadNew()">上传</button></div>
+              </div>
+            `;
+            overlay.appendChild(panel);
+            document.body.appendChild(overlay);
+            loadCookiePanelData();
+        }
+
+        function hideCookiePanel() {
+            const overlay = document.getElementById('cookie-panel-overlay');
+            if (overlay) overlay.style.display = 'none';
+        }
+
+        async function loadCookiePanelData() {
+            try {
+                const s = await apiRequest('/api/cookie/status');
+                const sum = s && s.summary || s && s.cookie_summary || {};
+                const items = Array.isArray(s && s.items) ? s.items : [];
+                const summaryEl = document.getElementById('cookie-panel-summary');
+                if (summaryEl) summaryEl.innerHTML = `活跃 ${sum.active ?? '-'} / 总数 ${sum.total ?? '-'}，当前通道: ${sum.current_cookie_id ? ('#'+sum.current_cookie_id) : '-'}`;
+                const listEl = document.getElementById('cookie-panel-list');
+                if (listEl) {
+                    if (items.length === 0) { listEl.innerHTML = '<p>暂无 Cookie</p>'; return; }
+                    listEl.innerHTML = items.map(c => `
+                      <div class="list-item" style="display:flex; justify-content:space-between; align-items:center;">
+                        <div>
+                          <strong>${c.name || ('#'+c.id)}</strong>
+                          <div style="color:#666; font-size:12px;">ID: ${c.id} ｜ 状态: ${c.is_active ? '活跃' : '禁用'}</div>
+                        </div>
+                        <div>
+                          <button class="btn" onclick="cookieToggleNew(${c.id}, ${c.is_active ? 'false' : 'true'})">${c.is_active ? '禁用' : '启用'}</button>
+                        </div>
+                      </div>
+                    `).join('');
+                }
+            } catch (e) {
+                const summaryEl = document.getElementById('cookie-panel-summary');
+                if (summaryEl) summaryEl.innerHTML = `<span style="color:#b91c1c;">加载失败：${e?.message || e}</span>`;
+            }
+        }
+
+        async function cookieToggleNew(id, toActive) {
+            try {
+                await apiRequest('/api/cookie/toggle', { method: 'POST', body: JSON.stringify({ id, is_active: !!toActive }) });
+                await loadCookiePanelData();
+            } catch (e) {
+                alert('切换失败: ' + (e?.message || e));
+            }
+        }
+
+        async function cookieUploadNew() {
+            const name = document.getElementById('cp-name').value.trim();
+            const sessdata = document.getElementById('cp-sessdata').value.trim();
+            const bili_jct = document.getElementById('cp-jct').value.trim();
+            const dedeuserid = document.getElementById('cp-uid').value.trim();
+            if (!name || !sessdata) { alert('请输入名称与 SESSDATA'); return; }
+            try {
+                await apiRequest('/api/cookie/upload', { method: 'POST', body: JSON.stringify({ name, sessdata, bili_jct, dedeuserid }) });
+                document.getElementById('cp-name').value = '';
+                document.getElementById('cp-sessdata').value = '';
+                document.getElementById('cp-jct').value = '';
+                document.getElementById('cp-uid').value = '';
+                await loadCookiePanelData();
+            } catch (e) {
+                alert('上传失败: ' + (e?.message || e));
+            }
+        }
+
+        async function triggerCookieValidateAllNew() {
+            try {
+                const btns = document.querySelectorAll('button[onclick="triggerCookieValidateAllNew()"]');
+                btns.forEach(b => b.disabled = true);
+                await apiRequest('/api/cookie/validate-all', { method: 'POST' });
+                alert('已触发后台批量校验');
+            } catch (e) {
+                alert('触发失败: ' + (e?.message || e));
+            } finally {
+                const btns = document.querySelectorAll('button[onclick="triggerCookieValidateAllNew()"]');
+                btns.forEach(b => b.disabled = false);
+                try { await loadCookiePanelData(); } catch (_) {}
+            }
+        }
+
+        // 本地同步（按订阅：仅该订阅目录扫描 + 仅该订阅自动关联 + 仅该订阅统计重算）
+        async function localSyncSubscription(subscriptionId, btnEl) {
+            if (!subscriptionId) return alert('订阅ID无效');
+            if (!confirm('确认仅对该订阅执行本地同步（扫描 + 关联）？')) return;
+            const oldText = btnEl ? btnEl.innerText : '';
+            if (btnEl) { btnEl.disabled = true; btnEl.innerText = '同步中...'; }
+            try {
+                const res = await apiRequest(`/api/auto-import/scan-associate/${subscriptionId}`, { method: 'POST' });
+                if (res && res.error) {
+                    alert('本地同步失败（按订阅）：' + res.error);
+                } else {
+                    alert('本地同步完成（按订阅）\n导入: ' + (res?.scan?.imported ?? 0) + '\n跳过: ' + (res?.scan?.skipped ?? 0) + '\n新关联: ' + (res?.associate?.associated ?? 0));
+                    // 同步后刷新列表以更新统计
+                    await loadSubscriptions();
+                }
+            } catch (e) {
+                alert('请求失败：' + e);
+            } finally {
+                if (btnEl) { btnEl.disabled = false; btnEl.innerText = oldText; }
             }
         }
 
@@ -901,12 +1179,40 @@
             }
         }
 
+        // —— Dashboard 轻量轮询 ——
+        let __dashboardTimer = null;
+        const __dashboardIntervalMs = 20000;
+        function startDashboardPolling() {
+            stopDashboardPolling();
+            // 先刷新一次
+            loadDashboard();
+            __dashboardTimer = setInterval(() => {
+                // 仅在 dashboard 可见时刷新
+                const tab = document.getElementById('dashboard');
+                if (tab && tab.style.display !== 'none') {
+                    loadDashboard();
+                }
+            }, __dashboardIntervalMs);
+        }
+        function stopDashboardPolling() {
+            if (__dashboardTimer) {
+                clearInterval(__dashboardTimer);
+                __dashboardTimer = null;
+            }
+        }
+
         // 加载仪表板
         async function loadDashboard() {
             const data = await apiRequest('/api/status');
             const html = `
                 <div class="status success">
                     <strong>系统运行正常</strong> - 版本: ${data.version || '6.0.0'}
+                </div>
+                <div style="display:flex; align-items:center; gap:12px; margin:8px 0 4px 0;">
+                    <label style="display:flex; align-items:center; gap:6px; font-size:13px; color:#444;">
+                        <input id="auto-refresh-dashboard" type="checkbox" /> 自动刷新（20秒）
+                    </label>
+                    <button id="btn-refresh-dashboard" class="btn btn-outline btn-small">立即刷新</button>
                 </div>
                 <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap:1rem;">
                     <div class="card">
@@ -920,12 +1226,85 @@
                         <p>已下载: ${data.statistics?.downloaded_videos || 0}</p>
                     </div>
                     <div class="card">
-                        <h3>Cookie状态</h3>
-                        <p>可用Cookie: ${data.statistics?.active_cookies || 0}</p>
+                        <h3>Cookie概览</h3>
+                        <div id="cookie-overview">加载中...</div>
+                        <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">
+                          <button class="btn btn-outline" onclick="showCookiePanel()">管理</button>
+                          <button class="btn btn-outline" onclick="triggerCookieValidateAllNew()">批量验证</button>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div style="display:flex; justify-content:space-between; align-items:center;">
+                            <h3>调度任务</h3>
+                            <button class="btn btn-outline btn-small" onclick="loadDashboard()">刷新</button>
+                        </div>
+                        <div id="scheduler-jobs" style="margin-top:6px; font-size:13px; color:#333;">加载中...</div>
+                    </div>
+                    <div class="card">
+                        <div style="display:flex; justify-content:space-between; align-items:center;">
+                            <h3>运行中任务</h3>
+                            <button class="btn btn-outline btn-small" onclick="loadDashboard()">刷新</button>
+                        </div>
+                        <div id="running-tasks" style="margin-top:6px; font-size:13px; color:#333;">加载中...</div>
+                    </div>
+                    <div class="card">
+                        <div style="display:flex; justify-content:space-between; align-items:center;">
+                            <h3>最近任务</h3>
+                            <button class="btn btn-outline btn-small" onclick="loadDashboard()">刷新</button>
+                        </div>
+                        <div id="recent-tasks" style="margin-top:6px; font-size:13px; color:#333;">加载中...</div>
+                    </div>
+                    <div class="card">
+                        <div class="section-header">
+                            <h3 style="margin:0;">失败任务</h3>
+                            <div>
+                                <button class="btn btn-outline btn-small" onclick="loadFailedTasks()">刷新</button>
+                            </div>
+                        </div>
+                        <div id="failed-tasks" style="margin-top:6px; font-size:13px; color:#333;">加载中...</div>
                     </div>
                 </div>
             `;
             document.getElementById('system-status').innerHTML = html;
+            // 绑定自动刷新与立即刷新
+            try {
+                const cb = document.getElementById('auto-refresh-dashboard');
+                const btn = document.getElementById('btn-refresh-dashboard');
+                if (btn) btn.onclick = () => loadDashboard();
+                if (cb) {
+                    // 读取本地偏好
+                    let pref = false;
+                    try { pref = localStorage.getItem('pref_auto_refresh_dashboard') === '1'; } catch (_) {}
+                    cb.checked = !!pref;
+                    cb.onchange = () => {
+                        const on = !!cb.checked;
+                        try { localStorage.setItem('pref_auto_refresh_dashboard', on ? '1' : '0'); } catch (_) {}
+                        if (on) startDashboardPolling(); else stopDashboardPolling();
+                    };
+                    if (pref) startDashboardPolling();
+                }
+            } catch (_) {}
+
+            // 渲染调度任务
+            try {
+                const jobs = data.scheduler_jobs || [];
+                const jobsEl = document.getElementById('scheduler-jobs');
+                jobsEl.innerHTML = jobs.length ? jobs.map(j => `<div class="mono" style="font-size:12px;">${j.id} · ${j.name || ''} · ${j.status || ''}</div>`).join('') : '<div style="color:#666;">暂无数据</div>';
+            } catch (_) {}
+
+            // 渲染运行中任务
+            try {
+                const running = data.running_tasks || [];
+                const runEl = document.getElementById('running-tasks');
+                runEl.innerHTML = running.length ? running.map(t => `<div class="mono" style="font-size:12px;">${t.id} · ${t.type || ''} · ${t.progress || ''}</div>`).join('') : '<div style="color:#666;">暂无运行中任务</div>';
+            } catch (_) {}
+
+            // 渲染最近任务
+            try {
+                const recent = data.recent_tasks || [];
+                const recentEl = document.getElementById('recent-tasks');
+                recentEl.innerHTML = recent.length ? recent.map(t => `<div class="mono" style="font-size:12px;">${t.id} · ${t.type || ''} · ${t.status || ''} · ${t.finished_at || ''}</div>`).join('') : '<div style="color:#666;">暂无最近任务</div>';
+            } catch (_) {}
         }
 
         // 加载订阅列表
@@ -993,16 +1372,14 @@
                                 <span class="subscription-type type-${sub.type}">${typeText}</span>
                             </div>
                             <div class="subscription-controls">
-                                <button onclick="associateSubscription(${sub.id})" class="btn btn-outline">自动关联</button>
-                                <button onclick="viewPending(${sub.id})" class="btn btn-outline">查看待下载</button>
-                                <button onclick="viewSubscription(${sub.id})" class="btn btn-info">查看详情</button>
-                                <button onclick="editSubscription(${sub.id})" class="btn btn-secondary">编辑</button>
                                 <button onclick="toggleSubscription(${sub.id}, ${sub.is_active})" class="btn ${sub.is_active ? 'btn-warning' : 'btn-success'}">
                                     ${sub.is_active ? '暂停' : '启用'}
                                 </button>
+                                <button onclick="viewPending(${sub.id})" class="btn btn-outline">查看待下载</button>
+                                <button onclick="editSubscription(${sub.id})" class="btn btn-info">详情/编辑</button>
                                 <button onclick="deleteSubscription(${sub.id})" class="btn btn-danger">删除</button>
-                                <button onclick="triggerLiteSyncSubscription(${sub.id}, this)" class="btn">轻量同步</button>
-                                <span class="hint" style="margin-left:8px;color:#666;font-size:12px;">启用=自动入队下载（由调度器执行）</span>
+                                <button onclick="localSyncSubscription(${sub.id}, this)" class="btn">本地同步</button>
+                                <button onclick="triggerLiteSyncSubscription(${sub.id}, this)" class="btn">远端同步</button>
                             </div>
                         </div>
                         
@@ -1046,7 +1423,7 @@
             // 但会有轻量的状态轮询，用于刷新 pending_estimated / retry 队列长度
         }
 
-        // 轻量同步：API 客户端与轮询
+        // 远端同步：API 客户端与轮询
         let __subsSyncTimer = null;
         const __subsSyncIntervalMs = 15000;
 
@@ -1088,7 +1465,7 @@
             try {
                 const res = await apiRequest('/api/sync/trigger', { method: 'POST', body: JSON.stringify({}) });
                 if (res && res.error) {
-                    alert('轻量同步触发失败: ' + res.error);
+                    alert('远端同步触发失败: ' + res.error);
                 } else {
                     // 触发后轻量刷新几个区域
                     loadOverview();
@@ -1096,7 +1473,7 @@
                     refreshSubscriptionsSyncStatus();
                 }
             } catch (e) {
-                alert('轻量同步触发失败: ' + (e?.message || e));
+                alert('远端同步触发失败: ' + (e?.message || e));
             } finally {
                 if (btn) btn.disabled = false;
             }
@@ -1107,7 +1484,7 @@
             try {
                 const res = await apiRequest('/api/sync/trigger', { method: 'POST', body: JSON.stringify({ sid: subscriptionId }) });
                 if (res && res.error) {
-                    alert('订阅轻量同步失败: ' + res.error);
+                    alert('订阅远端同步失败: ' + res.error);
                 } else {
                     // 触发后刷新该订阅的 expected 与 pending 展示
                     refreshExpected(subscriptionId, true);
@@ -1115,7 +1492,7 @@
                     await refreshSubscriptionsSyncStatus(subscriptionId);
                 }
             } catch (e) {
-                alert('订阅轻量同步失败: ' + (e?.message || e));
+                alert('订阅远端同步失败: ' + (e?.message || e));
             } finally {
                 if (el) el.disabled = false;
             }
@@ -1440,39 +1817,24 @@
 
         // 已移除“开始下载”：下载由启用订阅后调度器自动执行
 
-        // 全量扫描导入
-        async function scanAll() {
-            if (!confirm('确认对下载目录进行全量扫描并导入？')) return;
-            const res = await apiRequest('/api/auto-import/scan', { method: 'POST' });
+        // 本地同步（全量扫描 + 自动关联 + 统计重算）
+        async function localSync() {
+            if (!confirm('确认执行本地同步（全量扫描 + 自动关联）？')) return;
+            const res = await apiRequest('/api/auto-import/scan-associate', { method: 'POST' });
             if (res && res.error) {
-                alert('扫描导入失败: ' + res.error);
+                alert('本地同步失败: ' + res.error);
+            } else if (res && res.running) {
+                alert('已有本地同步在运行中，请稍后再试');
             } else {
-                alert('扫描导入完成');
+                alert('本地同步完成');
                 loadSubscriptions();
             }
         }
 
-        // 全量自动关联
-        async function associateAll() {
-            const res = await apiRequest('/api/auto-import/associate', { method: 'POST' });
-            if (res && res.error) {
-                alert('自动关联失败: ' + res.error);
-            } else {
-                alert('自动关联完成');
-                loadSubscriptions();
-            }
-        }
+        // 保留旧函数以兼容历史入口（不再在UI中展示）
+        async function scanAll() { return localSync(); }
+        async function associateAll() { return localSync(); }
 
-        // 针对单个订阅进行自动关联（按订阅目录前缀）
-        async function associateSubscription(id) {
-            const res = await apiRequest(`/api/subscriptions/${id}/associate`, { method: 'POST' });
-            if (res && res.error) {
-                alert('自动关联失败: ' + res.error);
-            } else {
-                alert('已触发自动关联');
-                loadSubscriptions();
-            }
-        }
 
         // —— 下载汇总（按订阅） ——
         const DownloadAggregateManager = {
@@ -1703,10 +2065,13 @@
         }
 
         // 查看订阅详情
-        async function viewSubscription(id) {
+        
+
+        // 编辑订阅
+        async function editSubscription(id) {
             const result = await apiRequest(`/api/subscriptions/${id}`);
             if (result.error) {
-                alert('获取订阅详情失败: ' + result.error);
+                alert('获取订阅信息失败: ' + result.error);
                 return;
             }
             
@@ -1718,61 +2083,24 @@
                 'specific_urls': '特定视频订阅'
             };
             
-            let detailsHtml = `
-                <h3>订阅详情</h3>
-                <p><strong>名称:</strong> ${sub.name}</p>
-                <p><strong>类型:</strong> ${typeTexts[sub.type] || sub.type}</p>
-                <p><strong>URL:</strong> ${sub.url}</p>
-                <p><strong>状态:</strong> ${sub.is_active ? '活跃' : '暂停'}</p>
-                <p><strong>创建时间:</strong> ${new Date(sub.created_at).toLocaleString()}</p>
-                <p><strong>最后检查:</strong> ${sub.last_check ? new Date(sub.last_check).toLocaleString() : '从未'}</p>
-            `;
-            
-            if (sub.date_after || sub.date_before || sub.min_likes || sub.min_favorites || sub.min_views) {
-                detailsHtml += '<h4>筛选条件:</h4>';
-                if (sub.date_after) detailsHtml += `<p>开始日期: ${sub.date_after}</p>`;
-                if (sub.date_before) detailsHtml += `<p>结束日期: ${sub.date_before}</p>`;
-                if (sub.min_likes) detailsHtml += `<p>最小点赞: ${sub.min_likes}</p>`;
-                if (sub.min_favorites) detailsHtml += `<p>最小收藏: ${sub.min_favorites}</p>`;
-                if (sub.min_views) detailsHtml += `<p>最小播放: ${sub.min_views}</p>`;
-            }
-            
-            // 创建模态框显示详情
-            const modal = document.createElement('div');
-            modal.style.cssText = `
-                position: fixed; top: 0; left: 0; width: 100%; height: 100%; 
-                background: rgba(0,0,0,0.5); display: flex; align-items: center; 
-                justify-content: center; z-index: 1000;
-            `;
-            modal.innerHTML = `
-                <div style="background: white; padding: 2rem; border-radius: 8px; max-width: 600px; width: 90%;">
-                    ${detailsHtml}
-                    <button onclick="this.closest('div[style*=\"position: fixed\"]').remove()" class="btn" style="margin-top: 1rem;">关闭</button>
-                </div>
-            `;
-            document.body.appendChild(modal);
-        }
-
-        // 编辑订阅
-        async function editSubscription(id) {
-            const result = await apiRequest(`/api/subscriptions/${id}`);
-            if (result.error) {
-                alert('获取订阅信息失败: ' + result.error);
-                return;
-            }
-            
-            const sub = result;
-            
             // 创建编辑表单模态框
             const modal = document.createElement('div');
+            modal.className = 'modal-overlay';
+            modal.id = 'subscription-edit-modal';
             modal.style.cssText = `
                 position: fixed; top: 0; left: 0; width: 100%; height: 100%; 
                 background: rgba(0,0,0,0.5); display: flex; align-items: center; 
                 justify-content: center; z-index: 1000; overflow-y: auto;
             `;
             modal.innerHTML = `
-                <div style="background: white; padding: 2rem; border-radius: 8px; max-width: 600px; width: 90%; margin: 2rem;">
-                    <h3>编辑订阅</h3>
+                <div class="modal-content" style="background: white; padding: 2rem; border-radius: 8px; max-width: 600px; width: 90%; margin: 2rem;">
+                    <h3>订阅详情 / 编辑</h3>
+                    <div style="background:#f8f9fa; border:1px solid #e5e7eb; padding:12px; border-radius:6px; margin: 0 0 12px; font-size: 14px; color:#374151;">
+                        <div><strong>ID:</strong> ${sub.id}</div>
+                        <div><strong>类型:</strong> ${typeTexts[sub.type] || sub.type}</div>
+                        <div><strong>创建时间:</strong> ${sub.created_at ? new Date(sub.created_at).toLocaleString() : '-'}</div>
+                        <div><strong>最后检查:</strong> ${sub.last_check ? new Date(sub.last_check).toLocaleString() : '从未'}</div>
+                    </div>
                     <form id="edit-subscription-form">
                         <div class="form-group">
                             <label>订阅名称</label>
@@ -1811,13 +2139,33 @@
                         </div>
                         <div style="margin-top: 1rem;">
                             <button type="button" onclick="updateSubscription(${id})" class="btn btn-primary">保存</button>
-                            <button type="button" onclick="this.closest('div[style*=\"position: fixed\"]').remove()" class="btn btn-secondary" style="margin-left: 0.5rem;">取消</button>
+                            <button type="button" onclick="window.closeEditModal()" class="btn btn-secondary" style="margin-left: 0.5rem;">取消</button>
                         </div>
                     </form>
                 </div>
             `;
             document.body.appendChild(modal);
+            // 阻止内容区域点击冒泡
+            const contentEl = modal.querySelector('.modal-content');
+            if (contentEl) contentEl.addEventListener('click', (e) => e.stopPropagation());
+            // 点击遮罩关闭
+            modal.addEventListener('click', (e) => { if (e.target === modal) closeEditModal(); });
+            // ESC 关闭
+            window.__editModalEscHandler = function(ev){ if (ev.key === 'Escape') { closeEditModal(); } };
+            window.addEventListener('keydown', window.__editModalEscHandler);
         }
+
+        function closeEditModal() {
+            try {
+                const modal = document.getElementById('subscription-edit-modal');
+                if (modal && modal.parentNode) modal.parentNode.removeChild(modal);
+            } catch (_) {}
+            if (window.__editModalEscHandler) {
+                window.removeEventListener('keydown', window.__editModalEscHandler);
+                window.__editModalEscHandler = null;
+            }
+        }
+        window.closeEditModal = closeEditModal;
 
         // 更新订阅
         async function updateSubscription(id) {
@@ -1842,7 +2190,7 @@
                 alert('更新订阅失败: ' + result.error);
             } else {
                 alert('订阅更新成功');
-                document.querySelector('div[style*="position: fixed"]').remove();
+                closeEditModal();
                 loadSubscriptions();
             }
         }
@@ -1885,42 +2233,291 @@
             `;
         }
 
-        // —— 全局总览（/api/overview） ——
-        async function loadOverview() {
-            const box = document.getElementById('global-overview-content');
+        // —— 系统监控模块函数 ——
+        
+        // 系统健康状态
+        async function loadSystemHealth() {
+            const box = document.getElementById('system-health-content');
+            const indicator = document.getElementById('health-indicator');
             if (!box) return;
+            
+            box.innerHTML = '检查中...';
+            indicator.textContent = '检查中...';
+            indicator.className = 'badge';
+            
+            try {
+                const [healthData, overviewData] = await Promise.all([
+                    apiRequest('/health'),
+                    apiRequest('/api/overview')
+                ]);
+                
+                const isHealthy = !healthData?.error && !overviewData?.error;
+                const queuePaused = overviewData?.queue?.paused?.all || false;
+                const recentFails = overviewData?.recent_failed_24h || 0;
+                
+                // 更新健康指示器
+                if (isHealthy && !queuePaused && recentFails < 5) {
+                    indicator.textContent = '健康';
+                    indicator.className = 'badge badge-success';
+                } else if (queuePaused || recentFails >= 5) {
+                    indicator.textContent = '警告';
+                    indicator.className = 'badge badge-warn';
+                } else {
+                    indicator.textContent = '异常';
+                    indicator.className = 'badge badge-danger';
+                }
+                
+                box.innerHTML = `
+                    <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap:12px;">
+                        <div class="stat-card">
+                            <div class="stat-title">API状态</div>
+                            <div class="stat-number ${isHealthy ? 'ok' : 'warn'}">${isHealthy ? '正常' : '异常'}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-title">队列状态</div>
+                            <div class="stat-number ${queuePaused ? 'warn' : 'ok'}">${queuePaused ? '暂停中' : '运行中'}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-title">24h失败任务</div>
+                            <div class="stat-number ${recentFails >= 5 ? 'warn' : 'ok'}">${recentFails}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-title">系统时间</div>
+                            <div class="stat-number">${new Date().toLocaleString('zh-CN')}</div>
+                        </div>
+                    </div>
+                `;
+            } catch (error) {
+                indicator.textContent = '错误';
+                indicator.className = 'badge badge-danger';
+                box.innerHTML = `<p class="status error">健康检查失败：${error.message}</p>`;
+            }
+        }
+        
+        // 任务执行概览
+        async function loadTaskOverview() {
+            const box = document.getElementById('task-overview-content');
+            if (!box) return;
+            
             box.innerHTML = '加载中...';
             const data = await apiRequest('/api/overview');
-            if (data && data.error) { box.innerHTML = `<p class="status error">加载失败：${escapeHtml(data.error)}</p>`; return; }
+            if (data && data.error) { 
+                box.innerHTML = `<p class="status error">加载失败：${escapeHtml(data.error)}</p>`; 
+                return; 
+            }
+            
             const remote = data.remote_total ?? '-';
             const local = data.local_total ?? '-';
             const pending = data.pending_total ?? (typeof remote==='number' && typeof local==='number' ? Math.max(remote-local,0) : '-');
-            const q = data.queue || {};
-            const counts = q.counts || {};
-            const running = counts.running ?? counts.RUNNING ?? '-';
-            const queued = counts.queued ?? counts.QUEUED ?? '-';
-            const succeeded = counts.succeeded ?? counts.SUCCEEDED ?? '-';
-            const failed = counts.failed ?? counts.FAILED ?? '-';
             const recentFail = data.recent_failed_24h ?? '-';
-            const paused = (q.paused && (q.paused.all || q.paused.requires_cookie || q.paused.no_cookie)) ? '是' : '否';
-            const cap = q.capacity || {};
+            
             box.innerHTML = `
                 <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap:12px;">
-                    <div class="stat-card"><div class="stat-title">Remote</div><div class="stat-number">${remote}</div></div>
-                    <div class="stat-card"><div class="stat-title">Local</div><div class="stat-number">${local}</div></div>
-                    <div class="stat-card"><div class="stat-title">Pending</div><div class="stat-number">${pending}</div></div>
-                    <div class="stat-card"><div class="stat-title">Queue 运行</div><div class="stat-number">${running}</div></div>
-                    <div class="stat-card"><div class="stat-title">Queue 排队</div><div class="stat-number">${queued}</div></div>
-                    <div class="stat-card"><div class="stat-title">Queue 成功</div><div class="stat-number">${succeeded}</div></div>
-                    <div class="stat-card"><div class="stat-title">Queue 失败</div><div class="stat-number">${failed}</div></div>
-                    <div class="stat-card"><div class="stat-title">暂停中</div><div class="stat-number">${paused}</div></div>
-                    <div class="stat-card"><div class="stat-title">最近24h失败</div><div class="stat-number">${recentFail}</div></div>
+                    <div class="stat-card">
+                        <div class="stat-title">远端总数</div>
+                        <div class="stat-number">${remote}</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-title">本地总数</div>
+                        <div class="stat-number">${local}</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-title">待下载</div>
+                        <div class="stat-number ${pending > 0 ? 'warn' : 'ok'}">${pending}</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-title">最近24h失败</div>
+                        <div class="stat-number ${recentFail > 0 ? 'warn' : 'ok'}">${recentFail}</div>
+                    </div>
                 </div>
-                <details style="margin-top:8px;">
-                    <summary style="cursor:pointer;">查看原始数据(JSON)</summary>
-                    <pre style="margin-top:8px; color:#666; font-size:12px; background:#f8f9fa; padding:12px; border-radius:6px; overflow:auto;">${escapeHtml(JSON.stringify(data, null, 2))}</pre>
-                </details>
             `;
+        }
+        
+        // 队列状态监控
+        async function loadQueueStatus() {
+            const box = document.getElementById('queue-status-content');
+            const indicator = document.getElementById('queue-status-indicator');
+            if (!box) return;
+            
+            box.innerHTML = '加载中...';
+            const data = await apiRequest('/api/overview');
+            if (data && data.error) { 
+                box.innerHTML = `<p class="status error">加载失败：${escapeHtml(data.error)}</p>`; 
+                return; 
+            }
+            
+            const q = data.queue || {};
+            const counts = q.counts || {};
+            const running = counts.running ?? counts.RUNNING ?? 0;
+            const queued = counts.queued ?? counts.QUEUED ?? 0;
+            const succeeded = counts.succeeded ?? counts.SUCCEEDED ?? 0;
+            const failed = counts.failed ?? counts.FAILED ?? 0;
+            const paused = q.paused && (q.paused.all || q.paused.requires_cookie || q.paused.no_cookie);
+            
+            // 更新队列状态指示器
+            if (paused) {
+                indicator.textContent = '暂停';
+                indicator.className = 'badge badge-warn';
+            } else if (running > 0) {
+                indicator.textContent = '运行中';
+                indicator.className = 'badge badge-success';
+            } else {
+                indicator.textContent = '空闲';
+                indicator.className = 'badge';
+            }
+            
+            box.innerHTML = `
+                <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap:12px;">
+                    <div class="stat-card">
+                        <div class="stat-title">运行中</div>
+                        <div class="stat-number ${running > 0 ? 'ok' : ''}">${running}</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-title">排队中</div>
+                        <div class="stat-number ${queued > 10 ? 'warn' : ''}">${queued}</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-title">已成功</div>
+                        <div class="stat-number ok">${succeeded}</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-title">已失败</div>
+                        <div class="stat-number ${failed > 0 ? 'warn' : ''}">${failed}</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-title">暂停状态</div>
+                        <div class="stat-number ${paused ? 'warn' : 'ok'}">${paused ? '是' : '否'}</div>
+                    </div>
+                </div>
+            `;
+        }
+        
+        // 系统配置状态
+        async function loadConfigStatus() {
+            const box = document.getElementById('config-status-content');
+            if (!box) return;
+            
+            box.innerHTML = '检查中...';
+            try {
+                const data = await apiRequest('/api/settings');
+                if (data && data.error) { 
+                    box.innerHTML = `<p class="status error">配置检查失败：${escapeHtml(data.error)}</p>`; 
+                    return; 
+                }
+                
+                const settings = Array.isArray(data) ? data : [];
+                const downloadPath = settings.find(s => s.key === 'DOWNLOAD_PATH')?.value || '未设置';
+                const cookieCount = settings.filter(s => s.key.includes('cookie')).length;
+                
+                box.innerHTML = `
+                    <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap:12px;">
+                        <div class="stat-card">
+                            <div class="stat-title">下载路径</div>
+                            <div class="stat-number" style="font-size:12px; word-break:break-all;">${downloadPath}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-title">Cookie数量</div>
+                            <div class="stat-number ${cookieCount > 0 ? 'ok' : 'warn'}">${cookieCount}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-title">配置项总数</div>
+                            <div class="stat-number">${settings.length}</div>
+                        </div>
+                    </div>
+                `;
+            } catch (error) {
+                box.innerHTML = `<p class="status error">配置检查失败：${error.message}</p>`;
+            }
+        }
+        
+        // 数据一致性状态
+        async function loadConsistencyStatus() {
+            const box = document.getElementById('consistency-status-content');
+            if (!box) return;
+            
+            box.innerHTML = '检查中...';
+            try {
+                const data = await apiRequest('/api/system/consistency-stats');
+                if (data && data.error) { 
+                    box.innerHTML = `<p class="status error">一致性检查失败：${escapeHtml(data.error)}</p>`; 
+                    return; 
+                }
+                
+                const totalVideos = data.total_videos || 0;
+                const withPath = data.with_path || 0;
+                const withoutPath = data.without_path || 0;
+                const downloadedVideos = data.downloaded_videos || 0;
+                
+                // 计算一致性指标
+                const pathMissing = totalVideos - withPath; // 有记录但无路径的视频
+                const consistencyRate = totalVideos > 0 ? ((withPath / totalVideos) * 100).toFixed(1) : 100;
+                
+                box.innerHTML = `
+                    <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap:12px;">
+                        <div class="stat-card">
+                            <div class="stat-title">总视频记录</div>
+                            <div class="stat-number">${totalVideos}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-title">有路径记录</div>
+                            <div class="stat-number ok">${withPath}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-title">缺失路径</div>
+                            <div class="stat-number ${withoutPath > 0 ? 'warn' : 'ok'}">${withoutPath}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-title">一致性率</div>
+                            <div class="stat-number ${consistencyRate < 95 ? 'warn' : 'ok'}">${consistencyRate}%</div>
+                        </div>
+                    </div>
+                `;
+            } catch (error) {
+                box.innerHTML = `<p class="status error">一致性检查失败：${error.message}</p>`;
+            }
+        }
+        
+        // 资源使用监控
+        async function loadResourceStatus() {
+            const box = document.getElementById('resource-status-content');
+            if (!box) return;
+            
+            box.innerHTML = '检查中...';
+            try {
+                const data = await apiRequest('/api/media/directories');
+                if (data && data.error) { 
+                    box.innerHTML = `<p class="status error">资源检查失败：${escapeHtml(data.error)}</p>`; 
+                    return; 
+                }
+                
+                const items = data.items || [];
+                const totalSize = items.reduce((sum, item) => sum + (item.total_size || 0), 0);
+                const totalVideos = items.reduce((sum, item) => sum + (item.total_videos || 0), 0);
+                const totalDirs = items.length;
+                
+                box.innerHTML = `
+                    <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap:12px;">
+                        <div class="stat-card">
+                            <div class="stat-title">总存储空间</div>
+                            <div class="stat-number">${formatBytes(totalSize)}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-title">视频文件数</div>
+                            <div class="stat-number">${totalVideos}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-title">目录数量</div>
+                            <div class="stat-number">${totalDirs}</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-title">平均文件大小</div>
+                            <div class="stat-number">${totalVideos > 0 ? formatBytes(totalSize / totalVideos) : '0 B'}</div>
+                        </div>
+                    </div>
+                `;
+            } catch (error) {
+                box.innerHTML = `<p class="status error">资源检查失败：${error.message}</p>`;
+            }
         }
 
         async function loadSubscriptionStats() {
@@ -2051,11 +2648,11 @@
             if (items.length === 0) { wrap.innerHTML = '<p>暂无目录数据</p>'; return; }
             const rows = items.map(d => `
               <tr>
-                <td>${escapeHtml(d.dir)}</td>
+                <td>${escapeHtml(d.display_name || d.dir)}</td>
                 <td class="num">${d.total_videos}</td>
                 <td class="num">${d.downloaded_videos}</td>
                 <td class="num">${formatBytes(d.total_size || 0)}</td>
-                <td><button class="btn btn-small" onclick="showDirectoryDetail('${d.dir.replace(/'/g, "\\'")}')">查看视频</button></td>
+                <td><button class="btn btn-small" onclick="showDirectoryDetail(${d.subscription_id || 'null'}, '${d.dir.replace(/'/g, "\\'")}')">查看视频</button></td>
               </tr>`).join('');
             wrap.innerHTML = `
               <div class="table-wrap">
@@ -2074,15 +2671,15 @@
               </div>`;
         }
 
-        async function showDirectoryDetail(dir) {
+        async function showDirectoryDetail(sid, dir) {
             document.getElementById('media-overview').style.display = 'none';
             document.getElementById('media-sub-stats').style.display = 'none';
             document.getElementById('media-sub-detail').style.display = 'none';
             document.getElementById('media-dir-stats').style.display = 'none';
             const panel = document.getElementById('media-dir-detail');
             panel.style.display = 'block';
-            document.getElementById('media-dir-detail-title').innerText = `目录明细 - ${dir}`;
-            await loadDirectoryVideosPage(dir, 1);
+            document.getElementById('media-dir-detail-title').innerText = `目录明细 - ${dir || (sid ? ('SID ' + sid) : '-')}`;
+            await loadDirectoryVideosPage(sid, dir, 1);
         }
 
         function hideDirectoryDetail() {
@@ -2092,9 +2689,10 @@
             document.getElementById('media-dir-detail').style.display = 'none';
         }
 
-        async function loadDirectoryVideosPage(dir, page) {
+        async function loadDirectoryVideosPage(sid, dir, page) {
             const size = 20;
-            const data = await apiRequest(`/api/media/directory-videos?dir=${encodeURIComponent(dir)}&page=${page}&size=${size}`);
+            const q = sid ? `sid=${sid}` : `dir=${encodeURIComponent(dir)}`;
+            const data = await apiRequest(`/api/media/directory-videos?${q}&page=${page}&size=${size}`);
             const rows = (data.videos || []).map(v => `
                 <tr>
                     <td>${escapeHtml(v.title || '')}</td>
@@ -2245,23 +2843,348 @@
             }
         }
 
-        // 加载系统设置
-        async function loadSettings() {
-            const data = await apiRequest('/api/settings');
-            const html = Object.entries(data).map(([key, setting]) => `
-                <div class="form-group">
-                    <label>${setting.description}</label>
-                    <input type="text" value="${setting.value}" onchange="updateSetting('${key}', this.value)">
+        // 加载基础配置
+        async function loadBasicSettings() {
+            const content = document.getElementById('basic-settings-content');
+            if (!content) return;
+            
+            content.innerHTML = '加载中...';
+            try {
+                const data = await apiRequest('/api/settings');
+                if (data && data.error) {
+                    content.innerHTML = `<p class="status error">加载失败：${escapeHtml(data.error)}</p>`;
+                    return;
+                }
+                
+                // 基础配置项
+                const basicKeys = ['download_path', 'video_quality', 'max_concurrent_downloads'];
+                const basicSettings = {};
+                basicKeys.forEach(key => {
+                    if (data[key] !== undefined) {
+                        // 处理新的API数据格式 {value: "...", description: "..."}
+                        const setting = data[key];
+                        basicSettings[key] = typeof setting === 'object' && setting.value !== undefined ? setting.value : setting;
+                    }
+                });
+                
+                if (Object.keys(basicSettings).length === 0) {
+                    content.innerHTML = '<p class="status">暂无基础配置项</p>';
+                    return;
+                }
+                
+                let html = '<div style="display:grid; gap:12px;">';
+                for (const [key, value] of Object.entries(basicSettings)) {
+                    const displayName = {
+                        'download_path': '下载路径',
+                        'video_quality': '视频质量',
+                        'max_concurrent_downloads': '最大并发下载数'
+                    }[key] || key;
+                    
+                    html += `
+                        <div style="display:flex; justify-content:space-between; align-items:center; padding:12px; border:1px solid #e5e7eb; border-radius:6px;">
+                            <div>
+                                <div style="font-weight:600; color:#374151;">${escapeHtml(displayName)}</div>
+                                <div style="font-size:12px; color:#6b7280;">${escapeHtml(key)}</div>
+                            </div>
+                            <div style="font-family:monospace; color:#059669; background:#ecfdf5; padding:4px 8px; border-radius:4px;">${escapeHtml(String(value))}</div>
+                        </div>
+                    `;
+                }
+                html += '</div>';
+                content.innerHTML = html;
+            } catch (error) {
+                content.innerHTML = `<p class="status error">加载失败：${error.message}</p>`;
+            }
+        }
+        
+        // 加载下载配置
+        async function loadDownloadSettings() {
+            const content = document.getElementById('download-settings-content');
+            if (!content) return;
+            
+            content.innerHTML = '加载中...';
+            try {
+                const data = await apiRequest('/api/settings');
+                if (data && data.error) {
+                    content.innerHTML = `<p class="status error">加载失败：${escapeHtml(data.error)}</p>`;
+                    return;
+                }
+                
+                // 下载相关配置项
+                const downloadKeys = ['video_quality', 'audio_quality', 'download_format', 'retry_count'];
+                const downloadSettings = {};
+                downloadKeys.forEach(key => {
+                    if (data[key] !== undefined) {
+                        // 处理新的API数据格式 {value: "...", description: "..."}
+                        const setting = data[key];
+                        downloadSettings[key] = typeof setting === 'object' && setting.value !== undefined ? setting.value : setting;
+                    }
+                });
+                
+                if (Object.keys(downloadSettings).length === 0) {
+                    content.innerHTML = '<p class="status">暂无下载配置项</p>';
+                    return;
+                }
+                
+                let html = '<div style="display:grid; gap:12px;">';
+                for (const [key, value] of Object.entries(downloadSettings)) {
+                    const displayName = {
+                        'video_quality': '视频质量',
+                        'audio_quality': '音频质量', 
+                        'download_format': '下载格式',
+                        'retry_count': '重试次数'
+                    }[key] || key;
+                    
+                    html += `
+                        <div style="display:flex; justify-content:space-between; align-items:center; padding:12px; border:1px solid #e5e7eb; border-radius:6px;">
+                            <div>
+                                <div style="font-weight:600; color:#374151;">${escapeHtml(displayName)}</div>
+                                <div style="font-size:12px; color:#6b7280;">${escapeHtml(key)}</div>
+                            </div>
+                            <div style="font-family:monospace; color:#059669; background:#ecfdf5; padding:4px 8px; border-radius:4px;">${escapeHtml(String(value))}</div>
+                        </div>
+                    `;
+                }
+                html += '</div>';
+                content.innerHTML = html;
+            } catch (error) {
+                content.innerHTML = `<p class="status error">加载失败：${error.message}</p>`;
+            }
+        }
+        
+        // 加载同步状态
+        async function loadSyncStatus() {
+            const content = document.getElementById('sync-status-content');
+            if (!content) return;
+            
+            content.innerHTML = '加载中...';
+            try {
+                const data = await apiRequest('/api/settings');
+                if (data && data.error) {
+                    content.innerHTML = `<p class="status error">加载失败：${escapeHtml(data.error)}</p>`;
+                    return;
+                }
+                
+                // 同步状态相关配置项
+                const syncKeys = Object.keys(data).filter(key => key.startsWith('sync:'));
+                
+                if (syncKeys.length === 0) {
+                    content.innerHTML = '<p class="status">暂无同步状态数据</p>';
+                    return;
+                }
+                
+                // 按订阅ID分组
+                const syncBySubscription = {};
+                syncKeys.forEach(key => {
+                    const parts = key.split(':');
+                    if (parts.length >= 2) {
+                        const subId = parts[1];
+                        const type = parts.slice(2).join(':');
+                        if (!syncBySubscription[subId]) {
+                            syncBySubscription[subId] = {};
+                        }
+                        // 处理新的API数据格式
+                        const setting = data[key];
+                        const actualValue = typeof setting === 'object' && setting.value !== undefined ? setting.value : setting;
+                        syncBySubscription[subId][type] = actualValue;
+                    }
+                });
+                
+                let html = '<div style="display:grid; gap:16px;">';
+                for (const [subId, syncData] of Object.entries(syncBySubscription)) {
+                    html += `
+                        <div style="border:1px solid #e5e7eb; border-radius:8px; padding:16px;">
+                            <h4 style="margin:0 0 12px 0; color:#374151;">订阅 ${escapeHtml(subId)}</h4>
+                            <div style="display:grid; gap:8px;">
+                    `;
+                    
+                    for (const [type, value] of Object.entries(syncData)) {
+                        const displayName = {
+                            'status': '同步状态',
+                            'remote_total_cached': '远端总数',
+                            'last_cursor': '最后游标',
+                            'head_snapshot': '头部快照',
+                            'trace': '执行轨迹'
+                        }[type] || type;
+                        
+                        let displayValue;
+                        const actualValue = value;
+                        
+                        if (typeof actualValue === 'object') {
+                            try {
+                                displayValue = JSON.stringify(actualValue, null, 2);
+                            } catch (e) {
+                                displayValue = '[复杂对象]';
+                            }
+                        } else {
+                            displayValue = String(actualValue);
+                        }
+                        
+                        if (displayValue.length > 100) {
+                            displayValue = displayValue.substring(0, 100) + '...';
+                        }
+                        
+                        html += `
+                            <div style="display:flex; justify-content:space-between; align-items:flex-start; padding:8px; background:#f9fafb; border-radius:4px;">
+                                <div style="font-weight:500; color:#374151; min-width:120px;">${escapeHtml(displayName)}</div>
+                                <div style="font-family:monospace; font-size:12px; color:#6b7280; text-align:right; word-break:break-all;">${escapeHtml(displayValue)}</div>
+                            </div>
+                        `;
+                    }
+                    
+                    html += `
+                            </div>
+                        </div>
+                    `;
+                }
+                html += '</div>';
+                content.innerHTML = html;
+            } catch (error) {
+                content.innerHTML = `<p class="status error">加载失败：${error.message}</p>`;
+            }
+        }
+        
+        // 加载高级设置
+        async function loadAdvancedSettings() {
+            const content = document.getElementById('advanced-settings-content');
+            if (!content) return;
+            
+            content.innerHTML = '加载中...';
+            try {
+                const data = await apiRequest('/api/settings');
+                if (data && data.error) {
+                    content.innerHTML = `<p class="status error">加载失败：${escapeHtml(data.error)}</p>`;
+                    return;
+                }
+                
+                if (!data || Object.keys(data).length === 0) {
+                    content.innerHTML = '<p class="status">暂无设置项</p>';
+                    return;
+                }
+                
+                let html = '<div style="display:grid; gap:8px;">';
+                for (const [key, setting] of Object.entries(data)) {
+                    let displayValue;
+                    let description = '';
+                    
+                    // 处理新的API数据格式
+                    if (typeof setting === 'object' && setting.value !== undefined) {
+                        const actualValue = setting.value;
+                        description = setting.description || '';
+                        
+                        // 处理显示值
+                        if (typeof actualValue === 'string') {
+                            // 尝试解析JSON字符串
+                            try {
+                                const parsed = JSON.parse(actualValue);
+                                displayValue = JSON.stringify(parsed, null, 2);
+                            } catch {
+                                // 不是JSON，直接显示字符串
+                                displayValue = actualValue;
+                            }
+                        } else if (typeof actualValue === 'object' && actualValue !== null) {
+                            try {
+                                displayValue = JSON.stringify(actualValue, null, 2);
+                            } catch (e) {
+                                displayValue = '[复杂对象]';
+                            }
+                        } else {
+                            displayValue = String(actualValue);
+                        }
+                    } else {
+                        displayValue = String(setting);
+                    }
+                    
+                    if (displayValue.length > 300) {
+                        displayValue = displayValue.substring(0, 300) + '...';
+                    }
+                    
+                    html += `
+                        <div style="padding:12px; border:1px solid #e5e7eb; border-radius:6px; background:#f9fafb;">
+                            <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:8px;">
+                                <div style="font-weight:600; color:#374151;">${escapeHtml(key)}</div>
+                                ${description ? `<div style="font-size:11px; color:#9ca3af; max-width:200px; text-align:right;">${escapeHtml(description)}</div>` : ''}
+                            </div>
+                            <div style="font-family:monospace; font-size:12px; color:#6b7280; word-break:break-all; white-space:pre-wrap; background:#f3f4f6; padding:8px; border-radius:4px; max-height:150px; overflow-y:auto;">${escapeHtml(displayValue)}</div>
+                        </div>
+                    `;
+                }
+                html += '</div>';
+                content.innerHTML = html;
+            } catch (error) {
+                content.innerHTML = `<p class="status error">加载失败：${error.message}</p>`;
+            }
+        }
+        
+        // 清理同步缓存
+        async function clearSyncCache() {
+            if (!confirm('确定要清理所有同步缓存吗？这将重置所有订阅的同步状态。')) {
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/sync/clear-cache', {
+                    method: 'POST'
+                });
+                
+                if (response.ok) {
+                    alert('同步缓存已清理');
+                    loadSyncStatus(); // 刷新状态
+                } else if (response.status === 404) {
+                    alert('清理缓存功能暂不可用，请检查后端API实现');
+                } else {
+                    alert('清理失败：' + response.statusText);
+                }
+            } catch (error) {
+                alert('清理失败：' + error.message);
+            }
+        }
+        
+        // 触发容量回填
+        async function triggerRefreshSizes() {
+            try {
+                const response = await fetch('/api/media/refresh-sizes', {
+                    method: 'POST'
+                });
+                
+                if (response.ok) {
+                    alert('容量回填任务已启动');
+                    checkRefreshSizesStatus(); // 检查状态
+                } else if (response.status === 404) {
+                    alert('容量回填功能暂不可用，请检查后端API实现');
+                } else {
+                    alert('启动失败：' + response.statusText);
+                }
+            } catch (error) {
+                alert('启动失败：' + error.message);
+            }
+        }
+        
+        // 检查容量回填状态
+        async function checkRefreshSizesStatus() {
+            const statusDiv = document.getElementById('refresh-sizes-status');
+            if (!statusDiv) return;
+            
+            statusDiv.innerHTML = `
+                <div class="status info">
+                    容量回填任务在后台运行中<br>
+                    <small style="color:#6b7280;">任务会扫描所有有路径的视频记录，回填文件大小信息</small>
                 </div>
-            `).join('');
-            document.getElementById('settings-list').innerHTML = html;
+            `;
+        }
+        
+        // 加载维护状态
+        async function loadMaintenanceStatus() {
+            // 同时加载一致性检查和容量回填状态
+            loadConsistencyStats();
+            checkRefreshSizesStatus();
         }
 
         // 更新设置
         async function updateSetting(key, value) {
             const result = await apiRequest(`/api/settings/${key}`, {
                 method: 'PUT',
-                body: JSON.stringify({ value })
+                body: JSON.stringify({ value: String(value) })
             });
             
             if (result.error) {

@@ -15,21 +15,31 @@ from app.api import app
 from app.scheduler import scheduler
 from app.models import db
 
-# 配置日志
-logger.remove()  # 移除默认处理器
-logger.add(
-    sys.stdout,
-    format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
-    level="INFO"
-)
-logger.add(
-    "logs/bili_curator.log",
-    format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
-    level="DEBUG",
-    rotation="10 MB",
-    retention="30 days",
-    compression="zip"
-)
+_LOGGING_CONFIGURED = False
+
+def _setup_logging_once():
+    global _LOGGING_CONFIGURED
+    if _LOGGING_CONFIGURED:
+        return
+    # 配置日志（一次性）
+    logger.remove()  # 移除默认处理器，避免重复
+    logger.add(
+        sys.stdout,
+        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+        level="INFO"
+    )
+    logger.add(
+        "logs/bili_curator.log",
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
+        level="DEBUG",
+        rotation="10 MB",
+        retention="30 days",
+        compression="zip"
+    )
+    _LOGGING_CONFIGURED = True
+
+# 初始化日志（防重复）
+_setup_logging_once()
 
 @asynccontextmanager
 async def lifespan(app):
@@ -103,7 +113,7 @@ def main():
     
     # 运行FastAPI应用
     uvicorn.run(
-        "main:app",
+        app,
         host="0.0.0.0",
         port=8080,
         reload=False,  # 生产环境关闭热重载

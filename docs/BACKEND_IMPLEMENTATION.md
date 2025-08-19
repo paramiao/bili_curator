@@ -19,7 +19,7 @@
   - 历史分散页面（`static/*.html`）已标记为废弃，推荐从 SPA 入口统一访问与导航。
 
 
-更新时间：2025-08-17 16:28 (Asia/Shanghai)
+更新时间：2025-08-17 17:30 (Asia/Shanghai)
 
 ## 1. 关键代码路径
 - API：`bili_curator_v6/app/api.py`
@@ -193,6 +193,16 @@ javascript:alert(document.cookie.match(/SESSDATA=([^;]+)/)[1])
   - `DOWNLOAD_CMD_TIMEOUT=3600`（下载子进程超时秒数）。
   - `META_CMD_TIMEOUT=60`（视频元数据子进程超时秒数）。
   - `EXPECTED_TOTAL_TIMEOUT=20`（expected-total 快速探测超时秒数）。
+
+### 11.1 下载格式选择与失败自适应（V6 增强）
+
+- **MAX_HEIGHT（可选）**：通过环境变量限制视频最高分辨率（默认 `1080`）。例如：`MAX_HEIGHT=720` 将在自适应选择时不选取高于 720p 的视频编码；该限制仅作用于当前失败视频的重选流程，不会“全局降级”。
+- **格式回退顺序优化**：基础格式表达式从“指定清晰度 → 通用组合 `bv*+ba/b*` → 兜底 `bestvideo*+bestaudio/best`”，尽量减少“请求的清晰度不可用”导致的失败。
+- **按失败原因自适应探测**：当连续尝试仍提示“Requested format is not available”等不可用错误时，触发一次 `yt-dlp -J` 格式探测，解析可用 `formats`，在不超过 `MAX_HEIGHT` 前提下动态挑选“最佳 video+audio（优先 mp4 容器），否则退回单轨 mp4/best”。随后对该视频重试一次。
+- **作用范围**：仅对当前失败视频进行自适应选择与重试；不会影响队列中的其他视频与默认清晰度偏好，从而避免“全局分辨率降级”。
+- **可观测性**：相关日志会标注触发原因、选中的 `format_id` 与高度限制，用于问题定位。
+
+备注：为兼容家用 NAS 与媒体库，优先选择 mp4 容器；若 mp4 不可用，再回落至其它容器（如 mkv/flv）。
 
 ## 12. 订阅管理（前端交互与 API 映射）— 近期变更
 

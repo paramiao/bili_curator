@@ -1,13 +1,15 @@
 # bili_curator V6 - B站视频下载管理系统
 
-> 🚀 专为家用个人设计的 B站视频下载与管理平台，支持 Web 界面、订阅管理、Docker 一键部署
+> 🚀 专为家用个人设计的 B站视频下载与管理平台，支持现代化 Web 界面、智能订阅管理、Docker 一键部署
 
-## 🆕 近期变更（V6 最新）
+## 🆕 V6 最新特性
 
-- __启动自动修复（本地优先）__：服务启动时自动执行一致性检查与全量统计重算，统计以“本地磁盘实际存在的产物”为准，避免 DB 统计偏差。
-- __轻量远端同步 API__：新增 `POST /api/sync/trigger` 与 `GET /api/sync/status`，可全局或按订阅触发/查询远端计数与轻量同步状态。
-- __系统状态 API__：新增 `GET /api/status`，汇总系统运行状态与核心统计指标。
-- __统一前端入口（SPA）__：入口统一为 `bili_curator_v6/web/dist/index.html`，历史分散页面 `static/*.html` 已废弃。
+- **🌐 现代化 Web 管理界面**：统一的单页应用（SPA），支持实时监控、可视化统计、直观操作
+- **📊 智能统计与监控**：目录统计、订阅统计、系统监控三位一体，数据一致性自动校验
+- **🔄 增强订阅管理**：支持合集、UP主、关键词订阅，自动增量更新，智能去重
+- **🛠️ 数据维护工具**：一致性检查、容量回填、同步缓存管理，确保数据准确性
+- **🍪 Cookie 池管理**：Web 界面管理多账号，自动轮换，支持会员内容下载
+- **📦 Docker 一键部署**：单容器部署，零配置启动，内置健康检查
 
 ## ✨ V6 核心特性
 
@@ -56,40 +58,48 @@ docker-compose logs -f
 
 ## 🌐 Web 界面功能
 
-> 前端入口已统一：请通过 `bili_curator_v6/web/dist/index.html` 访问首页（单页应用，SPA）。
-> 旧的 `bili_curator_v6/static/*.html` 已废弃（不再推荐直接访问这些页面）。
+### 统一管理界面
+访问地址：`http://localhost:8080`（统一单页应用入口）
 
-### 轻量远端同步使用示例
+### 核心功能模块
+- **📈 总览仪表板**：系统状态、媒体统计、订阅概览、目录分析
+- **📺 订阅管理**：添加/编辑订阅、状态监控、手动触发同步
+- **⏳ 任务队列**：实时任务监控、进度追踪、错误处理
+- **🍪 Cookie 管理**：多账号管理、有效性验证、自动轮换
+- **⚙️ 系统设置**：下载配置、同步状态、数据维护工具
+- **📊 系统监控**：健康状态、任务执行、队列状态、资源使用
+
+### API 使用示例
 
 ```bash
-# 全局触发轻量远端同步
-curl -s -X POST http://localhost:8080/api/sync/trigger | jq .
+# 系统健康检查
+curl -s http://localhost:8080/health | jq .
 
-# 仅针对订阅ID=1触发
-curl -s -X POST http://localhost:8080/api/sync/trigger \
-  -H 'Content-Type: application/json' -d '{"sid":1}' | jq .
+# 查看系统总览
+curl -s http://localhost:8080/api/overview | jq .
 
-# 查看同步状态（全部）
-curl -s http://localhost:8080/api/sync/status | jq .
+# 订阅管理
+curl -s http://localhost:8080/api/subscriptions | jq .
 
-# 查看单个订阅状态
-curl -s 'http://localhost:8080/api/sync/status?sid=1' | jq .
+# 目录统计
+curl -s http://localhost:8080/api/media/directories | jq .
 
-# 查看系统状态
-curl -s http://localhost:8080/api/status | jq .
+# 订阅统计
+curl -s http://localhost:8080/api/media/subscription-stats | jq .
+
+# 一致性检查
+curl -s http://localhost:8080/api/system/consistency-stats | jq .
+
+# 容量数据回填
+curl -s -X POST http://localhost:8080/api/media/refresh-sizes | jq .
 ```
 
-### 主要页面
-- **总览仪表板**：系统状态、订阅统计、下载进度
-- **订阅管理**：添加/编辑订阅、状态监控、手动触发
-- **任务队列**：实时任务监控、进度追踪、错误处理
-- **Cookie 管理**：添加/验证 Cookie、自动轮换策略
-- **设置配置**：下载参数、存储路径、系统配置
 
 ### 支持的订阅类型
-- ✅ **合集订阅**：完整支持，自动监控更新
-- 🟡 **UP主订阅**：数据模型完整，核心逻辑开发中
-- 🟡 **关键词订阅**：基础匹配实现，主动搜索待完善
+- ✅ **合集订阅**：完整支持，自动监控更新，智能增量下载
+- ✅ **UP主订阅**：支持UP主全部视频订阅，定期检查更新
+- ✅ **关键词订阅**：基于搜索关键词的视频订阅
+- ✅ **特定视频订阅**：指定视频URL列表的批量下载
 
 ## 🔧 使用说明
 

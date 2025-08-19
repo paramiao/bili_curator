@@ -15,6 +15,19 @@ from .services.subscription_stats import record_recompute_event, maybe_try_recom
 from .downloader import downloader
 from .queue_manager import get_subscription_lock
 
+# 本地工具：BVID 校验与安全 URL 构造（避免非法ID拼接URL）
+import re
+def _is_bvid(vid: str) -> bool:
+    try:
+        return bool(vid) and bool(re.match(r'^BV[0-9A-Za-z]{10}$', str(vid)))
+    except Exception:
+        return False
+
+def _safe_bilibili_url(vid: Optional[str]) -> Optional[str]:
+    if not vid:
+        return None
+    return f"https://www.bilibili.com/video/{vid}" if _is_bvid(vid) else None
+
 class TaskStatus(Enum):
     PENDING = "pending"
     CHECKING = "checking"
@@ -153,7 +166,11 @@ class EnhancedTaskManager:
             except Exception:
                 sub_dir_path = None
             from pathlib import Path
-            existing_videos = downloader._scan_existing_files(db, Path(sub_dir_path) if sub_dir_path else None)
+            existing_videos = downloader._scan_existing_files(
+                db,
+                subscription_id=subscription.id,
+                subscription_dir=Path(sub_dir_path) if sub_dir_path else None,
+            )
             new_videos = []
             
             for video_info in video_list:
@@ -403,8 +420,8 @@ class EnhancedTaskManager:
                 'duration': video.duration,
                 'upload_date': video.upload_date.strftime('%Y%m%d') if video.upload_date else None,
                 'view_count': video.view_count,
-                'url': f"https://www.bilibili.com/video/{video.bilibili_id}",
-                'webpage_url': f"https://www.bilibili.com/video/{video.bilibili_id}"
+                'url': _safe_bilibili_url(video.bilibili_id),
+                'webpage_url': _safe_bilibili_url(video.bilibili_id)
             }
             video_list.append(video_info)
         

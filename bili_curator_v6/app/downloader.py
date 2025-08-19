@@ -87,7 +87,22 @@ class BilibiliDownloaderV6:
         self.list_fetch_cmd_timeout = _env_int('LIST_FETCH_CMD_TIMEOUT', 120, 10, 600)
         self.download_cmd_timeout = _env_int('DOWNLOAD_CMD_TIMEOUT', 1800, 60, 7200)
         self.meta_cmd_timeout = _env_int('META_CMD_TIMEOUT', 60, 10, 300)
-    
+        
+    @staticmethod
+    def _is_bvid(vid: str) -> bool:
+        """校验是否为合法 BVID（BV 开头 + 10 位字母数字）。"""
+        try:
+            return bool(vid) and bool(re.match(r'^BV[0-9A-Za-z]{10}$', str(vid)))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _safe_bilibili_url(vid: Optional[str]) -> Optional[str]:
+        """仅当 vid 为合法 BVID 时返回标准视频页 URL，否则返回 None。"""
+        if not vid:
+            return None
+        return f"https://www.bilibili.com/video/{vid}" if BilibiliDownloaderV6._is_bvid(vid) else None
+
     async def download_collection(self, subscription_id: int, db: Session) -> Dict[str, Any]:
         """下载合集"""
         subscription = db.query(Subscription).filter(Subscription.id == subscription_id).first()
@@ -288,6 +303,18 @@ class BilibiliDownloaderV6:
         except Exception:
             pass
 
+        # 确保最终状态回落为 idle，避免 UI 长期显示 running
+        try:
+            self._set_sync_status(db, subscription_id, status='idle', extra={
+                'remote_total': remote_video_count,
+                'existing': len(existing_ids),
+                'pending': len(pending_list),
+                'updated_at': datetime.now().isoformat()
+            })
+            db.commit()
+        except Exception:
+            pass
+
         return {
             'subscription_id': subscription_id,
             'remote_total': remote_video_count,
@@ -335,10 +362,9 @@ class BilibiliDownloaderV6:
                     if str(cookie.dedeuserid).strip():
                         cf.write(f".bilibili.com\tTRUE\t/\tFALSE\t0\tDedeUserID\t{cookie.dedeuserid}\n")
 
-            # 公共 yt-dlp 参数（与V4对齐）：UA/Referer/重试/忽略警告/轻睡眠（不含 --cookies，稍后拼接）
+            # 公共 yt-dlp 参数（与V4对齐）：Referer/重试/忽略警告/轻睡眠（UA 与 cookies 由后续函数动态注入）
             common_args_base = [
                 'yt-dlp',
-                '--user-agent', get_user_agent(True),
                 '--referer', 'https://www.bilibili.com/',
                 '--force-ipv4',
                 '--sleep-interval', '2',
@@ -401,13 +427,96 @@ class BilibiliDownloaderV6:
             current_cookie = cookie
             # 初始 cookies.txt，与命令行参数组合
             cookies_path = _write_cookie_file(current_cookie)
-            common_args = common_args_base + ['--cookies', cookies_path]
+            # UA 模式：默认按需带 Cookie 的 UA；在重试过程中会在 cookie/nocookie 模式之间轮换
+            ua_requires_cookie = True
 
-            # 优先：手动分页抓取，避免一次性请求过大触发风控
-            # 分段大小、重试与退避由环境变量控制
+            def _rebuild_common_args() -> List[str]:
+                # 根据当前 UA 模式与 cookies_path 动态重建参数
+                ua = get_user_agent(ua_requires_cookie)
+                args = common_args_base + ['--user-agent', ua]
+                if cookies_path:
+                    args += ['--cookies', cookies_path]
+                return args
+
+            common_args = _rebuild_common_args()
+
+            # 优先尝试一次性抓取，减少多次 extractor 调用带来的风控与不稳定
+            # 可通过环境变量 LIST_PREFETCH_FIRST 关闭（默认开启）
+            def _env_true(v: Optional[str]) -> bool:
+                return str(v).strip().lower() in ('1', 'true', 'yes', 'on')
+
+            async def try_single_fetch_first() -> None:
+                nonlocal videos, last_err
+                # 1) 优先 -J 全量 JSON
+                cmd_b = common_args + ['-J', collection_url]
+                rc, out, err = await run_cmd(cmd_b)
+                if rc == 0:
+                    try:
+                        data = json.loads(out.decode('utf-8', errors='ignore') or '{}')
+                        entries = data.get('entries')
+                        if isinstance(entries, list):
+                            for it in entries:
+                                if isinstance(it, dict):
+                                    videos.append(it)
+                            trace_events.append({'type': 'prefetch_ok', 'method': '-J', 'count': len(entries or []), 'ts': datetime.now().isoformat()})
+                            return
+                    except Exception as e:
+                        last_err = e
+                else:
+                    last_err = err.decode('utf-8', errors='ignore')
+
+                # 2) 再试 --flat-playlist --dump-single-json（扁平化单次JSON）
+                cmd_a = common_args + ['--flat-playlist', '--dump-single-json', collection_url]
+                rc, out, err = await run_cmd(cmd_a)
+                if rc == 0:
+                    try:
+                        data = json.loads(out.decode('utf-8', errors='ignore') or '{}')
+                        entries = data.get('entries')
+                        if isinstance(entries, list):
+                            for it in entries:
+                                if isinstance(it, dict):
+                                    videos.append(it)
+                            trace_events.append({'type': 'prefetch_ok', 'method': '--dump-single-json', 'count': len(entries or []), 'ts': datetime.now().isoformat()})
+                            return
+                    except Exception as e:
+                        last_err = e
+                else:
+                    last_err = err.decode('utf-8', errors='ignore')
+
+                # 3) 最后行式兜底
+                cmd_c = common_args + ['--dump-json', '--flat-playlist', collection_url]
+                rc, out, err = await run_cmd(cmd_c)
+                if rc == 0:
+                    count_this = 0
+                    for line in (out.decode('utf-8', errors='ignore') or '').strip().split('\n'):
+                        if not line.strip():
+                            continue
+                        try:
+                            info = json.loads(line)
+                            if isinstance(info, dict):
+                                videos.append(info)
+                                count_this += 1
+                        except json.JSONDecodeError:
+                            continue
+                    if count_this > 0:
+                        trace_events.append({'type': 'prefetch_ok', 'method': '--dump-json', 'count': count_this, 'ts': datetime.now().isoformat()})
+                else:
+                    last_err = err.decode('utf-8', errors='ignore')
+
+            try:
+                if _env_true(os.getenv('LIST_PREFETCH_FIRST', '1')):
+                    await try_single_fetch_first()
+            except Exception:
+                # 预抓取失败不影响后续分页
+                pass
+
+            # 分页抓取（与预抓取合并）：
+            # - 预抓取先尝试一次性拿到尽可能多的条目；
+            # - 无论预抓取是否拿到部分条目，都继续分页补全，最终以去重合并的全集为准；
+            # - 分段大小、重试与退避由环境变量控制。
             chunk_size = self.list_chunk_size
             max_chunks = self.list_max_chunks
-            # 窗口化：允许通过 Settings 下调抓取块数；当禁用增量时，跳过窗口限制
+            # 窗口化：允许通过环境变量传入 extractor-args（例如为 bilibili 指定解析策略）
             if not disable_incremental:
                 try:
                     # 优先订阅级：sync:{sid}:scan_window_chunks
@@ -427,7 +536,14 @@ class BilibiliDownloaderV6:
                         logger.info(f"窗口化扫描：限制分页块数为 {max_chunks} (chunk_size={chunk_size})")
                 except Exception:
                     pass
+            # 若预抓取已获得部分条目，为减少重复请求，可跳过已覆盖的整段
             chunk_idx = 0
+            try:
+                if videos and isinstance(videos, list):
+                    # 用当前已得条目数近似估算可跳过的块数
+                    chunk_idx = max(0, int(len(videos) // max(1, chunk_size)))
+            except Exception:
+                chunk_idx = 0
             # 连续失败阈值：若连续失败达到阈值则结束分页，避免无谓重试
             try:
                 fail_streak_limit = int(os.getenv('LIST_FAIL_STREAK_LIMIT', '3'))
@@ -459,6 +575,7 @@ class BilibiliDownloaderV6:
             consecutive_seen = 0
             early_stop = False
 
+            # 预抓取不再跳过分页；始终进行分页以补全全集
             while chunk_idx < max_chunks and not early_stop:
                 start = chunk_idx * chunk_size + 1
                 end = start + chunk_size - 1
@@ -470,6 +587,7 @@ class BilibiliDownloaderV6:
 
                 # 每段重试次数与退避区间
                 attempt = 0
+                prefetch_triggered = False
                 out, err = b'', b''
                 rc = 0
                 t0 = datetime.now()
@@ -479,8 +597,20 @@ class BilibiliDownloaderV6:
                         break
                     attempt += 1
                     last_err = (err.decode('utf-8', errors='ignore') or '').strip()
-                    logger.warning(f"分页抓取 {start}-{end} 失败(rc={rc}) 第{attempt}次: {last_err}")
-                    # 第2次及以后尝试：轮换 Cookie 并重建 cookies.txt
+                    logger.warning(
+                        f"分页抓取 {start}-{end} 失败(rc={rc}) 第{attempt}次: {last_err} | "
+                        f"cookie_id={getattr(current_cookie,'id',None)} ua_mode={'cookie' if ua_requires_cookie else 'nocookie'}"
+                    )
+
+                    # 命中 yt-dlp 提示的 KeyError('data')/Extractor error 时，立即切换到一次性预抓取
+                    try:
+                        low = last_err.lower()
+                        if "keyerror('data')" in low or 'extractor error' in low:
+                            prefetch_triggered = True
+                            break
+                    except Exception:
+                        pass
+                    # 第2次及以后尝试：轮换 Cookie 与 UA，并重建参数
                     try:
                         if attempt >= 1:
                             alt = cookie_manager.get_available_cookie(db)
@@ -489,31 +619,71 @@ class BilibiliDownloaderV6:
                                 # 重建 cookie 文件并替换命令参数中的 --cookies 路径
                                 try:
                                     cookies_path = _write_cookie_file(current_cookie)
-                                    common_args = common_args_base + ['--cookies', cookies_path]
+                                    # 轮换 UA：在多次失败后切换 UA 模式
+                                    ua_requires_cookie = not ua_requires_cookie
+                                    common_args = _rebuild_common_args()
                                     cmd_chunk = common_args + [
                                         '--dump-json', '--flat-playlist',
                                         '--playlist-items', f'{start}-{end}',
                                         collection_url
                                     ]
-                                    logger.info(f"分页重试时切换到Cookie: {getattr(current_cookie, 'name', 'unknown')}")
+                                    logger.info(
+                                        f"分页重试切换 Cookie/UA: cookie={getattr(current_cookie,'name','unknown')} "
+                                        f"ua_mode={'cookie' if ua_requires_cookie else 'nocookie'} range={start}-{end}"
+                                    )
                                 except Exception as ce:
                                     logger.debug(f"重建cookie文件失败: {ce}")
+                            else:
+                                # 即使 Cookie 未切换成功，也尝试仅轮换 UA 以增加多样性
+                                try:
+                                    ua_requires_cookie = not ua_requires_cookie
+                                    common_args = _rebuild_common_args()
+                                    cmd_chunk = common_args + [
+                                        '--dump-json', '--flat-playlist',
+                                        '--playlist-items', f'{start}-{end}',
+                                        collection_url
+                                    ]
+                                    logger.info(
+                                        f"分页重试轮换 UA: ua_mode={'cookie' if ua_requires_cookie else 'nocookie'} range={start}-{end}"
+                                    )
+                                except Exception as ue:
+                                    logger.debug(f"轮换UA失败: {ue}")
                     except Exception:
                         pass
                     try:
                         await asyncio.sleep(random.uniform(self.list_backoff_min, self.list_backoff_max))
                     except Exception:
                         pass
+
+                # 若触发了预抓取快速分支，优先尝试一次性抓取
+                if prefetch_triggered:
+                    try:
+                        await try_single_fetch_first()
+                        if videos:
+                            # 成功则结束分页流程
+                            early_stop = True
+                            trace_events.append({'type': 'prefetch_switch_ok', 'range': f'{start}-{end}', 'ts': datetime.now().isoformat()})
+                            break
+                        else:
+                            trace_events.append({'type': 'prefetch_switch_failed', 'range': f'{start}-{end}', 'error': last_err, 'ts': datetime.now().isoformat()})
+                    except Exception as ee:
+                        trace_events.append({'type': 'prefetch_switch_exception', 'range': f'{start}-{end}', 'error': str(ee), 'ts': datetime.now().isoformat()})
+
                 if rc != 0:
                     # 当前段最终失败：记录并继续后续分页，允许跳过个别失败区间
                     fail_streak += 1
-                    logger.warning(f"分页抓取 {start}-{end} 最终失败，跳过该区间 (连续失败 {fail_streak}/{fail_streak_limit})")
+                    logger.warning(
+                        f"分页抓取 {start}-{end} 最终失败，跳过该区间 (连续失败 {fail_streak}/{fail_streak_limit}) | "
+                        f"cookie_id={getattr(current_cookie,'id',None)} ua_mode={'cookie' if ua_requires_cookie else 'nocookie'}"
+                    )
                     trace_events.append({
                         'type': 'chunk_failed',
                         'range': f'{start}-{end}',
                         'attempts': attempt,
                         'duration_ms': int((datetime.now() - t0).total_seconds()*1000),
-                        'error': last_err
+                        'error': last_err,
+                        'cookie_id': getattr(current_cookie, 'id', None),
+                        'ua_mode': 'cookie' if ua_requires_cookie else 'nocookie'
                     })
                     if fail_streak >= fail_streak_limit:
                         logger.warning("连续失败达到阈值，提前结束分页")
@@ -556,7 +726,9 @@ class BilibiliDownloaderV6:
                     'type': 'chunk_ok',
                     'range': f'{start}-{end}',
                     'count': count_this,
-                    'duration_ms': int((datetime.now() - t0).total_seconds()*1000)
+                    'duration_ms': int((datetime.now() - t0).total_seconds()*1000),
+                    'cookie_id': getattr(current_cookie, 'id', None),
+                    'ua_mode': 'cookie' if ua_requires_cookie else 'nocookie'
                 })
                 # 本段不足 chunk_size，说明已到结尾
                 if count_this < chunk_size:
@@ -584,57 +756,12 @@ class BilibiliDownloaderV6:
             
             videos = dedup_videos(videos)
 
-            # 回退：若分页抓取完全失败或未取到任何内容，走原有 A/B/C 策略
+            # 回退：若分页抓取未取到任何内容，再走 A/B/C（为兼容关闭预抓取的场景）
             if not videos:
-                # A. 扁平化单次JSON
-                cmd_a = common_args + ['--flat-playlist', '--dump-single-json', collection_url]
-                rc, out, err = await run_cmd(cmd_a)
-                if rc == 0:
-                    try:
-                        data = json.loads(out.decode('utf-8', errors='ignore') or '{}')
-                        entries = data.get('entries')
-                        if isinstance(entries, list):
-                            for it in entries:
-                                if isinstance(it, dict):
-                                    videos.append(it)
-                    except Exception as e:
-                        last_err = e
-                else:
-                    last_err = err.decode('utf-8', errors='ignore')
-
-            if not videos:
-                # B. 全量JSON（-J）
-                cmd_b = common_args + ['-J', collection_url]
-                rc, out, err = await run_cmd(cmd_b)
-                if rc == 0:
-                    try:
-                        data = json.loads(out.decode('utf-8', errors='ignore') or '{}')
-                        entries = data.get('entries')
-                        if isinstance(entries, list):
-                            for it in entries:
-                                if isinstance(it, dict):
-                                    videos.append(it)
-                    except Exception as e:
-                        last_err = e
-                else:
-                    last_err = err.decode('utf-8', errors='ignore')
-
-            if not videos:
-                # C. 行式输出兜底
-                cmd_c = common_args + ['--dump-json', '--flat-playlist', collection_url]
-                rc, out, err = await run_cmd(cmd_c)
-                if rc == 0:
-                    for line in (out.decode('utf-8', errors='ignore') or '').strip().split('\n'):
-                        if not line.strip():
-                            continue
-                        try:
-                            info = json.loads(line)
-                            if isinstance(info, dict):
-                                videos.append(info)
-                        except json.JSONDecodeError:
-                            continue
-                else:
-                    last_err = err.decode('utf-8', errors='ignore')
+                try:
+                    await try_single_fetch_first()
+                except Exception:
+                    pass
 
             # 最终去重（回退策略可能产生重复）
             videos = dedup_videos(videos)
@@ -987,13 +1114,6 @@ class BilibiliDownloaderV6:
             db.commit()
             
             try:
-                # 获取Cookie
-                cookie = cookie_manager.get_available_cookie(db)
-                if not cookie:
-                    raise Exception("没有可用的Cookie")
-                
-                await rate_limiter.wait()
-
                 # 若数据库已存在且文件存在，则直接跳过后续流程（避免重复下载/刷新nfo/info.json）
                 try:
                     existing = db.query(Video).filter_by(bilibili_id=video_id).first()
@@ -1003,6 +1123,15 @@ class BilibiliDownloaderV6:
                         task.completed_at = datetime.now()
                         db.commit()
                         logger.info(f"已存在本地文件，跳过下载与NFO生成: {video_id} -> {existing.video_path}")
+                        # 清理历史失败记录
+                        try:
+                            fkey = f"fail:{str(video_id)}"
+                            frow = db.query(Settings).filter(Settings.key == fkey).first()
+                            if frow:
+                                db.delete(frow)
+                                db.commit()
+                        except Exception:
+                            db.rollback()
                         return {
                             'video_id': video_id,
                             'title': existing.title or video_info.get('title') or video_id,
@@ -1013,10 +1142,111 @@ class BilibiliDownloaderV6:
                     # 容错：查询失败不影响主流程
                     pass
 
-                # 如果标题缺失或为 Unknown，则补抓元数据以保证命名正确
-                if not title or str(title).strip().lower() in ('', 'unknown'):
+                # 基于文件系统的预下载检查：扫描订阅目录的 info.json，匹配到相同 id 则直接短路
+                subscription = db.query(Subscription).filter(Subscription.id == subscription_id).first()
+                if not subscription:
+                    raise Exception("订阅不存在")
+                subscription_dir = Path(self._create_subscription_directory(subscription))
+                try:
+                    fmap = self._scan_existing_files(db, subscription_id=subscription_id, subscription_dir=subscription_dir)
+                    fpath = fmap.get(str(video_id)) or fmap.get(video_id)
+                    if fpath and Path(fpath).exists():
+                        # DB 回填：若 DB 缺失记录则根据 info.json 尝试补全最小字段
+                        existing = db.query(Video).filter_by(bilibili_id=video_id).first()
+                        if not existing:
+                            base = Path(fpath).with_suffix('')
+                            json_p = base.with_suffix('.info.json')
+                            thumb_p = base.with_suffix('.jpg')
+                            meta_title = None
+                            uploader = ''
+                            uploader_id = ''
+                            duration = None
+                            upload_date = None
+                            description = ''
+                            try:
+                                if json_p.exists():
+                                    with open(json_p, 'r', encoding='utf-8') as jf:
+                                        meta = json.load(jf)
+                                    if isinstance(meta, dict):
+                                        meta_title = meta.get('title') or meta.get('fulltitle') or None
+                                        uploader = meta.get('uploader', '')
+                                        uploader_id = meta.get('uploader_id', '')
+                                        duration = meta.get('duration')
+                                        upload_date = self._parse_upload_date(meta.get('upload_date'))
+                                        description = meta.get('description', '')
+                            except Exception as je:
+                                logger.debug(f"读取已有 JSON 失败（跳过DB补全但继续短路）: {je}")
+                            vrow = Video(
+                                bilibili_id=video_id,
+                                title=meta_title or (video_info.get('title') or str(video_id)),
+                                uploader=uploader,
+                                uploader_id=uploader_id,
+                                duration=duration,
+                                upload_date=upload_date,
+                                description=description,
+                                video_path=str(fpath),
+                                json_path=str(json_p) if json_p.exists() else None,
+                                thumbnail_path=str(thumb_p) if thumb_p.exists() else None,
+                                downloaded=True,
+                                subscription_id=subscription_id
+                            )
+                            try:
+                                db.add(vrow)
+                                db.commit()
+                            except Exception as de:
+                                db.rollback()
+                                logger.debug(f"写入 DB 回填记录失败（忽略）: {de}")
+                        # 标记任务完成并返回
+                        task.status = 'completed'
+                        task.progress = 100.0
+                        task.completed_at = datetime.now()
+                        db.commit()
+                        logger.info(f"文件系统已存在（通过 info.json 关联），跳过下载: {video_id} -> {fpath}")
+                        # 清理历史失败记录
+                        try:
+                            fkey = f"fail:{str(video_id)}"
+                            frow = db.query(Settings).filter(Settings.key == fkey).first()
+                            if frow:
+                                db.delete(frow)
+                                db.commit()
+                        except Exception:
+                            db.rollback()
+                        return {
+                            'video_id': video_id,
+                            'title': (existing.title if existing else (video_info.get('title') or str(video_id))),
+                            'success': True,
+                            'video_path': str(fpath)
+                        }
+                except Exception as se:
+                    logger.debug(f"文件系统预检查失败（忽略，继续下载流程）: {se}")
+
+                # 如果标题缺失/Unknown，或标题等于ID/BV号样式，则补抓元数据以保证命名正确
+                def _looks_like_id(s: Optional[str]) -> bool:
                     try:
-                        detail_url = video_info.get('webpage_url') or video_info.get('url') or f"https://www.bilibili.com/video/{video_id}"
+                        if not s:
+                            return True
+                        s = str(s).strip()
+                        if s == '':
+                            return True
+                        # 直接等于当前视频ID
+                        if video_id and s == str(video_id):
+                            return True
+                        # BV 号样式（容忍大小写）
+                        import re
+                        if re.fullmatch(r"[Bb][Vv][0-9A-Za-z]+", s):
+                            return True
+                        return False
+                    except Exception:
+                        return False
+
+                if _looks_like_id(title) or str(title).strip().lower() in ('', 'unknown'):
+                    try:
+                        detail_url = video_info.get('webpage_url') or video_info.get('url') or BilibiliDownloaderV6._safe_bilibili_url(video_id)
+                        # 获取 Cookie 在真正需要网络请求时再获取
+                        cookie = cookie_manager.get_available_cookie(db)
+                        if not cookie:
+                            raise Exception("没有可用的Cookie")
+                        await rate_limiter.wait()
                         meta = await self._fetch_video_metadata(detail_url, cookie)
                         if meta:
                             # 回填关键信息
@@ -1024,12 +1254,27 @@ class BilibiliDownloaderV6:
                             title = meta.get('title') or title
                     except Exception as e:
                         logger.warning(f"获取视频元数据失败，使用回退命名: {video_id} - {e}")
-                        if (not title) or (str(title).strip().lower() in ('', 'unknown')):
-                            title = str(video_id)
+                        # 留给下游文件名生成时统一处理为 "Untitled - {id}"
+                        pass
                 
-                # 生成安全的文件名
-                safe_title = self._sanitize_filename(title)
-                base_filename = f"{safe_title}"
+                # 生成安全的文件名（若标题仍不可用，则回退为“<uploader> - <date> - <ID>”的可读形式）
+                safe_title = self._sanitize_filename(title or '')
+                if (not safe_title) or safe_title.lower() in ('unknown', 'untitled') or safe_title == str(video_id) or safe_title.lower().startswith('bv'):
+                    uploader = self._sanitize_filename(video_info.get('uploader') or '')
+                    fmt_date = self._format_date(video_info.get('upload_date')) if video_info.get('upload_date') else ''
+                    parts = []
+                    if uploader:
+                        parts.append(uploader)
+                    if fmt_date:
+                        parts.append(fmt_date)
+                    # 确保至少包含一个可读前缀
+                    if not parts:
+                        parts.append('bilibili')
+                    parts.append(str(video_id))
+                    base_filename = ' - '.join(parts)
+                    base_filename = self._sanitize_filename(base_filename)
+                else:
+                    base_filename = f"{safe_title}"
                 
                 # 标题重名冲突处理：若同名文件存在且其JSON的id与当前不同，则回退为“标题 - BV号”
                 subscription = db.query(Subscription).filter(Subscription.id == subscription_id).first()
@@ -1054,9 +1299,14 @@ class BilibiliDownloaderV6:
                         # 无法读取则保守地回退加上BV号
                         base_filename = f"{safe_title} - {video_id}"
                 
+                # 下载视频（到此刻才需要 Cookie 与速率限制）
+                cookie = cookie_manager.get_available_cookie(db)
+                if not cookie:
+                    raise Exception("没有可用的Cookie")
+                await rate_limiter.wait()
                 # 下载视频
                 video_path = await self._download_with_ytdlp(
-                    video_info.get('url', f"https://www.bilibili.com/video/{video_id}"),
+                    (video_info.get('url') or BilibiliDownloaderV6._safe_bilibili_url(video_id)),
                     base_filename,
                     subscription_dir,
                     subscription_id,
@@ -1118,6 +1368,15 @@ class BilibiliDownloaderV6:
                     cookie_manager.reset_failures(db, cookie.id)
                 except Exception:
                     pass
+                # 清理该视频的失败记录
+                try:
+                    fkey = f"fail:{str(video_id)}"
+                    frow = db.query(Settings).filter(Settings.key == fkey).first()
+                    if frow:
+                        db.delete(frow)
+                        db.commit()
+                except Exception:
+                    db.rollback()
                 
                 logger.info(f"下载完成: {title}")
                 return {
@@ -1173,6 +1432,36 @@ class BilibiliDownloaderV6:
                             if tok in msg:
                                 permanent = True
                                 break
+                    # 写入失败分类（Settings: fail:{bvid}）
+                    try:
+                        fkey = f"fail:{str(video_id)}"
+                        frow = db.query(Settings).filter(Settings.key == fkey).first()
+                        payload = {}
+                        if frow and frow.value:
+                            try:
+                                payload = json.loads(frow.value)
+                                if not isinstance(payload, dict):
+                                    payload = {}
+                            except Exception:
+                                payload = {}
+                        retry_count = int(payload.get('retry_count') or 0)
+                        payload.update({
+                            'class': 'permanent' if permanent else 'temporary',
+                            'message': (msg[:500] if isinstance(msg, str) else str(msg)) if msg else '',
+                            'last_at': datetime.now().isoformat(),
+                            'sid': int(subscription_id) if subscription_id is not None else None,
+                            'retry_count': (retry_count + 1)
+                        })
+                        val = json.dumps(payload, ensure_ascii=False)
+                        if frow:
+                            frow.value = val
+                            frow.description = frow.description or '失败分类'
+                        else:
+                            db.add(Settings(key=fkey, value=val, description='失败分类'))
+                        db.commit()
+                    except Exception as fe:
+                        db.rollback()
+                        logger.debug(f"写入失败分类失败: {fe}")
                     if permanent:
                         logger.info(f"检测到永久不可用视频，跳过加入重试队列: {video_id} - {msg}")
                     else:
@@ -1367,13 +1656,19 @@ class BilibiliDownloaderV6:
                         raise
 
             # 多级格式回退策略，确保能下载到视频文件
+            try:
+                max_h = int(os.getenv('MAX_HEIGHT', '1080'))
+                if max_h <= 0:
+                    max_h = 1080
+            except Exception:
+                max_h = 1080
             formats_to_try = [
-                'bestvideo*[height<=1080]+bestaudio/best[height<=1080]',  # 首选1080p
-                'bestvideo[height<=720]+bestaudio/best[height<=720]',     # 回退到720p
-                'bv*+ba/b*',                                              # 通用最佳视频+音频
-                'best[height<=1080]',                                     # 单流1080p
-                'best[height<=720]',                                      # 单流720p
-                'best'                                                    # 最后的兜底
+                f"bestvideo*[height<={max_h}]+bestaudio/best[height<={max_h}]",  # 首选受控分辨率
+                'bv*+ba/b*',                                                      # 提前尝试通用最佳组合，覆盖部分站点限制
+                'bestvideo*+bestaudio/best',                                      # 无分辨率上限的双轨兜底
+                f"best[height<={max_h}]",                                       # 单流受控分辨率
+                'best[height<=720]',                                              # 进一步降级
+                'best'                                                            # 最后的兜底
             ]
             
             success = False
@@ -1407,6 +1702,98 @@ class BilibiliDownloaderV6:
                     logger.warning(f"格式 {format_str} 异常: {e}")
                     continue
             
+            # 若预设回退全部失败，且失败原因为“格式不可用”，进行一次格式探测并按可用清单重试（仅针对当前视频）
+            if not success:
+                lower_err = (last_error or '').lower()
+                if any(k in lower_err for k in [
+                    'requested format is not available', 'no video formats found', 'format not available'
+                ]):
+                    logger.info("预设格式均失败，尝试进行一次格式探测(-J)以选择可用格式")
+                    async def probe_formats() -> Optional[dict]:
+                        cmd = base_cmd + common_args + [
+                            '-J',  # 输出JSON包含可用formats
+                            '--no-warnings',
+                            url
+                        ]
+                        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                        try:
+                            out, err = await asyncio.wait_for(proc.communicate(), timeout=self.download_cmd_timeout)
+                        except asyncio.TimeoutError:
+                            try:
+                                proc.terminate(); await asyncio.wait_for(proc.wait(), timeout=5.0)
+                            except asyncio.TimeoutError:
+                                proc.kill()
+                            return None
+                        if proc.returncode != 0:
+                            logger.warning(f"格式探测失败: {(err or b'').decode('utf-8', errors='ignore')}")
+                            return None
+                        try:
+                            data = json.loads((out or b'{}').decode('utf-8', errors='ignore'))
+                            return data
+                        except Exception as e:
+                            logger.warning(f"解析格式探测JSON失败: {e}")
+                            return None
+
+                    probe = await probe_formats()
+                    picked_format = None
+                    if probe and isinstance(probe.get('formats'), list):
+                        fmts = probe['formats']
+                        # 选择策略：
+                        # 1) 优先选不高于 max_h 的视频轨最高高度 + 最佳音轨
+                        # 2) 若无≤max_h的视频，则选最高高度的视频 + 最佳音轨
+                        # 3) 若无分离轨，仅有单轨best，选择扩展名mp4优先
+                        def parse_int(x, default=0):
+                            try:
+                                return int(x) if x is not None else default
+                            except Exception:
+                                return default
+                        # 拆分视频轨/音频轨/单轨
+                        videos_f = [f for f in fmts if f.get('vcodec', 'none') != 'none']
+                        audios_f = [f for f in fmts if f.get('acodec', 'none') != 'none' and f.get('vcodec', 'none') == 'none']
+                        single_f = [f for f in fmts if f.get('vcodec', 'none') != 'none' and f.get('acodec', 'none') != 'none']
+                        # 目标上限与排序
+                        try:
+                            max_h = int(os.getenv('MAX_HEIGHT', '1080'))
+                            if max_h <= 0:
+                                max_h = 1080
+                        except Exception:
+                            max_h = 1080
+                        # 按高度排序视频轨
+                        videos_f.sort(key=lambda f: (parse_int(f.get('height')), parse_int(f.get('tbr'))), reverse=True)
+                        audios_f.sort(key=lambda f: (parse_int(f.get('abr')), parse_int(f.get('tbr'))), reverse=True)
+                        single_f.sort(key=lambda f: (parse_int(f.get('height')), parse_int(f.get('tbr'))), reverse=True)
+
+                        def pick_audio():
+                            return audios_f[0] if audios_f else None
+
+                        def pick_video_le_cap():
+                            for f in videos_f:
+                                if parse_int(f.get('height')) <= max_h:
+                                    return f
+                            return None
+
+                        v = pick_video_le_cap() or (videos_f[0] if videos_f else None)
+                        a = pick_audio()
+                        if v and a and v.get('format_id') and a.get('format_id'):
+                            picked_format = f"{v['format_id']}+{a['format_id']}"
+                        elif single_f:
+                            # 单轨兜底（尽量选mp4）
+                            mp4_single = [f for f in single_f if str(f.get('ext')).lower() == 'mp4']
+                            s = mp4_single[0] if mp4_single else single_f[0]
+                            if s.get('format_id'):
+                                picked_format = s['format_id']
+
+                    if picked_format:
+                        logger.info(f"格式探测选择: {picked_format}，尝试重新下载")
+                        ret, out, err = await run_yt_dlp(picked_format)
+                        if ret == 0:
+                            success = True
+                        else:
+                            last_error = (err or b'').decode('utf-8', errors='ignore')
+                            logger.warning(f"探测后下载仍失败: {last_error}")
+                    else:
+                        logger.warning("未能从格式探测中选出有效格式")
+
             if not success:
                 raise Exception(f"所有格式尝试失败，最后错误: {last_error}")
                 
@@ -1609,6 +1996,9 @@ class BilibiliDownloaderV6:
         if len(filename) > 100:
             filename = filename[:100]
         
+        # 保证非空，避免回退到纯ID
+        if not filename:
+            return 'untitled'
         return filename
     
     def _parse_upload_date(self, date_str: str) -> Optional[datetime]:

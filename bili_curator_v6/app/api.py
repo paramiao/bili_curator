@@ -8,8 +8,10 @@ from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from sqlalchemy import func, case
-from typing import List, Optional, Dict, Any
+from typing import Any, Dict, List, Optional, Tuple
+import re
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 import logging
@@ -24,15 +26,30 @@ from .models import (
     get_db
 )
 from .scheduler import scheduler, task_manager
+from .services.subscription_stats import recompute_all_subscriptions
 from .cookie_manager import cookie_manager
 from .downloader import downloader
 from .video_detection_service import video_detection_service
 from .queue_manager import yt_dlp_semaphore, get_subscription_lock, request_queue
 from .services.http_utils import get_user_agent
-from .consistency_checker import consistency_checker, periodic_consistency_check
+from .consistency_checker import consistency_checker, periodic_consistency_check, startup_consistency_check
+from .services.remote_sync_service import remote_sync_service
+from .auto_import import auto_import_service
 
 # Logger
 logger = logging.getLogger(__name__)
+
+# 本地工具：BVID 校验与安全 URL 构造（避免非法ID拼接URL）
+def _is_bvid(vid: str) -> bool:
+    try:
+        return bool(vid) and bool(re.match(r'^BV[0-9A-Za-z]{10}$', str(vid)))
+    except Exception:
+        return False
+
+def _safe_bilibili_url(vid: Optional[str]) -> Optional[str]:
+    if not vid:
+        return None
+    return f"https://www.bilibili.com/video/{vid}" if _is_bvid(vid) else None
 
 
 
@@ -80,12 +97,94 @@ app = FastAPI(
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # ------------------------------
+# 应用启动与关闭事件
+# ------------------------------
+@app.on_event("startup")
+async def _on_startup():
+    """服务启动自动执行：
+    - 启动调度器
+    - 执行一次本地优先的一致性修复（在后台线程避免阻塞事件循环）
+    - 全量重算订阅统计（本地优先口径）
+    """
+    try:
+        scheduler.start()
+    except Exception as e:
+        logger.warning(f"启动调度器失败：{e}")
+
+    # 一致性修复：放到线程，避免阻塞
+    try:
+        await asyncio.to_thread(startup_consistency_check)
+    except Exception as e:
+        logger.warning(f"启动一致性修复异常：{e}")
+
+    # 启动后统一重算订阅统计
+    db = next(get_db())
+    try:
+        recompute_all_subscriptions(db, touch_last_check=False)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.warning(f"启动后重算订阅统计失败：{e}")
+    finally:
+        db.close()
+
+    # 启动后后台批量校验 Cookie（不阻塞启动）
+    async def _validate_cookies_bg():
+        try:
+            await asyncio.to_thread(cookie_manager.batch_validate_cookies)
+        except Exception as e:
+            logger.warning(f"启动后 Cookie 批量校验异常：{e}")
+    try:
+        asyncio.create_task(_validate_cookies_bg())
+    except Exception as e:
+        logger.debug(f"schedule cookie batch validate failed: {e}")
+
+
+# ------------------------------
+# 自动导入/自动关联 API
+# ------------------------------
+class AutoImportBody(BaseModel):
+    recompute: Optional[bool] = False  # 是否在完成后触发一次统计重算
+
+@app.post("/api/auto-import/scan-associate")
+async def api_auto_import_scan_associate(body: AutoImportBody = None):
+    """触发一次后台的本地扫描导入 + 自动关联订阅。
+    - 立即返回 {triggered: true}
+    - 工作在后台线程中串行执行：scan_and_import -> auto_associate_subscriptions
+    - 可选：完成后触发一次 recompute_all_subscriptions（当 body.recompute 为 True）
+    """
+    async def _run_job():
+        # 放在线程池，避免阻塞事件循环
+        try:
+            await asyncio.to_thread(auto_import_service.scan_and_import)
+        except Exception as e:
+            logger.warning(f"scan_and_import 异常：{e}")
+        try:
+            await asyncio.to_thread(auto_import_service.auto_associate_subscriptions)
+        except Exception as e:
+            logger.warning(f"auto_associate_subscriptions 异常：{e}")
+        if body and body.recompute:
+            ldb = next(get_db())
+            try:
+                recompute_all_subscriptions(ldb, touch_last_check=False)
+                ldb.commit()
+            except Exception as e:
+                ldb.rollback()
+                logger.warning(f"recompute_all_subscriptions 失败：{e}")
+            finally:
+                ldb.close()
+
+    asyncio.create_task(_run_job())
+    return {"triggered": True}
+
+# ------------------------------
 # 轻量同步 API（触发 + 状态）
 # ------------------------------
 
 class SyncTriggerBody(BaseModel):
     sid: Optional[int] = None
     mode: Optional[str] = "lite_head"  # lite_head | backfill_failures | full_head_small (保留向前兼容)
+    force: Optional[bool] = False  # 强制刷新：绕过TTL与缓存，直接执行远端对比
 
 @app.post("/api/sync/trigger")
 async def api_sync_trigger(body: SyncTriggerBody, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
@@ -98,6 +197,139 @@ async def api_sync_trigger(body: SyncTriggerBody, background_tasks: BackgroundTa
     async def _run_for_sid(sid: int):
         ldb = next(get_db())
         try:
+            # 读取最近一次 sync 状态，决定是否复用缓存或跳过重复抓取
+            try:
+                status_key = f"sync:{sid}:status"
+                srow = ldb.query(Settings).filter(Settings.key == status_key).first()
+                status_data = json.loads(srow.value) if (srow and srow.value) else {}
+            except Exception:
+                status_data = {}
+
+            status_str = (status_data.get('status') or '').strip()
+            remote_total_cached = status_data.get('remote_total')
+            # 解析时间戳（updated_at 优先，其次 ts）
+            ts_raw = status_data.get('updated_at') or status_data.get('ts')
+            ts_dt = None
+            try:
+                if ts_raw:
+                    ts_dt = datetime.fromisoformat(ts_raw)
+            except Exception:
+                ts_dt = None
+
+            # TTL：REMOTE_TOTAL_TTL_MIN，默认60分钟
+            try:
+                ttl_min = int(os.getenv('REMOTE_TOTAL_TTL_MIN', '60'))
+            except Exception:
+                ttl_min = 60
+            fresh = False
+            if ts_dt is not None:
+                try:
+                    fresh = (datetime.now() - ts_dt) <= timedelta(minutes=max(1, ttl_min))
+                except Exception:
+                    fresh = False
+
+            # 若已有运行中：
+            # - 若缓存新鲜且已有 remote_total，则直接按本地下载数刷新 pending，并将状态置为 idle 后返回
+            # - 否则保持早退，避免并发外网抓取
+            if status_str == 'running':
+                if fresh and isinstance(remote_total_cached, int):
+                    try:
+                        downloaded = ldb.query(Video).filter(Video.subscription_id == sid, Video.video_path.isnot(None)).count()
+                        if downloaded > int(remote_total_cached):
+                            raise RuntimeError("cached remote_total suspicious on running; skip idle override")
+                        pend = max(0, int(remote_total_cached) - int(downloaded))
+                        pend_key = f"agg:{sid}:pending_estimated"
+                        pend_val = str(pend)
+                        s = ldb.query(Settings).filter(Settings.key == pend_key).first()
+                        if not s:
+                            s = Settings(key=pend_key, value=pend_val)
+                            ldb.add(s)
+                        else:
+                            s.value = pend_val
+                        ldb.commit()
+                        # 将状态置为 idle（UPSERT）
+                        status_key = f"sync:{sid}:status"
+                        payload = {
+                            'status': 'idle',
+                            'updated_at': datetime.now().isoformat(),
+                            'remote_total': int(remote_total_cached),
+                            'existing': int(downloaded),
+                            'pending': int(pend),
+                        }
+                        val = json.dumps(payload, ensure_ascii=False)
+                        ldb.execute(text("""
+                            INSERT INTO settings (key, value, description)
+                            VALUES (:key, :val, '订阅同步状态')
+                            ON CONFLICT(key) DO UPDATE SET
+                              value = :val,
+                              updated_at = CURRENT_TIMESTAMP
+                        """), {"key": status_key, "val": val})
+                        ldb.commit()
+                    except Exception as e:
+                        logger.debug(f"running->idle override failed: {e}")
+                        ldb.rollback()
+                    return
+                else:
+                    return
+
+            # 若未强制，且缓存新鲜且有 remote_total，则仅用本地下载数重新计算 pending，并写入缓存，避免外网抓取
+            if (not (body and body.force)) and fresh and isinstance(remote_total_cached, int):
+                try:
+                    downloaded = ldb.query(Video).filter(Video.subscription_id == sid, Video.video_path.isnot(None)).count()
+                    # 纠偏：如本地下载数 > 缓存远端数，认为缓存可疑，转为强制刷新
+                    if downloaded > int(remote_total_cached):
+                        raise RuntimeError("cached remote_total suspicious; force refresh")
+                    pend = max(0, int(remote_total_cached) - int(downloaded))
+                    pend_key = f"agg:{sid}:pending_estimated"
+                    pend_val = str(pend)
+                    s = ldb.query(Settings).filter(Settings.key == pend_key).first()
+                    if not s:
+                        s = Settings(key=pend_key, value=pend_val)
+                        ldb.add(s)
+                    else:
+                        s.value = pend_val
+                    ldb.commit()
+                    # 提前返回前，确保 sync 状态被设置为 idle（避免历史 running 残留）
+                    try:
+                        status_key = f"sync:{sid}:status"
+                        payload = {
+                            'status': 'idle',
+                            'updated_at': datetime.now().isoformat(),
+                            'remote_total': int(remote_total_cached),
+                        }
+                        val = json.dumps(payload, ensure_ascii=False)
+                        ldb.execute(text("""
+                            INSERT INTO settings (key, value, description)
+                            VALUES (:key, :val, '订阅同步状态')
+                            ON CONFLICT(key) DO UPDATE SET
+                              value = :val,
+                              updated_at = CURRENT_TIMESTAMP
+                        """), {"key": status_key, "val": val})
+                        ldb.commit()
+                    except Exception as e:
+                        logger.debug(f"early-return set idle failed: {e}")
+                        ldb.rollback()
+                    return
+                except Exception:
+                    # 失败则退回到完整计算
+                    pass
+
+            # 走轻量路径：先把状态标记为 running，让前端立刻显示“获取中”，再后台计算
+            try:
+                sdata = {
+                    'status': 'running',
+                    'updated_at': datetime.now().isoformat(),
+                }
+                srow = ldb.query(Settings).filter(Settings.key == status_key).first()
+                if not srow:
+                    srow = Settings(key=status_key, value=json.dumps(sdata, ensure_ascii=False))
+                    ldb.add(srow)
+                else:
+                    srow.value = json.dumps(sdata, ensure_ascii=False)
+                ldb.commit()
+            except Exception:
+                ldb.rollback()
+
             try:
                 info = await downloader.compute_pending_list(sid, ldb)
                 # 将 pending 写入缓存（与调度器行为一致，确保前端立刻可见）
@@ -110,8 +342,50 @@ async def api_sync_trigger(body: SyncTriggerBody, background_tasks: BackgroundTa
                 else:
                     s.value = pend_val
                 ldb.commit()
+                # 成功：将 sync 状态从 running 更新为 idle（使用 UPSERT，避免被并发覆盖）
+                try:
+                    status_key = f"sync:{sid}:status"
+                    payload = {
+                        'status': 'idle',
+                        'updated_at': datetime.now().isoformat(),
+                        'remote_total': info.get('remote_total'),
+                        'existing': info.get('existing'),
+                        'pending': info.get('pending'),
+                    }
+                    val = json.dumps(payload, ensure_ascii=False)
+                    ldb.execute(text("""
+                        INSERT INTO settings (key, value, description)
+                        VALUES (:key, :val, '订阅同步状态')
+                        ON CONFLICT(key) DO UPDATE SET
+                          value = :val,
+                          updated_at = CURRENT_TIMESTAMP
+                    """), {"key": status_key, "val": val})
+                    ldb.commit()
+                except Exception as e:
+                    logger.debug(f"post-compute set idle failed: {e}")
+                    ldb.rollback()
             except Exception as e:
                 logger.warning(f"sync trigger (sid={sid}) failed: {e}")
+                # 失败：将 sync 状态更新为 failed，避免长时间停留在 running
+                try:
+                    status_key = f"sync:{sid}:status"
+                    payload = {
+                        'status': 'failed',
+                        'error': str(e),
+                        'updated_at': datetime.now().isoformat(),
+                    }
+                    val = json.dumps(payload, ensure_ascii=False)
+                    ldb.execute(text("""
+                        INSERT INTO settings (key, value, description)
+                        VALUES (:key, :val, '订阅同步状态')
+                        ON CONFLICT(key) DO UPDATE SET
+                          value = :val,
+                          updated_at = CURRENT_TIMESTAMP
+                    """), {"key": status_key, "val": val})
+                    ldb.commit()
+                except Exception as ee:
+                    logger.debug(f"post-compute set failed failed: {ee}")
+                    ldb.rollback()
         finally:
             ldb.close()
 
@@ -128,6 +402,197 @@ async def api_sync_trigger(body: SyncTriggerBody, background_tasks: BackgroundTa
     else:
         asyncio.create_task(_run_global())
         return {"triggered": True, "scope": "global"}
+
+# ------------------------------
+# 增量管线管理 API（灰度与本地验证）
+# ------------------------------
+class IncrementalToggleBody(BaseModel):
+    sid: Optional[int] = None  # None=全局
+    enabled: bool
+
+@app.post("/api/incremental/toggle")
+async def incremental_toggle(body: IncrementalToggleBody, db: Session = Depends(get_db)):
+    """开启/关闭增量管线：
+    - 全局：sync:global:enable_incremental_pipeline = "1"|"0"
+    - 订阅：sync:{sid}:enable_incremental = "1"|"0"（覆盖全局）
+    """
+    try:
+        key = (
+            'sync:global:enable_incremental_pipeline'
+            if (body.sid is None) else f'sync:{int(body.sid)}:enable_incremental'
+        )
+        val = '1' if body.enabled else '0'
+        row = db.query(Settings).filter(Settings.key == key).first()
+        if not row:
+            row = Settings(key=key, value=val)
+            db.add(row)
+        else:
+            row.value = val
+        db.commit()
+        return {"ok": True, "key": key, "value": val}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
+class CookieToggleBody(BaseModel):
+    id: int
+    is_active: bool
+
+@app.post("/api/cookie/toggle")
+async def cookie_toggle(body: CookieToggleBody, db: Session = Depends(get_db)):
+    """启用/禁用指定 Cookie。"""
+    try:
+        row = db.query(Cookie).filter(Cookie.id == int(body.id)).first()
+        if not row:
+            raise HTTPException(status_code=404, detail="cookie not found")
+        row.is_active = bool(body.is_active)
+        db.commit()
+        return {"id": row.id, "name": row.name, "is_active": bool(row.is_active)}
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
+@app.post("/api/cookie/validate-all")
+async def cookie_validate_all():
+    """后台触发批量 Cookie 校验，立即返回。"""
+    async def _run():
+        try:
+            await asyncio.to_thread(cookie_manager.batch_validate_cookies)
+        except Exception as e:
+            logger.warning(f"validate-all 异常：{e}")
+    try:
+        asyncio.create_task(_run())
+        return {"triggered": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+class HeadSnapshotBody(BaseModel):
+    sid: int
+    head_ids: List[str]
+    cap: Optional[int] = 200
+    reset_cursor: Optional[bool] = True
+
+@app.post("/api/incremental/head-snapshot")
+async def set_head_snapshot(body: HeadSnapshotBody, db: Session = Depends(get_db)):
+    """写入订阅的 head_snapshot（用于不出网验证M1增量入队）。支持可选重置 last_cursor。"""
+    try:
+        # 规范化与裁剪
+        arr = [str(x) for x in (body.head_ids or []) if isinstance(x, (str, int))]
+        if not arr:
+            raise HTTPException(status_code=400, detail="head_ids 为空")
+        cap = max(1, int(body.cap or 200))
+        remote_sync_service.update_head_snapshot(db, int(body.sid), arr[:cap])
+        if body.reset_cursor:
+            remote_sync_service.set_last_cursor(db, int(body.sid), None)
+        return {"ok": True, "sid": int(body.sid), "size": len(arr[:cap])}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class RefreshHeadBody(BaseModel):
+    sid: int
+    cap: Optional[int] = 200
+    reset_cursor: Optional[bool] = True
+
+@app.post("/api/incremental/refresh-head")
+async def refresh_head_snapshot(body: RefreshHeadBody, db: Session = Depends(get_db)):
+    """触发订阅的远端头部快照刷新（后台异步，不阻塞）。
+    - 调用 `remote_sync_service.refresh_head_snapshot()` 抓取前 cap 个 ID 并写入。
+    - 刷新过程会更新 `sync:{sid}:status` 为 running/idle/failed。
+    """
+    if not body or not body.sid:
+        raise HTTPException(status_code=400, detail="缺少 sid")
+
+    async def _run():
+        ldb = next(get_db())
+        try:
+            await remote_sync_service.refresh_head_snapshot(ldb, int(body.sid), cap=int(body.cap or 200), reset_cursor=bool(body.reset_cursor))
+        except Exception as e:
+            logger.warning(f"refresh head failed (sid={body.sid}): {e}")
+        finally:
+            ldb.close()
+
+    # 使用 asyncio.create_task 启动后台任务
+    asyncio.create_task(_run())
+    return {"triggered": True, "sid": int(body.sid)}
+
+
+@app.get("/api/incremental/status/{sid}")
+async def get_incremental_status(sid: int, db: Session = Depends(get_db)):
+    """查询订阅增量状态：
+    返回 { sid, status, updated_at, remote_total_cached, head_size, last_cursor }。
+    """
+    try:
+        status_key = f"sync:{sid}:status"
+        head_key = f"sync:{sid}:head_snapshot"
+        cursor_key = f"sync:{sid}:last_cursor"
+        total_key = f"sync:{sid}:remote_total_cached"
+
+        rows = db.query(Settings).filter(Settings.key.in_([status_key, head_key, cursor_key, total_key])).all()
+        smap = {r.key: r.value for r in rows if r and r.key}
+
+        # status
+        status = None
+        updated_at = None
+        try:
+            sval = smap.get(status_key)
+            if sval:
+                data = json.loads(sval)
+                status = data.get('status')
+                updated_at = data.get('updated_at') or data.get('ts')
+        except Exception:
+            pass
+
+        # head size
+        head_size = None
+        try:
+            hval = smap.get(head_key)
+            if hval:
+                arr = json.loads(hval)
+                if isinstance(arr, list):
+                    head_size = len(arr)
+        except Exception:
+            pass
+
+        # last cursor
+        last_cursor = None
+        try:
+            cval = smap.get(cursor_key)
+            if cval:
+                c = json.loads(cval)
+                if isinstance(c, dict):
+                    last_cursor = c.get('last_seen')
+        except Exception:
+            pass
+
+        # remote total cached
+        remote_total_cached = None
+        try:
+            tval = smap.get(total_key)
+            if tval is not None:
+                remote_total_cached = int(str(tval).strip())
+        except Exception:
+            pass
+
+        return {
+            'sid': int(sid),
+            'status': status,
+            'updated_at': updated_at,
+            'remote_total_cached': remote_total_cached,
+            'head_size': head_size,
+            'last_cursor': last_cursor,
+        }
+    finally:
+        db.close()
 
 
 @app.get("/api/sync/status")
@@ -163,8 +628,11 @@ async def api_sync_status(sid: Optional[int] = None, db: Session = Depends(get_d
                 "remote_total": None,
                 "pending_estimated": None,
                 "retry_queue_len": 0,
+                "fail_total": None,
+                "fail_perm": None,
                 "status": None,
                 "updated_at": None,
+                "is_fetching": False,
             }
             # sync status
             try:
@@ -174,6 +642,9 @@ async def api_sync_status(sid: Optional[int] = None, db: Session = Depends(get_d
                     stat["status"] = data.get("status")
                     stat["remote_total"] = data.get("remote_total")
                     stat["updated_at"] = data.get("updated_at") or data.get("ts")
+                    # 远端总数尚未写入且状态为运行中，视为“获取中”
+                    if (stat["status"] == 'running') and (stat["remote_total"] is None):
+                        stat["is_fetching"] = True
             except Exception:
                 pass
             # pending cached
@@ -194,40 +665,68 @@ async def api_sync_status(sid: Optional[int] = None, db: Session = Depends(get_d
                 pass
             items.append(stat)
 
+        # 如仅查询单个订阅，补充该订阅的失败统计（避免全量查询过重）
+        if sid is not None and len(items) == 1:
+            try:
+                fails = db.query(Settings).filter(Settings.key.like('fail:%')).all()
+                total = 0
+                perm = 0
+                for r in fails:
+                    try:
+                        data = json.loads(r.value) if (r and r.value) else {}
+                        if not isinstance(data, dict):
+                            continue
+                        if int(data.get('sid') or -1) == int(sid):
+                            total += 1
+                            if (data.get('class') == 'permanent'):
+                                perm += 1
+                    except Exception:
+                        continue
+                items[0]['fail_total'] = total
+                items[0]['fail_perm'] = perm
+            except Exception:
+                pass
+
         return {"items": items}
     finally:
         db.close()
 app.mount("/web", StaticFiles(directory="web/dist"), name="web")
 
-# 根路径返回前端页面（优先SPA，fallback到admin.html）
+# 根路径仅返回 SPA（web/dist/index.html），缺失则直接报错，避免回退到 legacy 页面造成混淆
 @app.get("/", response_class=HTMLResponse)
 async def read_root():
-    """返回首页：优先 web/dist/index.html；缺失则回退 static/admin.html"""
+    """返回 SPA 首页：仅 web/dist/index.html。缺失则 500 提示构建缺失。"""
     try:
         with open("web/dist/index.html", "r", encoding="utf-8") as f:
             return HTMLResponse(content=f.read())
     except FileNotFoundError:
-        try:
-            with open("static/admin.html", "r", encoding="utf-8") as f:
-                return HTMLResponse(content=f.read())
-        except FileNotFoundError:
-            return HTMLResponse(content="""
-            <html>
-                <head><title>bili_curator V6</title></head>
-                <body>
-                    <h1>🎬 bili_curator V6</h1>
-                    <p>前端页面正在构建中...</p>
-                    <p>入口: <a href="/">/</a></p>
-                    <p>API文档: <a href="/docs">/docs</a></p>
-                </body>
-            </html>
-            """)
+        logger.warning("SPA index.html 缺失：web/dist/index.html 不存在")
+        return HTMLResponse(content="""
+        <html>
+            <head><title>bili_curator V6</title></head>
+            <body>
+                <h1>🎬 bili_curator V6</h1>
+                <p style='color:#b91c1c;'>前端构建缺失：未找到 web/dist/index.html</p>
+                <p>请先构建前端或确认部署包包含 SPA 产物。</p>
+                <p>API文档: <a href="/docs">/docs</a></p>
+            </body>
+        </html>
+        """, status_code=500)
+
+# Legacy 管理页面：仅当仍保留文件时可访问
+@app.get("/legacy/admin", response_class=HTMLResponse)
+async def legacy_admin():
+    try:
+        with open("static/admin.html", "r", encoding="utf-8") as f:
+            return HTMLResponse(content=f.read())
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="legacy admin 已移除")
 
 @app.get("/admin")
 async def read_admin():
-    """兼容旧入口，301 重定向到根路径，避免重复入口"""
+    """兼容旧入口，301 重定向到 /legacy/admin，避免与首页混淆"""
     from fastapi.responses import RedirectResponse
-    return RedirectResponse(url="/", status_code=301)
+    return RedirectResponse(url="/legacy/admin", status_code=301)
 
 # 系统状态API
 @app.get("/api/status")
@@ -239,7 +738,46 @@ async def get_system_status(db: Session = Depends(get_db)):
     total_videos = db.query(Video).count()
     downloaded_videos = db.query(Video).filter(Video.video_path.isnot(None)).count()
     active_cookies = db.query(Cookie).filter(Cookie.is_active == True).count()
+    total_cookies = db.query(Cookie).count()
     
+    # 调度器任务列表
+    try:
+        scheduler_jobs = scheduler.get_jobs()
+    except Exception:
+        scheduler_jobs = []
+
+    # 运行中任务摘要（EnhancedTaskManager）
+    try:
+        running_map = task_manager.get_all_tasks()
+        running_tasks = list(running_map.values()) if isinstance(running_map, dict) else running_map
+    except Exception:
+        running_tasks = []
+
+    # 最近下载任务（截取最近20条）
+    try:
+        recent_rows = (
+            db.query(DownloadTask)
+            .order_by(DownloadTask.updated_at.desc())
+            .limit(20)
+            .all()
+        )
+        recent_tasks = [
+            {
+                "id": r.id,
+                "bilibili_id": r.bilibili_id,
+                "subscription_id": r.subscription_id,
+                "status": r.status,
+                "progress": float(r.progress or 0.0),
+                "started_at": r.started_at.isoformat() if r.started_at else None,
+                "completed_at": r.completed_at.isoformat() if r.completed_at else None,
+                "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+                "error_message": r.error_message,
+            }
+            for r in recent_rows
+        ]
+    except Exception:
+        recent_tasks = []
+
     return {
         "status": "running",
         "timestamp": datetime.now().isoformat(),
@@ -251,9 +789,14 @@ async def get_system_status(db: Session = Depends(get_db)):
             "downloaded_videos": downloaded_videos,
             "active_cookies": active_cookies
         },
-        "recent_tasks": [],
-        "scheduler_jobs": [],
-        "running_tasks": []
+        "cookie_summary": {
+            "active": active_cookies,
+            "total": total_cookies,
+            "current_cookie_id": getattr(cookie_manager, 'current_cookie_id', None),
+        },
+        "recent_tasks": recent_tasks,
+        "scheduler_jobs": scheduler_jobs,
+        "running_tasks": running_tasks,
     }
 
 # 队列调试接口
@@ -264,6 +807,513 @@ async def queue_stats():
         return request_queue.stats()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# ------------------------------
+# Cookie 管理 API
+# ------------------------------
+
+@app.get("/api/cookie/status")
+async def cookie_status(db: Session = Depends(get_db)):
+    """返回 Cookie 列表与当前通道信息。
+    - items: 每个 cookie 的基本信息（不含敏感字段）
+    - current_cookie_id: 当前被 SimpleCookieManager 选择的 cookie id（可能为 None）
+    - counts: 活跃/禁用 数量
+    """
+    try:
+        rows = db.query(Cookie).all()
+        items = []
+        for r in rows:
+            try:
+                items.append({
+                    'id': r.id,
+                    'name': r.name,
+                    'is_active': bool(r.is_active),
+                    'usage_count': int(r.usage_count or 0),
+                    'last_used': r.last_used.isoformat() if r.last_used else None,
+                    'failure_count': int(r.failure_count or 0),
+                    'last_failure_at': r.last_failure_at.isoformat() if r.last_failure_at else None,
+                    'created_at': r.created_at.isoformat() if r.created_at else None,
+                    'updated_at': r.updated_at.isoformat() if r.updated_at else None,
+                })
+            except Exception:
+                continue
+        active = sum(1 for x in items if x.get('is_active'))
+        inactive = len(items) - active
+        return {
+            'items': items,
+            'current_cookie_id': getattr(cookie_manager, 'current_cookie_id', None),
+            'counts': {'active': active, 'inactive': inactive},
+        }
+    finally:
+        db.close()
+
+
+@app.post("/api/cookie/upload")
+async def cookie_upload(body: CookieCreate, db: Session = Depends(get_db)):
+    """上传/新增一个 Cookie。默认写库为 active=true；可选进行一次在线校验。
+    返回 { id, name, is_valid, is_active }
+    """
+    try:
+        # 幂等：若同名存在，更新内容；否则新增
+        row = db.query(Cookie).filter(Cookie.name == body.name).first()
+        creating = False
+        if not row:
+            row = Cookie(
+                name=body.name.strip(),
+                sessdata=body.sessdata.strip(),
+                bili_jct=(body.bili_jct or '').strip(),
+                dedeuserid=(body.dedeuserid or '').strip(),
+                is_active=True,
+                usage_count=0,
+            )
+            db.add(row)
+            creating = True
+        else:
+            row.sessdata = body.sessdata.strip()
+            row.bili_jct = (body.bili_jct or '').strip()
+            row.dedeuserid = (body.dedeuserid or '').strip()
+            row.is_active = True
+        db.commit()
+
+        # 在线校验（不抛异常，失败将仅标记失败计数/必要时禁用）
+        is_valid = False
+        try:
+            is_valid = await cookie_manager.validate_cookie(row)
+            if is_valid:
+                # 清理历史失败状态
+                try:
+                    cookie_manager.reset_failures(db, row.id)
+                except Exception:
+                    pass
+            else:
+                # 记录失败并可能禁用
+                try:
+                    cookie_manager.record_failure(db, row.id, reason="upload_validate_failed")
+                except Exception:
+                    pass
+        except Exception:
+            # 网络或解析异常也按失败计一次
+            try:
+                cookie_manager.record_failure(db, row.id, reason="upload_validate_exception")
+            except Exception:
+                pass
+
+        return {
+            'id': row.id,
+            'name': row.name,
+            'is_valid': bool(is_valid),
+            'is_active': bool(row.is_active),
+            'creating': creating,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
+# 队列管理与洞察 API（用于可视化与容量调整）
+class QueueCapacityBody(BaseModel):
+    requires_cookie: Optional[int] = None  # 目标并发上限（cookie 通道）
+    no_cookie: Optional[int] = None        # 目标并发上限（no-cookie 通道）
+    persist: Optional[bool] = True         # 是否持久化到 Settings，便于重启后生效
+
+@app.get("/api/queue/list")
+async def queue_list():
+    """列出当前内存队列的任务快照（仅用于调试/后台）。"""
+    try:
+        return request_queue.list()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/requests/{job_id}/cancel")
+async def queue_cancel(job_id: str):
+    """取消指定队列任务（运行中将释放对应通道信号量）。"""
+    try:
+        ok = await request_queue.cancel(job_id, reason="manual_cancel")
+        if not ok:
+            raise HTTPException(status_code=404, detail="job not found")
+        # 返回最新快照
+        job = None
+        try:
+            job = next((j for j in request_queue.list() if j.get('id') == job_id), None)
+        except Exception:
+            job = None
+        return {"ok": True, "job": job or {"id": job_id, "status": "canceled"}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/queue/insights")
+async def queue_insights():
+    """返回队列洞察（与 /api/queue/stats 相同语义，兼容前端可能的命名）。"""
+    try:
+        return request_queue.stats()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/queue/capacity")
+async def queue_capacity(db: Session = Depends(get_db)):
+    """读取当前目标并发容量（来自内存状态，附带持久化建议值）。"""
+    try:
+        s = request_queue.stats()
+        # 读取已持久化的建议值
+        key_cookie = 'queue_cap_cookie'
+        key_nocookie = 'queue_cap_nocookie'
+        rowc = db.query(Settings).filter(Settings.key == key_cookie).first()
+        r_own = db.query(Settings).filter(Settings.key == key_nocookie).first()
+        persisted = {
+            'requires_cookie': int(rowc.value) if rowc and rowc.value is not None else None,
+            'no_cookie': int(r_own.value) if r_own and r_own.value is not None else None,
+        }
+        return {"capacity": s.get('capacity', {}), "persisted": persisted}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
+@app.post("/api/queue/capacity")
+async def queue_set_capacity(body: QueueCapacityBody, db: Session = Depends(get_db)):
+    """设置并发容量上限：立即对内存生效，可选持久化到 Settings。
+    - requires_cookie: 合理范围 1-3（0 视为不变；安全起见禁止>3）
+    - no_cookie:      合理范围 1-5（0 视为不变；禁止>5）
+    """
+    try:
+        if body is None:
+            raise HTTPException(status_code=400, detail="missing body")
+
+        def _sanitize(v: Optional[int], lo: int, hi: int) -> Optional[int]:
+            if v is None:
+                return None
+            try:
+                iv = int(v)
+            except Exception:
+                raise HTTPException(status_code=400, detail="invalid value")
+            if iv <= 0:
+                return None
+            if iv < lo:
+                iv = lo
+            if iv > hi:
+                iv = hi
+            return iv
+
+        cap_cookie = _sanitize(body.requires_cookie, 1, 3)
+        cap_nocookie = _sanitize(body.no_cookie, 1, 5)
+
+        # 立即生效
+        await request_queue.set_capacity(requires_cookie=cap_cookie, no_cookie=cap_nocookie)
+
+        # 可选持久化
+        if body.persist:
+            try:
+                if cap_cookie is not None:
+                    sc = db.query(Settings).filter(Settings.key == 'queue_cap_cookie').first()
+                    if not sc:
+                        sc = Settings(key='queue_cap_cookie', value=str(cap_cookie), description='队列并发上限(cookie)')
+                        db.add(sc)
+                    else:
+                        sc.value = str(cap_cookie)
+                if cap_nocookie is not None:
+                    sn = db.query(Settings).filter(Settings.key == 'queue_cap_nocookie').first()
+                    if not sn:
+                        sn = Settings(key='queue_cap_nocookie', value=str(cap_nocookie), description='队列并发上限(no_cookie)')
+                        db.add(sn)
+                    else:
+                        sn.value = str(cap_nocookie)
+                db.commit()
+            except Exception:
+                db.rollback()
+
+        return {"ok": True, "applied": {"requires_cookie": cap_cookie, "no_cookie": cap_nocookie}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
+# 失败管理 API
+@app.get("/api/failures")
+async def list_failures(sid: Optional[int] = None, clazz: Optional[str] = None, limit: int = 100, offset: int = 0, db: Session = Depends(get_db)):
+    """列出失败记录（来源于 Settings: fail:{bvid}）。支持按订阅与分类过滤。
+    - 参数：sid（可选）、clazz=temporary|permanent（可选）、limit/offset（简单分页）
+    - 返回：items: [{ bvid, class, message, last_at, sid, retry_count }]
+    """
+    try:
+        rows = db.query(Settings).filter(Settings.key.like('fail:%')).all()
+        items = []
+        for r in rows:
+            try:
+                data = json.loads(r.value) if (r and r.value) else {}
+                if not isinstance(data, dict):
+                    continue
+                bvid = (r.key or '')[5:]
+                if not bvid:
+                    continue
+                if sid is not None and int(data.get('sid') or -1) != int(sid):
+                    continue
+                if clazz and (data.get('class') != clazz):
+                    continue
+                items.append({
+                    'bvid': bvid,
+                    'class': data.get('class'),
+                    'message': data.get('message'),
+                    'last_at': data.get('last_at'),
+                    'sid': data.get('sid'),
+                    'retry_count': data.get('retry_count') or 0,
+                })
+            except Exception:
+                continue
+        # 简单分页
+        items_sorted = sorted(items, key=lambda x: x.get('last_at') or '', reverse=True)
+        return {
+            'total': len(items_sorted),
+            'items': items_sorted[offset: offset + max(1, min(1000, limit))]
+        }
+    finally:
+        db.close()
+
+@app.get("/api/failures/{bvid}")
+async def get_failure_detail(bvid: str, db: Session = Depends(get_db)):
+    """获取单条失败详情。"""
+    try:
+        key = f"fail:{bvid}"
+        r = db.query(Settings).filter(Settings.key == key).first()
+        if not r:
+            raise HTTPException(status_code=404, detail="未找到失败记录")
+        try:
+            data = json.loads(r.value) if r.value else {}
+        except Exception:
+            data = {}
+        return {'bvid': bvid, **({} if not isinstance(data, dict) else data)}
+    finally:
+        db.close()
+
+class FailureRetryBody(BaseModel):
+    sid: Optional[int] = None
+    mode: Optional[str] = 'enqueue'  # enqueue | queue_only
+
+@app.post("/api/failures/{bvid}/unblock")
+async def unblock_failure(bvid: str, db: Session = Depends(get_db)):
+    """解封：删除失败记录（允许后续入队）。"""
+    try:
+        key = f"fail:{bvid}"
+        r = db.query(Settings).filter(Settings.key == key).first()
+        if r:
+            db.delete(r)
+            db.commit()
+        return {'ok': True}
+    finally:
+        db.close()
+
+@app.post("/api/failures/{bvid}/retry")
+async def retry_failure(bvid: str, body: FailureRetryBody, db: Session = Depends(get_db)):
+    """重试：清理失败记录，并将视频加入该订阅的入队流程。
+    - sid 取顺序：body.sid > fail记录内sid
+    - 若无法确定 sid，则返回 400
+    - mode=enqueue 直接调用下载入队；queue_only 仅将其放入失败回补队列尾部
+    """
+    # 读取记录
+    key = f"fail:{bvid}"
+    rec = db.query(Settings).filter(Settings.key == key).first()
+    rec_sid = None
+    if rec and rec.value:
+        try:
+            data = json.loads(rec.value)
+            if isinstance(data, dict):
+                rec_sid = data.get('sid')
+        except Exception:
+            pass
+    target_sid = body.sid or rec_sid
+    if not target_sid:
+        raise HTTPException(status_code=400, detail="无法确定订阅ID")
+    # 删除失败记录
+    try:
+        if rec:
+            db.delete(rec)
+            db.commit()
+    except Exception:
+        db.rollback()
+    # 入队
+    try:
+        url = _safe_bilibili_url(bvid)
+        if not url:
+            raise HTTPException(status_code=400, detail="非法BVID")
+        if (body.mode or 'enqueue') == 'queue_only':
+            # 放入回补队列尾部
+            k = f"retry:{int(target_sid)}:failed_backfill"
+            s = db.query(Settings).filter(Settings.key == k).first()
+            arr = []
+            if s and s.value:
+                try:
+                    arr = json.loads(s.value)
+                    if not isinstance(arr, list):
+                        arr = []
+                except Exception:
+                    arr = []
+            arr.append(bvid)
+            val = json.dumps(arr, ensure_ascii=False)
+            if s:
+                s.value = val
+                s.description = s.description or '失败回补队列'
+            else:
+                db.add(Settings(key=k, value=val, description='失败回补队列'))
+            db.commit()
+            return {'queued': True, 'mode': 'queue_only', 'sid': int(target_sid)}
+        else:
+            # 直接调用下载入队
+            await downloader._download_single_video({
+                'id': bvid,
+                'title': bvid,
+                'webpage_url': url,
+                'url': url,
+            }, int(target_sid), db)
+            return {'enqueued': True, 'mode': 'enqueue', 'sid': int(target_sid)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# 新增：一键本地同步（全量扫描 + 自动关联 + 统计重算）
+_local_sync_lock = asyncio.Lock()
+
+@app.post("/api/auto-import/scan-associate")
+async def auto_import_scan_and_associate():
+    """一键本地同步：顺序执行扫描导入与自动关联，并做一次全量统计重算。
+    - 互斥：与自身并发互斥，避免重复重入。
+    - 返回：整合两个阶段返回值与本次同步时间戳。
+    """
+    if _local_sync_lock.locked():
+        # 返回 202 表示已在进行中
+        return {"message": "本地同步已在运行中", "running": True}
+    async with _local_sync_lock:
+        try:
+            from .auto_import import auto_import_service
+            # 1) 扫描导入（线程池执行）
+            scan_res = await asyncio.to_thread(auto_import_service.scan_and_import)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"扫描导入失败: {e}")
+        try:
+            # 2) 自动关联（线程池执行）
+            assoc_res = await asyncio.to_thread(auto_import_service.auto_associate_subscriptions)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"自动关联失败: {e}")
+        # 3) 统一重算订阅统计
+        db = next(get_db())
+        try:
+            try:
+                recompute_all_subscriptions(db, touch_last_check=False)
+                db.commit()
+            except Exception as re:
+                db.rollback()
+                # 不致命，纳入返回信息
+                assoc_res = {**(assoc_res or {}), "recompute_error": str(re)}
+        finally:
+            db.close()
+
+        return {
+            "message": "本地同步完成",
+            "running": False,
+            "scan": scan_res or {},
+            "associate": assoc_res or {},
+            "completed_at": datetime.now().isoformat(),
+        }
+
+@app.post("/api/auto-import/scan-associate/{subscription_id}")
+async def auto_import_scan_and_associate_for_subscription(subscription_id: int, db: Session = Depends(get_db)):
+    """按订阅执行本地同步（仅该订阅目录扫描导入 + 仅该订阅自动关联 + 仅该订阅统计重算）。
+    - 与相同订阅并发互斥（与下载等其他操作无强耦合，仅使用订阅级锁）。
+    - 不与全局本地同步共用锁，以减少阻塞，但需注意用户侧避免同时触发全局与局部。
+    """
+    # 订阅是否存在
+    sub = db.query(Subscription).filter(Subscription.id == subscription_id).first()
+    if not sub:
+        raise HTTPException(status_code=404, detail="订阅不存在")
+
+    # 订阅级互斥
+    lock = get_subscription_lock(subscription_id)
+    if lock.locked():
+        return {"message": "该订阅的本地同步已在运行中", "running": True}
+
+    async with lock:
+        try:
+            from .auto_import import auto_import_service
+            # 1) 仅扫描该订阅目录并导入
+            scan_res = await asyncio.to_thread(auto_import_service.scan_and_import_for_subscription, subscription_id)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"扫描导入失败: {e}")
+
+        # 2) 仅该订阅自动关联（以本地目录为准：若记录当前关联到其他订阅但路径落在本订阅目录下，也进行重关联修复）
+        try:
+            matches = auto_import_service._find_matching_videos(sub, db)
+            associated_count = 0
+            for v in matches:
+                # 以本地目录为准进行强制修复：
+                # - 原逻辑仅关联 subscription_id 为空的记录，无法修复“错关联到其他订阅”的情况
+                # - 这里对所有命中本订阅目录的记录执行统一归属，确保DB与本地目录一致
+                if v.subscription_id != subscription_id:
+                    v.subscription_id = subscription_id
+                    associated_count += 1
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(status_code=500, detail=f"自动关联失败: {e}")
+
+        # 3) 以本地为准的清理与纠偏：
+        #    - 若视频与JSON均不存在：判定为“已删除”，直接删除DB记录（避免 total_videos 偏大）
+        #    - 若仅视频文件缺失但JSON存在：标记 downloaded=False，清空 video_path 与文件大小相关字段
+        try:
+            from pathlib import Path
+            from .models import Video
+            videos = db.query(Video).filter(Video.subscription_id == subscription_id).all()
+            removed_count = 0
+            downgraded_count = 0
+            for v in videos:
+                vp = Path(v.video_path) if getattr(v, 'video_path', None) else None
+                jp = Path(v.json_path) if getattr(v, 'json_path', None) else None
+                v_exists = (vp and vp.exists())
+                j_exists = (jp and jp.exists())
+                if (not v_exists) and (not j_exists):
+                    # 两者都不存在：删除记录
+                    db.delete(v)
+                    removed_count += 1
+                    continue
+                if (not v_exists) and j_exists:
+                    # 仅视频缺：降级 downloaded 状态并清理路径/大小
+                    v.downloaded = False
+                    v.video_path = None
+                    try:
+                        v.file_size = 0
+                    except Exception:
+                        pass
+                    downgraded_count += 1
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            logger.warning(f"[sub={subscription_id}] 本地一致性清理失败：{e}")
+
+        # 4) 仅重算该订阅统计
+        try:
+            from .services.subscription_stats import recompute_subscription_stats
+            recompute_subscription_stats(db, subscription_id, touch_last_check=False)
+            db.commit()
+        except Exception as re:
+            db.rollback()
+            # 不致命，纳入返回信息
+            recompute_error = str(re)
+        else:
+            recompute_error = None
+
+        return {
+            "message": "本地同步完成（按订阅）",
+            "running": False,
+            "scan": scan_res or {},
+            "associate": {"associated": associated_count},
+            "subscription_id": subscription_id,
+            "recompute_error": recompute_error,
+            "completed_at": datetime.now().isoformat(),
+        }
 
 # 聚合下载管理 API：按订阅返回本地已下载、估算待下载、队列排队/运行中计数
 @app.get("/api/download/aggregate")
@@ -408,7 +1458,9 @@ async def enqueue_single_video(subscription_id: int, request: dict, db: Session 
         if not video_id:
             raise HTTPException(status_code=400, detail="缺少 video_id")
         title = (request or {}).get('title')
-        url = (request or {}).get('webpage_url') or (f"https://www.bilibili.com/video/{video_id}")
+        url = (request or {}).get('webpage_url') or _safe_bilibili_url(video_id)
+        if not url:
+            raise HTTPException(status_code=400, detail="非法BVID或缺少URL")
 
         # 复用单视频下载流程：内部会将 download 任务写入全局队列并受并发控制
         video_info = { 'id': video_id, 'title': title, 'webpage_url': url, 'url': url }
@@ -448,6 +1500,7 @@ async def get_subscriptions(db: Session = Depends(get_db)):
 
         # 远端总计读取：优先使用 downloader 写入的 sync:{id}:status（remote_total）
         remote_total = None
+        remote_status = None
         try:
             key = f"sync:{sub.id}:status"
             s = db.query(Settings).filter(Settings.key == key).first()
@@ -456,6 +1509,10 @@ async def get_subscriptions(db: Session = Depends(get_db)):
                 rt = data.get("remote_total")
                 if isinstance(rt, int) and rt >= 0:
                     remote_total = rt
+                st = data.get('status')
+                # 若正在获取且 remote_total 尚未写回，状态显示为 fetching
+                if (st == 'running') and (remote_total is None):
+                    remote_status = 'fetching'
         except Exception:
             remote_total = None
 
@@ -475,6 +1532,7 @@ async def get_subscriptions(db: Session = Depends(get_db)):
             "total_videos": on_disk_total,
             "db_total_videos": total_videos_local_all,
             "remote_total": remote_total,
+            "remote_status": remote_status,
             "downloaded_videos": downloaded_videos,
             "pending_videos": pending_videos,
             "last_check": sub.last_check.isoformat() if sub.last_check else None,
@@ -1505,13 +2563,12 @@ async def get_media_overview(scan: bool = False, db: Session = Depends(get_db)):
 @app.get("/api/media/subscription-stats")
 async def get_subscription_stats(db: Session = Depends(get_db)):
     """按订阅聚合统计（数量、已下载、容量、最近上传）- 使用远端总数口径"""
-    # 本地统计：已下载数量、容量、最近上传
+    # 本地统计：已下载数量、最近上传（容量需要单独计算）
     counts = (
         db.query(
             Video.subscription_id.label('sid'),
             func.count(Video.id).label('local_total'),
             func.sum(case((Video.video_path.isnot(None), 1), else_=0)).label('downloaded'),
-            func.coalesce(func.sum(Video.file_size), 0).label('size'),
             func.max(Video.upload_date).label('latest_upload')
         )
         .group_by(Video.subscription_id)
@@ -1521,15 +2578,53 @@ async def get_subscription_stats(db: Session = Depends(get_db)):
     # 订阅信息
     subs = {s.id: s for s in db.query(Subscription).all()}
     
-    # 构建本地统计字典
+    # 构建本地统计字典（不包含容量，需要单独计算）
     local_stats = {}
     for row in counts:
         local_stats[row.sid] = {
             'local_total': int(row.local_total or 0),
             'downloaded': int(row.downloaded or 0),
-            'size': int(row.size or 0),
             'latest_upload': row.latest_upload.isoformat() if row.latest_upload else None,
         }
+    
+    # 单独计算每个订阅的容量（与目录统计逻辑一致）
+    for sid in subs.keys():
+        videos = db.query(Video).filter(Video.subscription_id == sid, Video.video_path.isnot(None)).all()
+        total_size = 0
+        for v in videos:
+            # 检查文件是否存在
+            if not v.video_path:
+                continue
+            try:
+                from pathlib import Path
+                vp = Path(v.video_path).resolve()
+                if not vp.exists():
+                    continue
+            except Exception:
+                continue
+            
+            # 计算容量（与目录统计一致的三级回退）
+            size_sum = (v.total_size if getattr(v, 'total_size', None) is not None else None)
+            if size_sum is None:
+                size_sum = int(v.file_size or 0) + int((getattr(v, 'audio_size', 0) or 0))
+            # 如果数据库字段都为空，直接读取磁盘文件大小
+            if size_sum == 0 and v.video_path:
+                try:
+                    actual_size = vp.stat().st_size
+                    size_sum = actual_size
+                except Exception:
+                    size_sum = 0
+            total_size += int(size_sum or 0)
+        
+        if sid in local_stats:
+            local_stats[sid]['size'] = total_size
+        else:
+            local_stats[sid] = {
+                'local_total': 0,
+                'downloaded': 0,
+                'size': total_size,
+                'latest_upload': None,
+            }
 
     from .models import Settings
     import json as json_lib
@@ -1631,39 +2726,140 @@ async def get_subscription_videos_detail(
 # —— 按下载目录聚合统计与目录视频分页 ——
 @app.get("/api/media/directories")
 async def get_directory_stats(db: Session = Depends(get_db)):
-    """按下载根目录下的一级目录聚合统计
-    - 基于 DOWNLOAD_PATH 的直接子目录进行分组
-    - 统计: total_videos、downloaded_videos、total_size
+    """按下载根目录下的一级目录聚合统计（本地优先、仅统计真实存在文件）
+    - 优先使用环境变量 DOWNLOAD_PATH；若与实际不符，则根据 DB 中 video_path 自动探测公共根目录
+    - 分组口径：根目录下的一级目录名；根下直存文件计入 "_root"；不在根内的计入 "_others"
+    - 统计字段：total_videos（存在文件数）、downloaded_videos（同 total_videos）、total_size
     """
-    download_root = Path(os.getenv('DOWNLOAD_PATH', '/app/downloads')).resolve()
-    # 仅统计有文件路径的视频
-    videos = db.query(Video).filter(Video.video_path.isnot(None)).all()
-    stats: Dict[str, Dict[str, Any]] = {}
 
-    for v in videos:
+    def _detect_download_root(paths: List[str]) -> Path:
+        # 优先环境变量
+        env_root = Path(os.getenv('DOWNLOAD_PATH', '/app/downloads')).resolve()
         try:
-            vp = Path(v.video_path).resolve()
+            if env_root.exists():
+                return env_root
+        except Exception:
+            pass
+        # 自动探测：取存在的文件路径，求公共路径
+        existing = []
+        for p in paths:
+            try:
+                if p and os.path.exists(p):
+                    existing.append(str(Path(p).resolve()))
+            except Exception:
+                continue
+        if not existing:
+            # 回退到 env_root 即便不存在
+            return env_root
+        try:
+            common = os.path.commonpath(existing)
+            return Path(common)
+        except Exception:
+            return env_root
+
+    # 仅考虑有路径的记录
+    videos = db.query(Video).filter(Video.video_path.isnot(None)).all()
+    all_paths = [v.video_path for v in videos if v.video_path]
+    download_root = _detect_download_root(all_paths)
+
+    # 与 downloader._create_subscription_directory 口径一致的目录名推导
+    def _sanitize_filename(filename: str) -> str:
+        import re
+        illegal_chars = r'[<>:"/\\|?*]'
+        filename = re.sub(illegal_chars, '_', filename or '')
+        filename = filename.strip(' .')
+        if len(filename) > 100:
+            filename = filename[:100]
+        return filename or 'untitled'
+
+    def _expected_dir_for_sub(s: Subscription) -> str:
+        if s.type == 'collection':
+            base = s.name or ''
+            d = _sanitize_filename(base)
+            if not d:
+                d = _sanitize_filename(f"合集订阅_{s.id}")
+            return d
+        elif s.type == 'keyword':
+            base = s.keyword or s.name or '关键词订阅'
+            return _sanitize_filename(f"关键词_{base}")
+        elif s.type == 'uploader':
+            base = s.name or getattr(s, 'uploader_id', None) or 'UP主订阅'
+            return _sanitize_filename(f"UP主_{base}")
+        else:
+            d = _sanitize_filename(s.name or '')
+            if not d:
+                d = _sanitize_filename(f"订阅_{s.id}")
+            return d
+
+    subs = db.query(Subscription).all()
+    subs_by_dir: Dict[str, Subscription] = { _expected_dir_for_sub(s): s for s in subs }
+
+    stats: Dict[str, Dict[str, Any]] = {}
+    for v in videos:
+        v_path = (v.video_path or '').strip()
+        if not v_path:
+            continue
+        # 仅统计磁盘上真实存在的文件
+        try:
+            vp = Path(v_path).resolve()
+            if not vp.exists():
+                continue
+        except Exception:
+            continue
+        # 分组键：严格按下载根下的一级目录（恢复与历史一致的口径）
+        try:
             rel = vp.relative_to(download_root)
             first = rel.parts[0] if len(rel.parts) > 0 else ""
         except Exception:
-            # 路径不在下载根内，归为 _others
             first = "_others"
         if not first:
             first = "_root"
         s = stats.setdefault(first, {
             "dir": first,
+            "subscription_id": (subs_by_dir.get(first).id if subs_by_dir.get(first) else None),
+            "display_name": None,  # 若能解析到订阅，则用当前订阅名作为展示名
+            "_sub_counts": {},     # 内部：统计该目录下各订阅出现次数
             "total_videos": 0,
             "downloaded_videos": 0,
             "total_size": 0,
         })
         s["total_videos"] += 1
-        if v.video_path:
-            s["downloaded_videos"] += 1
-        # 优先使用 total_size；否则回退到 file_size + audio_size
+        s["downloaded_videos"] += 1  # 仅统计存在文件，等同已下载
+        try:
+            sidv = int(v.subscription_id) if v.subscription_id is not None else None
+        except Exception:
+            sidv = None
+        if sidv is not None:
+            s["_sub_counts"][sidv] = int(s["_sub_counts"].get(sidv, 0)) + 1
+        # 优先使用 total_size；否则回退到 file_size + audio_size；最后回退到实际文件大小
         size_sum = (v.total_size if getattr(v, 'total_size', None) is not None else None)
         if size_sum is None:
             size_sum = int(v.file_size or 0) + int((getattr(v, 'audio_size', 0) or 0))
+        # 如果数据库字段都为空，直接读取磁盘文件大小
+        if size_sum == 0 and v.video_path:
+            try:
+                actual_size = vp.stat().st_size
+                size_sum = actual_size
+            except Exception:
+                size_sum = 0
         s["total_size"] += int(size_sum or 0)
+
+    # 事后确定展示订阅：若目录名无法映射订阅，则取该目录内最多的订阅ID
+    subs_by_id: Dict[int, Subscription] = {s.id: s for s in subs}
+    for d, s in stats.items():
+        if not s.get("subscription_id"):
+            sc = s.get("_sub_counts") or {}
+            if sc:
+                # 选择出现最多的订阅ID
+                sid_major = max(sc.items(), key=lambda kv: kv[1])[0]
+                s["subscription_id"] = sid_major
+        # 设置展示名
+        sid_cur = s.get("subscription_id")
+        if sid_cur is not None and sid_cur in subs_by_id:
+            s["display_name"] = subs_by_id[sid_cur].name or s.get("dir")
+        # 清理内部字段
+        if "_sub_counts" in s:
+            del s["_sub_counts"]
 
     # 转列表，按大小/数量倒序
     result = list(stats.values())
@@ -1782,16 +2978,48 @@ async def refresh_media_sizes(background: BackgroundTasks):
 
 
 @app.get("/api/media/directory-videos")
-async def get_directory_videos(dir: str, page: int = 1, size: int = 20, db: Session = Depends(get_db)):
-    """获取某一级目录下的全部视频（含子目录），分页返回
-    - 参数 dir: DOWNLOAD_PATH 下的一级目录名（与 get_directory_stats 返回的 dir 对应）
-    - 通过 SQL LIKE 前缀匹配提高效率
+async def get_directory_videos(dir: str = None, sid: int = None, page: int = 1, size: int = 20, db: Session = Depends(get_db)):
+    """获取某一级目录下的全部视频（含子目录），分页返回（基于统一根目录探测）
+    - 参数 dir: 由 get_directory_stats 返回的一级目录名
+    - 仅返回磁盘真实存在的文件对应的记录
     """
+    # 如果提供了订阅ID，则用其订阅名作为一级目录名
+    if sid is not None:
+        sub = db.query(Subscription).filter(Subscription.id == sid).first()
+        if not sub or not sub.name:
+            raise HTTPException(status_code=400, detail="无效的订阅ID或订阅名为空")
+        dir = sub.name
+
     if not dir:
         raise HTTPException(status_code=400, detail="dir 不能为空")
-    download_root = Path(os.getenv('DOWNLOAD_PATH', '/app/downloads')).resolve()
+
+    # 重用根目录探测逻辑，确保与目录聚合一致
+    videos_all = db.query(Video).filter(Video.video_path.isnot(None)).all()
+    paths_all = [v.video_path for v in videos_all if v.video_path]
+    def _detect_download_root(paths: List[str]) -> Path:
+        env_root = Path(os.getenv('DOWNLOAD_PATH', '/app/downloads')).resolve()
+        try:
+            if env_root.exists():
+                return env_root
+        except Exception:
+            pass
+        existing = []
+        for p in paths:
+            try:
+                if p and os.path.exists(p):
+                    existing.append(str(Path(p).resolve()))
+            except Exception:
+                continue
+        if not existing:
+            return env_root
+        try:
+            common = os.path.commonpath(existing)
+            return Path(common)
+        except Exception:
+            return env_root
+
+    download_root = _detect_download_root(paths_all)
     base = (download_root / dir).resolve()
-    # 安全校验，防止目录穿越
     try:
         base.relative_to(download_root)
     except Exception:
@@ -1826,6 +3054,7 @@ async def get_directory_videos(dir: str, page: int = 1, size: int = 20, db: Sess
 
     return {
         "dir": dir,
+        "sid": sid,
         "download_path": str(download_root),
         "total": total,
         "page": page,
@@ -2133,8 +3362,8 @@ async def update_setting(key: str, setting: SettingUpdate, db: Session = Depends
     db_setting.updated_at = datetime.now()
     db.commit()
     
-    # 如果是订阅检查间隔，更新调度器
-    if key == "auto_check_interval":
+    # 如果是订阅检查间隔，更新调度器（兼容 key: auto_check_interval 与 check_interval）
+    if key in ("auto_check_interval", "check_interval"):
         try:
             interval = int(setting.value)
             scheduler.update_subscription_check_interval(interval)

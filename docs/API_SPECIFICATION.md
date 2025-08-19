@@ -7,17 +7,35 @@ GET /api/queue/insights
 ```http
 GET /api/queue/list
 ```
-# API 接口规范（API Specification）
+# API 规范文档
 
-更新时间：2025-08-17 16:20 (Asia/Shanghai)
+本文档描述了 bili_curator V6 的完整 API 接口规范。
+
+更新时间：2025-08-18
 
 ## 基础信息
 
 - **Base URL**: `http://localhost:8080`
-- **Content-Type**: `application/json`
-- **认证方式**: 无需认证（内网服务）
+- **API 版本**: V6
+- **数据格式**: JSON
+- **认证方式**: 无需认证（本地部署）
+- **前端入口**: 统一单页应用 (SPA)
 
-## 1. 系统管理接口
+## 系统状态 API
+
+### 健康检查
+```http
+GET /health
+```
+返回系统健康状态和基本信息。
+
+### 系统总览
+```http
+GET /api/overview
+```
+返回系统运行状态、统计数据和队列状态。
+
+## 核心 API 端点
 
 ### 健康检查
 ```http
@@ -36,12 +54,12 @@ GET /health
 ```http
 GET /api/status
 ```
-**说明**: 返回后端运行状态与核心统计（订阅/视频/Cookie等）。
+**说明**: 返回后端运行状态、核心统计与调度/任务观测信息。
 **响应**:
 ```json
 {
   "status": "running",
-  "timestamp": "2025-08-17T16:20:00+08:00",
+  "timestamp": "2025-08-18T13:43:00+08:00",
   "version": "6.0.0",
   "statistics": {
     "total_subscriptions": 12,
@@ -49,22 +67,53 @@ GET /api/status
     "total_videos": 963,
     "downloaded_videos": 963,
     "active_cookies": 1
-  }
+  },
+  "scheduler_jobs": [
+    { "id": "enqueue_coordinator", "name": "enqueue_coordinator", "next_run": "2025-08-18T13:45:00+08:00", "trigger": "interval[minutes=2]" }
+  ],
+  "running_tasks": [
+    {
+      "task_id": "download_5_1699999999",
+      "subscription_id": 5,
+      "subscription_name": "合集A",
+      "status": "downloading",
+      "progress_percent": 25.0,
+      "downloaded_videos": 5,
+      "total_videos": 20,
+      "current_video": "某标题",
+      "error_message": null,
+      "started_at": "2025-08-18T13:20:00+08:00",
+      "updated_at": "2025-08-18T13:40:00+08:00"
+    }
+  ],
+  "recent_tasks": [
+    {
+      "id": 123,
+      "bilibili_id": "BVxxxx",
+      "subscription_id": 5,
+      "status": "completed",
+      "progress": 100.0,
+      "started_at": "2025-08-18T12:10:00+08:00",
+      "completed_at": "2025-08-18T12:20:00+08:00",
+      "updated_at": "2025-08-18T12:20:00+08:00",
+      "error_message": null
+    }
+  ]
 }
 ```
 
-### 扫描并自动关联（全局聚合端点）
+### 扫描并自动关联（全局触发）
 ```http
 POST /api/auto-import/scan-associate
 ```
-**说明**: 一次请求内完成“扫描本地文件 + 自动关联 + 统计重算”的聚合操作，便于前端单按钮触发。
+**说明**: 后台触发“扫描本地文件 → 自动关联订阅”的串行任务，立即返回，不阻塞请求。可选在完成后触发一次订阅统计重算。
+**请求体（可选）**:
+```json
+{ "recompute": true }
+```
 **响应**:
 ```json
-{
-  "message": "完成",
-  "scan": { "scanned_files": 150, "imported_files": 12 },
-  "associate": { "associated_count": 8 }
-}
+{ "triggered": true }
 ```
 
 ### 扫描并自动关联（仅针对某订阅）
@@ -202,6 +251,37 @@ GET /api/sync/status?sid=1
       "updated_at": "2025-08-17T16:18:00+08:00"
     }
   ]
+}
+```
+
+### 增量快照与状态
+
+```http
+POST /api/incremental/refresh-head
+```
+说明: 后台刷新指定订阅的远端“头部快照”，用于增量入队的参考。可选重置游标。
+请求体:
+```json
+{ "sid": 1, "cap": 200, "reset_cursor": true }
+```
+响应:
+```json
+{ "triggered": true, "sid": 1 }
+```
+
+```http
+GET /api/incremental/status/{sid}
+```
+说明: 查询增量相关状态与缓存。
+响应:
+```json
+{
+  "sid": 1,
+  "status": "idle",
+  "updated_at": "2025-08-18T13:30:00+08:00",
+  "remote_total_cached": 180,
+  "head_size": 200,
+  "last_cursor": "BV1xxxx..."
 }
 ```
 

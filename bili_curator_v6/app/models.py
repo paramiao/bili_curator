@@ -266,6 +266,25 @@ class Database:
             if not has_column('videos', 'total_size'):
                 conn.exec_driver_sql("ALTER TABLE videos ADD COLUMN total_size INTEGER")
 
+            # settings 表：为旧库补齐时间列，并确保 key 上存在唯一索引
+            # 1) 时间列（部分旧库可能没有 created_at/updated_at，避免 UPSERT 更新 updated_at 报错）
+            if not has_column('settings', 'created_at'):
+                try:
+                    conn.exec_driver_sql("ALTER TABLE settings ADD COLUMN created_at DATETIME")
+                except Exception as ee:
+                    print(f"新增 settings.created_at 失败: {ee}")
+            if not has_column('settings', 'updated_at'):
+                try:
+                    conn.exec_driver_sql("ALTER TABLE settings ADD COLUMN updated_at DATETIME")
+                except Exception as ee:
+                    print(f"新增 settings.updated_at 失败: {ee}")
+
+            # 2) 唯一索引（支持 ON CONFLICT(key) 语法；旧库若未声明 UNIQUE 约束将导致 UPSERT 失败）
+            try:
+                conn.exec_driver_sql("CREATE UNIQUE INDEX IF NOT EXISTS idx_settings_key_unique ON settings(key)")
+            except Exception as ee:
+                print(f"创建 settings.key 唯一索引失败: {ee}")
+
         except Exception as e:
             print(f"数据库迁移失败: {e}")
         finally:

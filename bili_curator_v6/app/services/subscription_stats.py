@@ -9,7 +9,8 @@
 - recompute_all_subscriptions(db, touch_last_check=False)
 """
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Dict
+from pathlib import Path
 from sqlalchemy.orm import Session
 from sqlalchemy import func, case
 
@@ -17,48 +18,55 @@ from ..models import Subscription, Video, Settings
 
 
 def recompute_subscription_stats(db: Session, subscription_id: int, *, touch_last_check: bool = True) -> None:
-    """按订阅ID重算统计并写回 Subscription。
+    """按订阅ID重算统计并写回 Subscription（本地优先：以磁盘实际存在的视频文件为准）。
     在已开启的事务中调用，调用方负责提交。
     """
     sub = db.query(Subscription).filter(Subscription.id == subscription_id).first()
     if not sub:
         return
 
-    total_videos = db.query(Video).filter(Video.subscription_id == sub.id).count()
-    downloaded_videos = db.query(Video).filter(
-        Video.subscription_id == sub.id,
-        Video.downloaded == True
-    ).count()
+    videos = db.query(Video).filter(Video.subscription_id == sub.id).all()
+    existing_count = 0
+    for v in videos:
+        vp = Path(v.video_path) if getattr(v, 'video_path', None) else None
+        if vp and vp.exists():
+            existing_count += 1
 
-    sub.total_videos = total_videos
-    sub.downloaded_videos = downloaded_videos
+    # 本地为准：total 与 downloaded 都以“磁盘存在的视频文件数”为准
+    sub.total_videos = existing_count
+    sub.downloaded_videos = existing_count
     if touch_last_check:
         sub.last_check = datetime.now()
     sub.updated_at = datetime.now()
 
 
 def recompute_all_subscriptions(db: Session, *, touch_last_check: bool = False) -> None:
-    """为所有订阅重算统计（聚合优化版）。
-    - 使用单次聚合查询获取每个订阅的统计，避免 N+1 COUNT 查询。
+    """为所有订阅重算统计（本地优先的文件系统口径）。
+    - 以磁盘存在的视频文件为准计算 total/downloaded。
     - 在已开启的事务中调用，调用方负责提交。
     """
     now = datetime.now()
 
-    # 统计每个 subscription_id 的总视频数与已下载视频数
-    agg_rows = db.query(
-        Video.subscription_id.label('sid'),
-        func.count(Video.id).label('total'),
-        func.coalesce(func.sum(case((Video.downloaded == True, 1), else_=0)), 0).label('downloaded')
-    ).group_by(Video.subscription_id).all()
+    # 读取所有视频的 subscription_id 和 video_path，一次性在内存归并
+    rows = db.query(Video.subscription_id, Video.video_path).all()
+    cnt: Dict[int, int] = {}
+    for sid, vpath in rows:
+        if sid is None:
+            continue
+        try:
+            vp = Path(vpath) if vpath else None
+            if vp and vp.exists():
+                cnt[sid] = cnt.get(sid, 0) + 1
+        except Exception:
+            # 任何异常不影响统计，按不存在处理
+            pass
 
-    stats_map = {row.sid: (row.total or 0, row.downloaded or 0) for row in agg_rows}
-
-    # 更新所有订阅（包括没有任何视频的订阅，填充为0）
+    # 更新所有订阅（包括没有任何视频文件的订阅，填充为0）
     subs = db.query(Subscription).all()
     for sub in subs:
-        total_videos, downloaded_videos = stats_map.get(sub.id, (0, 0))
-        sub.total_videos = total_videos
-        sub.downloaded_videos = downloaded_videos
+        existing = cnt.get(sub.id, 0)
+        sub.total_videos = existing
+        sub.downloaded_videos = existing
         if touch_last_check:
             sub.last_check = now
         sub.updated_at = now
