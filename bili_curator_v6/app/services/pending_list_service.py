@@ -128,7 +128,8 @@ class PendingListService:
             # 使用数学公式计算待下载数量，与统计API保持一致
             remote_total = cached_data.get('remote_total', 0)
             existing_count = len(local_ids)
-            calculated_pending = max(0, remote_total - existing_count)
+            failed_count = len(failed_ids)
+            calculated_pending = max(0, remote_total - existing_count - failed_count)
             
             # 如果实际列表长度与计算结果不一致，截取或填充到正确数量
             if len(pending_videos) > calculated_pending:

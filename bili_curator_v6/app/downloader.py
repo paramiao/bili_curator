@@ -571,6 +571,8 @@ class BilibiliDownloaderV6:
 
             videos: List[Dict] = []
             last_err = None
+            job_ok: bool = False
+            job_err: str = ""
             current_cookie = cookie
             ua_requires_cookie = True
 
@@ -622,19 +624,25 @@ class BilibiliDownloaderV6:
                                 if isinstance(entry, dict) and entry.get('id'):
                                     videos.append(entry)
                         logger.info(f"UP主 {uploader_id} 获取到 {len(videos)} 个视频")
+                        # 成功解析，无论数量多少均视为成功
+                        job_ok = True
                     except Exception as e:
                         last_err = str(e)
+                        job_err = last_err
                         logger.error(f"解析UP主视频列表失败: {e}")
                 else:
                     last_err = err.decode('utf-8', errors='ignore')
+                    job_err = last_err
                     logger.error(f"获取UP主视频列表失败: {last_err}")
 
             except asyncio.TimeoutError:
                 logger.warning(f"UP主视频列表获取超时: {uploader_url}")
                 last_err = "获取超时"
+                job_err = last_err
             except Exception as e:
                 logger.error(f"UP主视频列表获取异常: {e}")
                 last_err = str(e)
+                job_err = last_err
 
             if not videos and last_err:
                 raise Exception(f"获取UP主视频列表失败: {last_err}")
@@ -649,7 +657,10 @@ class BilibiliDownloaderV6:
                     pass
             if job_id:
                 try:
-                    await request_queue.mark_completed(job_id)
+                    if 'job_ok' in locals() and job_ok:
+                        await request_queue.mark_done(job_id)
+                    else:
+                        await request_queue.mark_failed(job_id, err=('job_err' in locals() and job_err) or '')
                 except Exception:
                     pass
 
@@ -709,6 +720,8 @@ class BilibiliDownloaderV6:
 
             videos: List[Dict] = []
             last_err = None
+            job_ok: bool = False
+            job_err: str = ""
             ua_requires_cookie = True
 
             def _rebuild_common_args() -> List[str]:
@@ -743,19 +756,24 @@ class BilibiliDownloaderV6:
                                     if 'bilibili.com' in url and ('BV' in entry.get('id', '') or 'av' in entry.get('id', '')):
                                         videos.append(entry)
                         logger.info(f"关键词 '{keyword}' 搜索到 {len(videos)} 个B站视频")
+                        job_ok = True
                     except Exception as e:
                         last_err = str(e)
+                        job_err = last_err
                         logger.error(f"解析关键词搜索结果失败: {e}")
                 else:
                     last_err = err.decode('utf-8', errors='ignore')
+                    job_err = last_err
                     logger.error(f"关键词搜索失败: {last_err}")
 
             except asyncio.TimeoutError:
                 logger.warning(f"关键词搜索超时: {keyword}")
                 last_err = "搜索超时"
+                job_err = last_err
             except Exception as e:
                 logger.error(f"关键词搜索异常: {e}")
                 last_err = str(e)
+                job_err = last_err
 
             if not videos and last_err:
                 raise Exception(f"关键词搜索失败: {last_err}")
@@ -770,12 +788,15 @@ class BilibiliDownloaderV6:
                     pass
             if job_id:
                 try:
-                    await request_queue.mark_completed(job_id)
+                    if 'job_ok' in locals() and job_ok:
+                        await request_queue.mark_done(job_id)
+                    else:
+                        await request_queue.mark_failed(job_id, err=('job_err' in locals() and job_err) or '')
                 except Exception:
                     pass
 
     async def _get_collection_videos(self, collection_url: str, db: Session, subscription_id: Optional[int] = None, *, disable_incremental: bool = False) -> List[Dict]:
-        """获取合集视频列表（对齐V4：支持仅SESSDATA、UA/Referer、重试参数、三段回退解析）"""
+        """获取合集视频列表（精简实现，保证可用）"""
         await rate_limiter.wait()
 
         cookie = cookie_manager.get_available_cookie(db)
@@ -792,12 +813,14 @@ class BilibiliDownloaderV6:
             )
             await request_queue.mark_running(job_id)
         except Exception:
-            # 队列模块异常不影响主流程
             job_id = None
 
         cookies_path = None
+        videos: List[Dict] = []
+        last_err: Optional[str] = None
+        trace_events: List[Dict[str, Any]] = []
         try:
-            # 写入临时 cookies.txt (仅写入存在的键，支持只有 SESSDATA)
+            # 写入临时 cookies.txt
             fd, cookies_path = tempfile.mkstemp(prefix='cookies_', suffix='.txt')
             os.close(fd)
             with open(cookies_path, 'w', encoding='utf-8') as cf:
@@ -812,8 +835,7 @@ class BilibiliDownloaderV6:
                     if str(cookie.dedeuserid).strip():
                         cf.write(f".bilibili.com\tTRUE\t/\tFALSE\t0\tDedeUserID\t{cookie.dedeuserid}\n")
 
-            # 公共 yt-dlp 参数（与V4对齐）：Referer/重试/忽略警告/轻睡眠（UA 与 cookies 由后续函数动态注入）
-            common_args_base = [
+            common_args = [
                 'yt-dlp',
                 '--referer', 'https://www.bilibili.com/',
                 '--force-ipv4',
@@ -824,417 +846,68 @@ class BilibiliDownloaderV6:
                 '--retry-sleep', '3',
                 '--ignore-errors',
                 '--no-warnings',
-                '--no-download',
+                '--user-agent', get_user_agent(True),
+                '--cookies', cookies_path,
             ]
 
-            # 允许通过环境变量传入 extractor-args（例如为 bilibili 指定解析策略）
-            extractor_args = os.getenv('YT_DLP_EXTRACTOR_ARGS')
-            if extractor_args and isinstance(extractor_args, str) and extractor_args.strip():
-                common_args_base += ['--extractor-args', extractor_args.strip()]
+            # 先单次JSON
+            trace_events.append({'type': 'list_start', 'ts': datetime.now().isoformat()})
+            try:
+                cmd = common_args + ['--flat-playlist', '--dump-single-json', collection_url]
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                out, err = await asyncio.wait_for(proc.communicate(), timeout=self.list_fetch_cmd_timeout)
+                if proc.returncode == 0:
+                    data = json.loads(out.decode('utf-8', errors='ignore') or '{}')
+                    entries = data.get('entries', [])
+                    if isinstance(entries, list):
+                        for entry in entries:
+                            if isinstance(entry, dict) and entry.get('id'):
+                                videos.append(entry)
+                    trace_events.append({'type': 'single_json_ok', 'count': len(videos), 'ts': datetime.now().isoformat()})
+                else:
+                    last_err = err.decode('utf-8', errors='ignore')
+            except asyncio.TimeoutError:
+                last_err = '获取超时'
 
-            # 写入 cookie 文件的辅助函数，返回新的临时路径
-            cookie_files: List[str] = []
-            def _write_cookie_file(cobj) -> str:
-                fd, cpath = tempfile.mkstemp(prefix='cookies_', suffix='.txt')
-                os.close(fd)
-                with open(cpath, 'w', encoding='utf-8') as cf:
-                    cf.write("# Netscape HTTP Cookie File\n")
-                    cf.write("# This file was generated by bili_curator V6\n\n")
-                    if getattr(cobj, 'sessdata', None):
-                        cf.write(f".bilibili.com\tTRUE\t/\tFALSE\t0\tSESSDATA\t{cobj.sessdata}\n")
-                    if getattr(cobj, 'bili_jct', None):
-                        if str(cobj.bili_jct).strip():
-                            cf.write(f".bilibili.com\tTRUE\t/\tFALSE\t0\tbili_jct\t{cobj.bili_jct}\n")
-                    if getattr(cobj, 'dedeuserid', None):
-                        if str(cobj.dedeuserid).strip():
-                            cf.write(f".bilibili.com\tTRUE\t/\tFALSE\t0\tDedeUserID\t{cobj.dedeuserid}\n")
-                cookie_files.append(cpath)
-                return cpath
-
-            async def run_cmd(args):
-                async with yt_dlp_semaphore:
-                    proc = await asyncio.create_subprocess_exec(
-                        *args,
+            # 兜底逐行
+            if not videos:
+                try:
+                    cmd2 = common_args + ['--dump-json', '--flat-playlist', collection_url]
+                    proc2 = await asyncio.create_subprocess_exec(
+                        *cmd2,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE
                     )
-                    try:
-                        out, err = await asyncio.wait_for(proc.communicate(), timeout=self.list_fetch_cmd_timeout)
-                        return proc.returncode, out, err
-                    except asyncio.TimeoutError:
-                        logger.warning(f"列表抓取命令超时 (>{self.list_fetch_cmd_timeout}s)，正在终止: {' '.join(args)}")
-                        try:
-                            proc.terminate()
-                            await asyncio.wait_for(proc.wait(), timeout=5.0)
-                        except asyncio.TimeoutError:
-                            proc.kill()
-                        raise
-
-            videos: List[Dict] = []
-            trace_events: List[Dict[str, Any]] = []
-            last_err = None
-            # 当前使用的 Cookie（支持失败后轮换）
-            current_cookie = cookie
-            # 初始 cookies.txt，与命令行参数组合
-            cookies_path = _write_cookie_file(current_cookie)
-            # UA 模式：默认按需带 Cookie 的 UA；在重试过程中会在 cookie/nocookie 模式之间轮换
-            ua_requires_cookie = True
-
-            def _rebuild_common_args() -> List[str]:
-                # 根据当前 UA 模式与 cookies_path 动态重建参数
-                ua = get_user_agent(ua_requires_cookie)
-                args = common_args_base + ['--user-agent', ua]
-                if cookies_path:
-                    args += ['--cookies', cookies_path]
-                return args
-
-            common_args = _rebuild_common_args()
-
-            # 优先尝试一次性抓取，减少多次 extractor 调用带来的风控与不稳定
-            # 可通过环境变量 LIST_PREFETCH_FIRST 关闭（默认开启）
-            def _env_true(v: Optional[str]) -> bool:
-                return str(v).strip().lower() in ('1', 'true', 'yes', 'on')
-
-            async def try_single_fetch_first() -> None:
-                nonlocal videos, last_err
-                # 1) 优先 -J 全量 JSON
-                cmd_b = common_args + ['-J', collection_url]
-                rc, out, err = await run_cmd(cmd_b)
-                if rc == 0:
-                    try:
-                        data = json.loads(out.decode('utf-8', errors='ignore') or '{}')
-                        entries = data.get('entries')
-                        if isinstance(entries, list):
-                            for it in entries:
-                                if isinstance(it, dict):
-                                    videos.append(it)
-                            trace_events.append({'type': 'prefetch_ok', 'method': '-J', 'count': len(entries or []), 'ts': datetime.now().isoformat()})
-                            return
-                    except Exception as e:
-                        last_err = e
-                else:
-                    last_err = err.decode('utf-8', errors='ignore')
-
-                # 2) 再试 --flat-playlist --dump-single-json（扁平化单次JSON）
-                cmd_a = common_args + ['--flat-playlist', '--dump-single-json', collection_url]
-                rc, out, err = await run_cmd(cmd_a)
-                if rc == 0:
-                    try:
-                        data = json.loads(out.decode('utf-8', errors='ignore') or '{}')
-                        entries = data.get('entries')
-                        if isinstance(entries, list):
-                            for it in entries:
-                                if isinstance(it, dict):
-                                    videos.append(it)
-                            trace_events.append({'type': 'prefetch_ok', 'method': '--dump-single-json', 'count': len(entries or []), 'ts': datetime.now().isoformat()})
-                            return
-                    except Exception as e:
-                        last_err = e
-                else:
-                    last_err = err.decode('utf-8', errors='ignore')
-
-                # 3) 最后行式兜底
-                cmd_c = common_args + ['--dump-json', '--flat-playlist', collection_url]
-                rc, out, err = await run_cmd(cmd_c)
-                if rc == 0:
-                    count_this = 0
-                    for line in (out.decode('utf-8', errors='ignore') or '').strip().split('\n'):
-                        if not line.strip():
-                            continue
-                        try:
-                            info = json.loads(line)
-                            if isinstance(info, dict):
-                                videos.append(info)
-                                count_this += 1
-                        except json.JSONDecodeError:
-                            continue
-                    if count_this > 0:
-                        trace_events.append({'type': 'prefetch_ok', 'method': '--dump-json', 'count': count_this, 'ts': datetime.now().isoformat()})
-                else:
-                    last_err = err.decode('utf-8', errors='ignore')
-
-            try:
-                if _env_true(os.getenv('LIST_PREFETCH_FIRST', '1')):
-                    await try_single_fetch_first()
-            except Exception:
-                # 预抓取失败不影响后续分页
-                pass
-
-            # 分页抓取（与预抓取合并）：
-            # - 预抓取先尝试一次性拿到尽可能多的条目；
-            # - 无论预抓取是否拿到部分条目，都继续分页补全，最终以去重合并的全集为准；
-            # - 分段大小、重试与退避由环境变量控制。
-            chunk_size = self.list_chunk_size
-            max_chunks = self.list_max_chunks
-            # 窗口化：允许通过环境变量传入 extractor-args（例如为 bilibili 指定解析策略）
-            if not disable_incremental:
-                try:
-                    # 优先订阅级：sync:{sid}:scan_window_chunks
-                    eff_chunks = None
-                    if subscription_id is not None:
-                        skey_sub = f"sync:{subscription_id}:scan_window_chunks"
-                        srow = db.query(Settings).filter(Settings.key == skey_sub).first()
-                        if srow and srow.value is not None:
-                            eff_chunks = int(str(srow.value).strip())
-                    # 全局级：sync:global:scan_window_chunks
-                    if eff_chunks is None:
-                        srowg = db.query(Settings).filter(Settings.key == 'sync:global:scan_window_chunks').first()
-                        if srowg and srowg.value is not None:
-                            eff_chunks = int(str(srowg.value).strip())
-                    if isinstance(eff_chunks, int) and eff_chunks > 0:
-                        max_chunks = max(1, min(max_chunks, eff_chunks))
-                        logger.info(f"窗口化扫描：限制分页块数为 {max_chunks} (chunk_size={chunk_size})")
-                except Exception:
-                    pass
-            # 若预抓取已获得部分条目，为减少重复请求，可跳过已覆盖的整段
-            chunk_idx = 0
-            try:
-                if videos and isinstance(videos, list):
-                    # 用当前已得条目数近似估算可跳过的块数
-                    chunk_idx = max(0, int(len(videos) // max(1, chunk_size)))
-            except Exception:
-                chunk_idx = 0
-            # 连续失败阈值：若连续失败达到阈值则结束分页，避免无谓重试
-            try:
-                fail_streak_limit = int(os.getenv('LIST_FAIL_STREAK_LIMIT', '3'))
-            except Exception:
-                fail_streak_limit = 3
-            fail_streak = 0
-
-            # 增量扫描：读取订阅级“头部快照”，用于遇到连续已见项时提前停止
-            head_snap_key = f"sync:{subscription_id}:head_snapshot"
-            head_seen: List[str] = []
-            try:
-                s_snap = db.query(Settings).filter(Settings.key == head_snap_key).first()
-                if s_snap and s_snap.value:
-                    arr = json.loads(s_snap.value) if isinstance(s_snap.value, str) else []
-                    if isinstance(arr, list):
-                        head_seen = [str(x) for x in arr if isinstance(x, (str, int))]
-            except Exception:
-                head_seen = []
-
-            try:
-                # 禁用增量时关闭提前停止（阈值置0）
-                if disable_incremental:
-                    stop_seen_threshold = 0
-                else:
-                    stop_seen_threshold = int(os.getenv('CURSOR_SEEN_THRESHOLD', '30'))
-                head_snap_cap = int(os.getenv('CURSOR_HEAD_SNAPSHOT_CAP', '200'))
-            except Exception:
-                stop_seen_threshold, head_snap_cap = (0 if disable_incremental else 30), 200
-            consecutive_seen = 0
-            early_stop = False
-
-            # 预抓取不再跳过分页；始终进行分页以补全全集
-            while chunk_idx < max_chunks and not early_stop:
-                start = chunk_idx * chunk_size + 1
-                end = start + chunk_size - 1
-                cmd_chunk = common_args + [
-                    '--dump-json', '--flat-playlist',
-                    '--playlist-items', f'{start}-{end}',
-                    collection_url
-                ]
-
-                # 每段重试次数与退避区间
-                attempt = 0
-                prefetch_triggered = False
-                out, err = b'', b''
-                rc = 0
-                t0 = datetime.now()
-                while attempt < self.list_retry:
-                    rc, out, err = await run_cmd(cmd_chunk)
-                    if rc == 0:
-                        break
-                    attempt += 1
-                    last_err = (err.decode('utf-8', errors='ignore') or '').strip()
-                    logger.warning(
-                        f"分页抓取 {start}-{end} 失败(rc={rc}) 第{attempt}次: {last_err} | "
-                        f"cookie_id={getattr(current_cookie,'id',None)} ua_mode={'cookie' if ua_requires_cookie else 'nocookie'}"
-                    )
-
-                    # 命中 yt-dlp 提示的 KeyError('data')/Extractor error 时，立即切换到一次性预抓取
-                    try:
-                        low = last_err.lower()
-                        if "keyerror('data')" in low or 'extractor error' in low:
-                            prefetch_triggered = True
-                            break
-                    except Exception:
-                        pass
-                    # 第2次及以后尝试：轮换 Cookie 与 UA，并重建参数
-                    try:
-                        if attempt >= 1:
-                            alt = cookie_manager.get_available_cookie(db)
-                            if alt and getattr(alt, 'id', None) and getattr(current_cookie, 'id', None) and alt.id != current_cookie.id:
-                                current_cookie = alt
-                                # 重建 cookie 文件并替换命令参数中的 --cookies 路径
-                                try:
-                                    cookies_path = _write_cookie_file(current_cookie)
-                                    # 轮换 UA：在多次失败后切换 UA 模式
-                                    ua_requires_cookie = not ua_requires_cookie
-                                    common_args = _rebuild_common_args()
-                                    cmd_chunk = common_args + [
-                                        '--dump-json', '--flat-playlist',
-                                        '--playlist-items', f'{start}-{end}',
-                                        collection_url
-                                    ]
-                                    logger.info(
-                                        f"分页重试切换 Cookie/UA: cookie={getattr(current_cookie,'name','unknown')} "
-                                        f"ua_mode={'cookie' if ua_requires_cookie else 'nocookie'} range={start}-{end}"
-                                    )
-                                except Exception as ce:
-                                    logger.debug(f"重建cookie文件失败: {ce}")
-                            else:
-                                # 即使 Cookie 未切换成功，也尝试仅轮换 UA 以增加多样性
-                                try:
-                                    ua_requires_cookie = not ua_requires_cookie
-                                    common_args = _rebuild_common_args()
-                                    cmd_chunk = common_args + [
-                                        '--dump-json', '--flat-playlist',
-                                        '--playlist-items', f'{start}-{end}',
-                                        collection_url
-                                    ]
-                                    logger.info(
-                                        f"分页重试轮换 UA: ua_mode={'cookie' if ua_requires_cookie else 'nocookie'} range={start}-{end}"
-                                    )
-                                except Exception as ue:
-                                    logger.debug(f"轮换UA失败: {ue}")
-                    except Exception:
-                        pass
-                    try:
-                        await asyncio.sleep(random.uniform(self.list_backoff_min, self.list_backoff_max))
-                    except Exception:
-                        pass
-
-                # 若触发了预抓取快速分支，优先尝试一次性抓取
-                if prefetch_triggered:
-                    try:
-                        await try_single_fetch_first()
-                        if videos:
-                            # 成功则结束分页流程
-                            early_stop = True
-                            trace_events.append({'type': 'prefetch_switch_ok', 'range': f'{start}-{end}', 'ts': datetime.now().isoformat()})
-                            break
-                        else:
-                            trace_events.append({'type': 'prefetch_switch_failed', 'range': f'{start}-{end}', 'error': last_err, 'ts': datetime.now().isoformat()})
-                    except Exception as ee:
-                        trace_events.append({'type': 'prefetch_switch_exception', 'range': f'{start}-{end}', 'error': str(ee), 'ts': datetime.now().isoformat()})
-
-                if rc != 0:
-                    # 当前段最终失败：记录并继续后续分页，允许跳过个别失败区间
-                    fail_streak += 1
-                    logger.warning(
-                        f"分页抓取 {start}-{end} 最终失败，跳过该区间 (连续失败 {fail_streak}/{fail_streak_limit}) | "
-                        f"cookie_id={getattr(current_cookie,'id',None)} ua_mode={'cookie' if ua_requires_cookie else 'nocookie'}"
-                    )
-                    trace_events.append({
-                        'type': 'chunk_failed',
-                        'range': f'{start}-{end}',
-                        'attempts': attempt,
-                        'duration_ms': int((datetime.now() - t0).total_seconds()*1000),
-                        'error': last_err,
-                        'cookie_id': getattr(current_cookie, 'id', None),
-                        'ua_mode': 'cookie' if ua_requires_cookie else 'nocookie'
-                    })
-                    if fail_streak >= fail_streak_limit:
-                        logger.warning("连续失败达到阈值，提前结束分页")
-                        break
-                    # 跳到下一段
-                    chunk_idx += 1
-                    # 段与段之间轻量延时（可配置），降低风控风险
-                    try:
-                        await asyncio.sleep(random.uniform(self.list_page_gap_min, self.list_page_gap_max))
-                    except Exception:
-                        pass
-                    continue
-                
-                # 成功获取当前段，重置连续失败计数
-                fail_streak = 0
-                count_this = 0
-                for line in (out.decode('utf-8', errors='ignore') or '').strip().split('\n'):
-                    if not line.strip():
-                        continue
-                    try:
-                        info = json.loads(line)
-                        if isinstance(info, dict):
-                            videos.append(info)
-                            count_this += 1
-                            # 增量提前停止：若该视频ID在“头部快照”中，计入连续命中
+                    out2, err2 = await asyncio.wait_for(proc2.communicate(), timeout=self.list_fetch_cmd_timeout)
+                    if proc2.returncode == 0:
+                        for line in (out2.decode('utf-8', errors='ignore') or '').split('\n'):
+                            line = line.strip()
+                            if not line:
+                                continue
                             try:
-                                vid = info.get('id')
-                                if isinstance(vid, (str, int)) and str(vid) in head_seen:
-                                    consecutive_seen += 1
-                                else:
-                                    consecutive_seen = 0
-                            except Exception:
-                                pass
-                            if stop_seen_threshold > 0 and consecutive_seen >= stop_seen_threshold:
-                                early_stop = True
-                                break
-                    except json.JSONDecodeError:
-                        continue
-                trace_events.append({
-                    'type': 'chunk_ok',
-                    'range': f'{start}-{end}',
-                    'count': count_this,
-                    'duration_ms': int((datetime.now() - t0).total_seconds()*1000),
-                    'cookie_id': getattr(current_cookie, 'id', None),
-                    'ua_mode': 'cookie' if ua_requires_cookie else 'nocookie'
-                })
-                # 本段不足 chunk_size，说明已到结尾
-                if count_this < chunk_size:
-                    break
-                chunk_idx += 1
-                # 段与段之间轻量延时（可配置），降低风控风险
-                try:
-                    await asyncio.sleep(random.uniform(self.list_page_gap_min, self.list_page_gap_max))
-                except Exception:
-                    pass
+                                info = json.loads(line)
+                                if isinstance(info, dict) and info.get('id'):
+                                    videos.append(info)
+                            except json.JSONDecodeError:
+                                continue
+                        trace_events.append({'type': 'line_json_ok', 'count': len(videos), 'ts': datetime.now().isoformat()})
+                    else:
+                        last_err = err2.decode('utf-8', errors='ignore')
+                except asyncio.TimeoutError:
+                    last_err = '获取超时'
 
-            # 统一去重合并（无论分页成功还是后续回退都需要）
-            def dedup_videos(video_list):
-                if not video_list:
-                    return video_list
-                try:
-                    uniq = {}
-                    for it in video_list:
-                        vid = it.get('id') if isinstance(it, dict) else None
-                        if isinstance(vid, str) and vid:
-                            uniq[vid] = it
-                    return list(uniq.values())
-                except Exception:
-                    return video_list
-            
-            videos = dedup_videos(videos)
-
-            # 回退：若分页抓取未取到任何内容，再走 A/B/C（为兼容关闭预抓取的场景）
-            if not videos:
-                try:
-                    await try_single_fetch_first()
-                except Exception:
-                    pass
-
-            # 最终去重（回退策略可能产生重复）
-            videos = dedup_videos(videos)
-
-            # 更新“头部快照”：按抓取顺序取前 head_snap_cap 个ID
+            # 去重
             try:
-                if videos and subscription_id is not None:
-                    head_ids: List[str] = []
-                    for it in videos:
-                        vid = it.get('id') if isinstance(it, dict) else None
-                        if isinstance(vid, (str, int)):
-                            head_ids.append(str(vid))
-                        if len(head_ids) >= head_snap_cap:
-                            break
-                    if head_ids:
-                        val = json.dumps(head_ids, ensure_ascii=False)
-                        srow = db.query(Settings).filter(Settings.key == head_snap_key).first()
-                        if srow:
-                            srow.value = val
-                            srow.description = srow.description or '订阅头部快照用于增量扫描'
-                        else:
-                            db.add(Settings(key=head_snap_key, value=val, description='订阅头部快照用于增量扫描'))
-                        db.commit()
+                uniq = {}
+                for it in videos:
+                    vid = it.get('id') if isinstance(it, dict) else None
+                    if isinstance(vid, str) and vid:
+                        uniq[vid] = it
+                videos = list(uniq.values())
             except Exception:
                 pass
 
@@ -1300,6 +973,12 @@ class BilibiliDownloaderV6:
                                 os.remove(cpath)
                             except Exception:
                                 pass
+                    # 同时清理本次创建的单个 cookies_path
+                    try:
+                        if cookies_path and os.path.exists(cookies_path):
+                            os.remove(cookies_path)
+                    except Exception:
+                        pass
                 except Exception:
                     pass
 

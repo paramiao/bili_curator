@@ -46,6 +46,7 @@ from .services.remote_total_store import (
     read_remote_total_fresh,
     write_remote_total,
 )
+from .services.metrics_service import compute_subscription_metrics, compute_overview_metrics
 
 # Logger
 logger = logging.getLogger(__name__)
@@ -255,15 +256,7 @@ async def api_sync_trigger(body: SyncTriggerBody, background_tasks: BackgroundTa
                         if downloaded > int(remote_total_cached):
                             raise RuntimeError("cached remote_total suspicious on running; skip idle override")
                         pend = max(0, int(remote_total_cached) - int(downloaded))
-                        pend_key = f"agg:{sid}:pending_estimated"
-                        pend_val = str(pend)
-                        s = ldb.query(Settings).filter(Settings.key == pend_key).first()
-                        if not s:
-                            s = Settings(key=pend_key, value=pend_val)
-                            ldb.add(s)
-                        else:
-                            s.value = pend_val
-                        ldb.commit()
+                        # 移除旧的 pending_estimated 缓存写入（已统一到 compute_subscription_metrics）
                         # 将状态置为 idle（UPSERT）
                         status_key = f"sync:{sid}:status"
                         payload = {
@@ -297,15 +290,7 @@ async def api_sync_trigger(body: SyncTriggerBody, background_tasks: BackgroundTa
                     if downloaded > int(remote_total_cached):
                         raise RuntimeError("cached remote_total suspicious; force refresh")
                     pend = max(0, int(remote_total_cached) - int(downloaded))
-                    pend_key = f"agg:{sid}:pending_estimated"
-                    pend_val = str(pend)
-                    s = ldb.query(Settings).filter(Settings.key == pend_key).first()
-                    if not s:
-                        s = Settings(key=pend_key, value=pend_val)
-                        ldb.add(s)
-                    else:
-                        s.value = pend_val
-                    ldb.commit()
+                    # 移除旧的 pending_estimated 缓存写入（已统一到 compute_subscription_metrics）
                     # 提前返回前，确保 sync 状态被设置为 idle（避免历史 running 残留）
                     try:
                         status_key = f"sync:{sid}:status"
@@ -349,16 +334,7 @@ async def api_sync_trigger(body: SyncTriggerBody, background_tasks: BackgroundTa
 
             try:
                 info = await downloader.compute_pending_list(sid, ldb)
-                # 将 pending 写入缓存（与调度器行为一致，确保前端立刻可见）
-                pend_key = f"agg:{sid}:pending_estimated"
-                pend_val = str(info.get('pending') or 0)
-                s = ldb.query(Settings).filter(Settings.key == pend_key).first()
-                if not s:
-                    s = Settings(key=pend_key, value=pend_val)
-                    ldb.add(s)
-                else:
-                    s.value = pend_val
-                ldb.commit()
+                # 移除旧的 pending_estimated 缓存写入（已统一到 compute_subscription_metrics）
                 # 成功：将 sync 状态从 running 更新为 idle（使用 UPSERT，避免被并发覆盖）
                 try:
                     status_key = f"sync:{sid}:status"
@@ -632,7 +608,7 @@ async def api_sync_status(sid: Optional[int] = None, db: Session = Depends(get_d
         keys = []
         for i in ids:
             keys.append(f"sync:{i}:status")
-            keys.append(f"agg:{i}:pending_estimated")
+            # 移除旧的 pending_estimated 读取（已统一到 compute_subscription_metrics）
             keys.append(f"retry:{i}:failed_backfill")
         rows = db.query(Settings).filter(Settings.key.in_(keys)).all()
         smap = {r.key: r.value for r in rows if r and r.key}
@@ -664,13 +640,7 @@ async def api_sync_status(sid: Optional[int] = None, db: Session = Depends(get_d
                         stat["is_fetching"] = True
             except Exception:
                 pass
-            # pending cached
-            try:
-                pc = smap.get(f"agg:{s.id}:pending_estimated")
-                if pc is not None:
-                    stat["pending_estimated"] = int(str(pc).strip())
-            except Exception:
-                pass
+            # 移除旧的 pending_estimated 读取（已统一到 compute_subscription_metrics）
             # retry queue length
             try:
                 rq = smap.get(f"retry:{s.id}:failed_backfill")
@@ -1378,16 +1348,6 @@ async def download_aggregate(db: Session = Depends(get_db)):
         )
         downloaded_map: Dict[int, int] = {sid: int(cnt) for sid, cnt in downloaded_rows}
 
-        # 4) 批量读取 Settings：
-        #    - sync:{id}:status -> remote_total
-        #    - agg:{id}:pending_estimated -> 缓存的待下载估算
-        keys = []
-        for sid in sub_ids:
-            keys.append(f"sync:{sid}:status")
-            keys.append(f"agg:{sid}:pending_estimated")
-        settings_rows = db.query(Settings).filter(Settings.key.in_(keys)).all()
-        settings_map = {s.key: s.value for s in settings_rows if s and s.key}
-
         result = []
         total_downloaded = 0
         total_pending = 0
@@ -1395,36 +1355,19 @@ async def download_aggregate(db: Session = Depends(get_db)):
         total_running = 0
 
         for sub in active_subs:
-            downloaded = int(downloaded_map.get(sub.id, 0))
+            # 统一口径：直接从 compute_subscription_metrics 获取
+            m = compute_subscription_metrics(db, sub.id)
+            # 本地已下载以统一字段 on_disk_total 为准（避免与 Video 表统计口径不一致）
+            downloaded = int(m.get('on_disk_total') or 0)
             total_downloaded += downloaded
 
-            # 读取 remote_total
-            remote_total = None
-            try:
-                key = f"sync:{sub.id}:status"
-                sval = settings_map.get(key)
-                if sval:
-                    data = json.loads(sval)
-                    rt = data.get("remote_total")
-                    if isinstance(rt, int) and rt >= 0:
-                        remote_total = rt
-            except Exception:
-                remote_total = None
+            # 远端总数优先 expected_total，否则回退 expected_total_cached
+            remote_total = m.get('expected_total')
+            if remote_total is None:
+                remote_total = m.get('expected_total_cached')
 
-            # 优先使用缓存的 pending 估算值
-            pending_cached = None
-            try:
-                pc_val = settings_map.get(f"agg:{sub.id}:pending_estimated")
-                if pc_val is not None:
-                    pending_cached = int(str(pc_val).strip())
-            except Exception:
-                pending_cached = None
-
-            pending_estimated = None
-            if isinstance(pending_cached, int):
-                pending_estimated = max(0, pending_cached)
-            else:
-                pending_estimated = max(0, int(remote_total) - downloaded) if remote_total is not None else 0
+            # 待下载直接使用统一字段 pending
+            pending_estimated = int(m.get('pending') or 0)
 
             qbucket = q_index.get(sub.id, {'queued': 0, 'running': 0})
             total_pending += pending_estimated
@@ -1443,7 +1386,7 @@ async def download_aggregate(db: Session = Depends(get_db)):
                     'queued': qbucket['queued'],
                     'running': qbucket['running'],
                 },
-                'remote_total': remote_total,
+                'remote_total': remote_total if isinstance(remote_total, int) else None,
             })
 
         return {
@@ -1499,120 +1442,72 @@ async def queue_list():
 # 订阅管理API
 @app.get("/api/subscriptions")
 async def get_subscriptions(db: Session = Depends(get_db)):
-    """获取所有订阅，包含远端总计与待下载估算（待下载=远端-本地目录视频数）。"""
+    """获取所有订阅（统一口径）：expected_total/on_disk_total/failed_perm/pending 等。
+    保留兼容字段：remote_total、expected_total_videos、downloaded_videos、db_total_videos。
+    """
     subscriptions = db.query(Subscription).all()
     result = []
 
-    from .models import Settings
-    import json
-
     for sub in subscriptions:
-        # 本地统计（口径A：以有文件为准）
-        total_videos_local_all = db.query(Video).filter(Video.subscription_id == sub.id).count()
-        downloaded_videos = db.query(Video).filter(
-            Video.subscription_id == sub.id,
-            Video.video_path.isnot(None)
-        ).count()
-        on_disk_total = downloaded_videos
-
-        # 远端总计读取：优先使用 downloader 写入的 sync:{id}:status（remote_total）
-        remote_total = None
-        remote_status = None
-        try:
-            key = f"sync:{sub.id}:status"
-            s = db.query(Settings).filter(Settings.key == key).first()
-            if s and s.value:
-                data = json.loads(s.value)
-                rt = data.get("remote_total")
-                if isinstance(rt, int) and rt >= 0:
-                    remote_total = rt
-                st = data.get('status')
-                # 若正在获取且 remote_total 尚未写回，状态显示为 fetching
-                if (st == 'running') and (remote_total is None):
-                    remote_status = 'fetching'
-        except Exception:
-            remote_total = None
-
-        # 待下载仅以远端为准：remote_total 缺失时按 0 处理（不再用本地回退）
-        pending_videos = max(0, (remote_total or 0) - on_disk_total)
-
-        # 更新数据库中的统计信息（以本地有文件数为总数，保持与其他页面一致）
-        sub.total_videos = on_disk_total
-        sub.downloaded_videos = downloaded_videos
-
+        m = compute_subscription_metrics(db, sub.id)
         result.append({
             "id": sub.id,
             "name": sub.name,
             "type": sub.type,
             "url": sub.url,
             "is_active": sub.is_active,
-            "total_videos": on_disk_total,
-            "db_total_videos": total_videos_local_all,
-            "remote_total": remote_total,  # 兼容字段（deprecated）：请使用 expected_total
-            "expected_total": remote_total,  # 标准字段
-            "expected_total_videos": remote_total,  # 兼容字段（deprecated）
-            "remote_status": remote_status,
-            "downloaded_videos": downloaded_videos,
-            "pending_videos": pending_videos,
+            # 统一字段
+            "expected_total": m.get("expected_total"),
+            "expected_total_cached": m.get("expected_total_cached"),
+            "expected_total_snapshot_at": m.get("expected_total_snapshot_at"),
+            "on_disk_total": m.get("on_disk_total"),
+            "db_total": m.get("db_total"),
+            "failed_perm": m.get("failed_perm"),
+            "pending": m.get("pending"),
+            "sizes": m.get("sizes"),
+            # 兼容字段
+            "total_videos": m.get("on_disk_total"),
+            "db_total_videos": m.get("db_total"),
+            "remote_total": m.get("expected_total"),
+            "expected_total_videos": m.get("expected_total"),
+            "downloaded_videos": m.get("on_disk_total"),
+            "pending_videos": m.get("pending"),
+            # 其他元信息
             "last_check": sub.last_check.isoformat() if sub.last_check else None,
             "created_at": sub.created_at.isoformat() if sub.created_at else None,
             "updated_at": sub.updated_at.isoformat() if sub.updated_at else None
         })
-    
+
     db.commit()
     return result
 
 @app.get("/api/overview")
 async def get_overview(db: Session = Depends(get_db)):
-    """全局总览：Remote/Local/Pending 汇总，及队列分布与最近失败数。"""
+    """全局总览（统一口径）：远端/本地/失败/待下载/容量汇总 + 队列统计。"""
     try:
-        subs = db.query(Subscription).all()
-        from .models import Settings
-        import json as json_lib
+        metrics = compute_overview_metrics(db)
 
-        remote_total_sum = 0
-        local_total_sum = 0
-        pending_total_sum = 0
-
-        for sub in subs:
-            local = db.query(Video).filter(Video.subscription_id == sub.id).count()
-            local_total_sum += local
-
-            remote = None
-            try:
-                key = f"sync:{sub.id}:status"
-                s = db.query(Settings).filter(Settings.key == key).first()
-                if s and s.value:
-                    data = json_lib.loads(s.value)
-                    rt = data.get("remote_total")
-                    if isinstance(rt, int) and rt >= 0:
-                        remote = rt
-            except Exception:
-                remote = None
-
-            # 远端汇总严格以远端为准：仅累加已有远端数据
-            remote_total_sum += (remote or 0)
-            # 待下载总数仅在远端存在时计算；缺失远端时不再用本地回退
-            if remote is not None:
-                pending_total_sum += max(0, remote - local)
-
-        # 队列统计
+        # 队列统计保持不变
         qstats = request_queue.stats()
         qlist = request_queue.list()
         now = datetime.now()
-        recent_failed_24h = sum(1 for j in qlist if j.get('status') == 'failed' and j.get('finished_at') and \
-                                 isinstance(j.get('finished_at'), datetime) and (now - j['finished_at']) <= timedelta(hours=24))
+        recent_failed_24h = sum(
+            1 for j in qlist
+            if j.get('status') == 'failed' and j.get('finished_at') and isinstance(j.get('finished_at'), datetime)
+            and (now - j['finished_at']) <= timedelta(hours=24)
+        )
 
         return {
-            'remote_total': remote_total_sum,
-            'local_total': local_total_sum,
-            'pending_total': pending_total_sum,
-            'queue': {
-                'queued': qstats.get('counts', {}).get('queued', 0),
-                'running': qstats.get('counts', {}).get('running', 0),
-                'done': qstats.get('counts', {}).get('done', 0),
-                'failed': qstats.get('counts', {}).get('failed', 0),
-            },
+            # 统一聚合口径
+            'remote_total': metrics.get('remote_total'),
+            'local_total': metrics.get('local_total'),
+            'db_total': metrics.get('db_total'),
+            'failed_perm_total': metrics.get('failed_perm_total'),
+            'pending_total': metrics.get('pending_total'),
+            'downloaded_size_bytes': metrics.get('downloaded_size_bytes'),
+            'computed_at': metrics.get('computed_at'),
+            # 队列信息
+            'queue': qstats,
             'recent_failed_24h': recent_failed_24h,
         }
     except Exception as e:
@@ -1916,7 +1811,7 @@ async def create_subscription(subscription: dict, db: Session = Depends(get_db))
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/api/subscriptions/{subscription_id}/expected-total")
-async def get_subscription_expected_total(subscription_id: int, db: Session = Depends(get_db)):
+async def get_subscription_expected_total(subscription_id: int, force: bool = False, db: Session = Depends(get_db)):
     """获取远端合集应有总计视频数（带1小时缓存），用于校准显示。
     仅对 type=collection 且存在 url 的订阅有效。
     """
@@ -1926,14 +1821,15 @@ async def get_subscription_expected_total(subscription_id: int, db: Session = De
     if sub.type != "collection" or not sub.url:
         raise HTTPException(status_code=400, detail="该订阅不是合集或缺少URL")
 
-    # 检查1小时内的缓存
-    cached_total = read_remote_total_fresh(db, subscription_id, max_age_hours=1)
-    if isinstance(cached_total, int):
-        return {
-            API_FIELD_EXPECTED_TOTAL: int(cached_total),
-            API_FIELD_EXPECTED_TOTAL_COMPAT: int(cached_total),
-            "cached": True,
-        }
+    # 检查1小时内的缓存（非强制刷新时）
+    if not force:
+        cached_total = read_remote_total_fresh(db, subscription_id, max_age_hours=1)
+        if isinstance(cached_total, int):
+            return {
+                API_FIELD_EXPECTED_TOTAL: int(cached_total),
+                API_FIELD_EXPECTED_TOTAL_COMPAT: int(cached_total),
+                "cached": True,
+            }
 
     try:
         import tempfile, os, json as json_lib
@@ -2085,7 +1981,9 @@ async def get_subscription_expected_total(subscription_id: int, db: Session = De
             if expected is not None:
                 await request_queue.mark_done(job_nc)
                 total_val = int(expected)
-                return {API_FIELD_EXPECTED_TOTAL: total_val, API_FIELD_EXPECTED_TOTAL_COMPAT: total_val, "job_id": job_nc}
+                # 写入缓存，更新快照时间戳
+                write_remote_total(db, sub.id, total_val, sub.url)
+                return {API_FIELD_EXPECTED_TOTAL: total_val, API_FIELD_EXPECTED_TOTAL_COMPAT: total_val, "job_id": job_nc, "cached": False}
             else:
                 await request_queue.mark_failed(job_nc, "need_cookie_fallback")
         except Exception as e:
@@ -2139,18 +2037,12 @@ async def get_subscription_expected_total(subscription_id: int, db: Session = De
 
 @app.get("/api/subscriptions/{subscription_id}")
 async def get_subscription(subscription_id: int, db: Session = Depends(get_db)):
-    """获取单个订阅详情"""
+    """获取单个订阅详情（统一口径）。"""
     subscription = db.query(Subscription).filter(Subscription.id == subscription_id).first()
     if not subscription:
         raise HTTPException(status_code=404, detail="订阅不存在")
 
-    # Calculate statistics
-    total_videos = db.query(Video).filter(Video.subscription_id == subscription.id).count()
-    downloaded_videos = db.query(Video).filter(
-        Video.subscription_id == subscription.id,
-        Video.video_path.isnot(None)
-    ).count()
-    pending_videos = max(0, total_videos - downloaded_videos)
+    m = compute_subscription_metrics(db, subscription.id)
 
     return {
         "id": subscription.id,
@@ -2165,9 +2057,23 @@ async def get_subscription(subscription_id: int, db: Session = Depends(get_db)):
         "min_likes": subscription.min_likes,
         "min_favorites": subscription.min_favorites,
         "min_views": subscription.min_views,
-        "total_videos": total_videos,
-        "downloaded_videos": downloaded_videos,
-        "pending_videos": pending_videos,
+        # 统一字段
+        "expected_total": m.get("expected_total"),
+        "expected_total_cached": m.get("expected_total_cached"),
+        "expected_total_snapshot_at": m.get("expected_total_snapshot_at"),
+        "on_disk_total": m.get("on_disk_total"),
+        "db_total": m.get("db_total"),
+        "failed_perm": m.get("failed_perm"),
+        "pending": m.get("pending"),
+        "sizes": m.get("sizes"),
+        # 兼容字段
+        "total_videos": m.get("on_disk_total"),
+        "db_total_videos": m.get("db_total"),
+        "remote_total": m.get("expected_total"),
+        "expected_total_videos": m.get("expected_total"),
+        "downloaded_videos": m.get("on_disk_total"),
+        "pending_videos": m.get("pending"),
+        # 其他
         "is_active": subscription.is_active,
         "last_check": subscription.last_check.isoformat() if subscription.last_check else None,
         "created_at": subscription.created_at.isoformat() if subscription.created_at else None,

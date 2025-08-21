@@ -35,6 +35,24 @@ GET /api/overview
 ```
 返回系统运行状态、统计数据和队列状态。
 
+响应（示例）：
+```json
+{
+  "remote_total": 1520,
+  "local_total": 1498,
+  "db_total": 1503,
+  "failed_perm_total": 22,
+  "pending_total": 0,
+  "downloaded_size_bytes": 9876543210,
+  "computed_at": "2025-08-21T08:20:31.000Z",  
+  "queue": { /* 省略 */ },
+  "recent_failed_24h": 3
+}
+```
+
+说明：
+- 前端展示“概览快照新鲜度”使用 `computed_at`（缓存TTL=60秒），超过60秒标记“已过期”。
+
 ## 核心 API 端点
 
 ### 健康检查
@@ -184,7 +202,7 @@ POST /api/subscriptions/{id}/scan-associate
 
 ## 2. 订阅管理接口
 
-### 获取订阅列表
+### 获取订阅列表（统一口径）
 ```http
 GET /api/subscriptions
 ```
@@ -198,11 +216,20 @@ GET /api/subscriptions
     "type": "collection",
     "url": "https://www.bilibili.com/list/xxx",
     "is_active": true,
+    // 统一字段（前端仅依赖以下字段进行展示与计算口径）
+    "expected_total": 150,                     // 远端应有总数（来自最近快照）
+    "expected_total_cached": true,             // 是否命中1小时内快照
+    "expected_total_snapshot_at": "2025-08-21T07:30:00Z", // 快照时间（ISO）
+    "on_disk_total": 120,                      // 本地有文件数
+    "db_total": 1503,                          // 数据库视频记录数
+    "failed_perm": 22,                         // 永久失败数
+    "pending": 30,                             // 统一口径：max(0, expected_total - on_disk_total - failed_perm)
+    "sizes": { "downloaded_files": 120, "downloaded_size_bytes": 9876543210 },
+
+    // 兼容字段（deprecated）：与统一字段等值，仅为过渡保留
     "total_videos": 120,
-    "expected_total": 150,
-    "remote_total": 150,              // 兼容字段（deprecated），与 expected_total 等值
-    "expected_total_videos": 150,     // 兼容字段（deprecated），与 expected_total 等值
-    "remote_status": "fetching",     // 可选：running 时且远端尚未写回
+    "remote_total": 150,
+    "expected_total_videos": 150,
     "downloaded_videos": 120,
     "pending_videos": 30,
     "last_check": "2025-01-15T10:00:00Z",
@@ -213,8 +240,9 @@ GET /api/subscriptions
 ```
 
 说明：
-- 标准字段为 `expected_total`。历史兼容字段 `remote_total`、`expected_total_videos` 仍返回且与 `expected_total` 等值，后续将逐步移除。
-- 前端界面仅对 `type = "collection"` 的订阅显示“远端总数（获取/刷新）”按钮，其他类型不显示该控件。
+- 仅依赖统一字段：`expected_total`、`expected_total_cached`、`expected_total_snapshot_at`、`on_disk_total`、`db_total`、`failed_perm`、`pending`、`sizes`。
+- 历史兼容字段 `remote_total`、`expected_total_videos`、`downloaded_videos`、`pending_videos` 等与统一字段等值，后续将逐步移除。
+- 详情页与列表页展示“快照新鲜度/TTL（1小时）”，基于 `expected_total_snapshot_at` 与 `expected_total_cached` 判断“有效/已过期”。
 
 ### 获取订阅详情
 ```http
@@ -280,7 +308,7 @@ GET /api/subscriptions/{id}/expected-total
 ```
 
 说明：
-- 若命中1小时内缓存，将返回 `cached: true`。
+- 若命中1小时内缓存，将返回 `cached: true`。订阅远端总数快照TTL=1小时。
 - 在需要 Cookie 的回退路径运行时，响应可能包含 `job_id` 用于标识内部队列任务。
 
 ### 启用门控（说明）

@@ -66,6 +66,22 @@ cmd_health() {
   echo "[WARN] Health check failed with status $status"; exit $status
 }
 
+cmd_diag() {
+  ensure_prereqs
+  echo "[INFO] Running in-container diagnostics via docker compose exec ..."
+  docker compose -f "$COMPOSE_FILE_PATH" exec bili-curator sh -lc '
+    set -e
+    echo "# Health";
+    if curl -fsS http://localhost:8080/health >/dev/null; then echo "OK"; else echo "FAIL"; fi
+    echo "\n# Subscriptions (preview)";
+    curl -s http://localhost:8080/api/subscriptions | head -c 1200; echo
+    echo "\n# Aggregate";
+    curl -s http://localhost:8080/api/download/aggregate | head -c 1200; echo
+    echo "\n# Overview";
+    curl -s http://localhost:8080/api/overview | head -c 1200; echo
+  '
+}
+
 usage() {
   cat <<EOF
 Usage: $(basename "$0") <command>
@@ -78,6 +94,7 @@ Commands:
   logs       Tail compose logs
   ps         Show compose services status
   health     Call http://localhost:8080/health
+  diag       Diagnose API consistency across endpoints (in container)
 
 Environment:
   COMPOSE_FILE   Path to docker-compose file (default: $COMPOSE_FILE_DEFAULT)
@@ -95,6 +112,7 @@ main() {
     logs) cmd_logs ;;
     ps) cmd_ps ;;
     health) cmd_health ;;
+    diag) cmd_diag ;;
     -h|--help|help|"") usage ;;
     *) echo "Unknown command: $cmd"; usage; exit 2 ;;
   esac

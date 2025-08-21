@@ -142,8 +142,16 @@ class EnhancedTaskManager:
                 # 对于关键词订阅，从数据库中查找匹配的视频
                 video_list = await self._get_keyword_videos(subscription, db)
             elif subscription.type == 'uploader':
-                # TODO: 实现UP主订阅
-                raise Exception(f"暂不支持 {subscription.type} 类型的订阅")
+                # UP主订阅：使用下载器的获取函数，订阅级互斥
+                if not getattr(subscription, 'uploader_id', None):
+                    raise Exception("UP主订阅缺少 uploader_id")
+                sub_lock = get_subscription_lock(subscription.id)
+                async with sub_lock:
+                    video_list = await downloader._get_uploader_videos(
+                        subscription.uploader_id,
+                        db,
+                        subscription_id=subscription.id,
+                    )
             else:
                 raise Exception(f"未知的订阅类型: {subscription.type}")
             

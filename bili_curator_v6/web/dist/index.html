@@ -1249,10 +1249,24 @@
             try { localStorage.setItem(`expectedCache:${id}`, JSON.stringify(obj)); } catch (_) {}
             return obj;
         }
+        // 10 秒节流，避免重复刷新
+        const __expectedThrottle = {};
+        function __canRefreshExpected(id) {
+            const now = Date.now();
+            const last = __expectedThrottle[id] || 0;
+            if ((now - last) < 10000) return false;
+            __expectedThrottle[id] = now;
+            return true;
+        }
         async function refreshExpected(subscriptionId, force = false) {
             const el = document.getElementById(`expected-${subscriptionId}`);
             if (!el) return;
             const countEl = el.querySelector('.expected-count');
+            const btns = el.querySelectorAll('button');
+            // 节流：10s 内重复点击直接忽略
+            if (!__canRefreshExpected(subscriptionId)) {
+                return;
+            }
             // 命中缓存且未过期（1小时）且非强制刷新
             const now = Date.now();
             const c = __expectedCache[subscriptionId] || getExpectedCache(subscriptionId);
@@ -1262,25 +1276,19 @@
                 return;
             }
             if (countEl) countEl.textContent = '加载中...';
-            const data = await apiRequest(`/api/subscriptions/${subscriptionId}/expected-total`);
+            btns.forEach(b => b.disabled = true);
+            const url = `/api/subscriptions/${subscriptionId}/expected-total` + (force ? '?force=1' : '');
+            const data = await apiRequest(url);
             if (data && typeof data.expected_total === 'number') {
                 if (countEl) countEl.textContent = String(data.expected_total);
                 setExpectedCache(subscriptionId, data.expected_total);
-                // 同步更新待下载展示（优先远端）
-                try {
-                    const subEl = document.getElementById(`sub-${subscriptionId}`);
-                    if (subEl) {
-                        const downloaded = parseInt(subEl.getAttribute('data-downloaded') || '0', 10);
-                        const pending = Math.max((data.expected_total - downloaded), 0);
-                        const pEl = document.getElementById(`pending-${subscriptionId}`);
-                        const sEl = document.getElementById(`pending-src-${subscriptionId}`);
-                        if (pEl) pEl.textContent = String(pending);
-                        if (sEl) sEl.textContent = '(远端)';
-                    }
-                } catch (_) {}
-            } else {
+                // 不在前端重新计算 pending，交由后端口径统一；轻量刷新列表以获取最新 pending
+                try { if (typeof loadSubscriptions === 'function') { await loadSubscriptions(); } } catch (_) {}
+            }
+ else {
                 if (countEl) countEl.textContent = '获取失败';
             }
+            btns.forEach(b => b.disabled = false);
         }
 
         // —— Dashboard 轻量轮询 ——
@@ -1425,14 +1433,14 @@
                 const statusText = sub.is_active ? '活跃' : '暂停';
                 const lastCheck = sub.last_check ? new Date(sub.last_check).toLocaleString() : '从未';
                 
-                // 统计信息（优先使用后端提供的远端总计与待下载）
-                const totalVideos = sub.total_videos || 0; // 本地有文件数（口径A）
-                const dbTotalVideos = (typeof sub.db_total_videos === 'number') ? sub.db_total_videos : totalVideos; // 数据库记录总数
-                const downloadedVideos = sub.downloaded_videos || 0;
-                // 远端总数优先读取标准字段 expected_total，兼容回退 remote_total
+                // 统计信息（统一口径，来自后端 metrics_service）
+                const onDiskTotal = (typeof sub.on_disk_total === 'number') ? sub.on_disk_total : (sub.downloaded_videos || 0);
+                const dbTotalVideos = (typeof sub.db_total === 'number') ? sub.db_total : ((typeof sub.db_total_videos === 'number') ? sub.db_total_videos : onDiskTotal);
+                // 远端总数：标准字段 expected_total，兼容 remote_total
                 const remoteTotal = (typeof sub.expected_total === 'number') ? sub.expected_total : ((typeof sub.remote_total === 'number') ? sub.remote_total : null);
-                const serverPending = (typeof sub.pending_videos === 'number') ? Math.max(sub.pending_videos, 0) : null;
-                const localPending = Math.max((totalVideos - downloadedVideos), 0);
+                // 待下载：标准字段 pending（若远端缺失则可能为 null）；兼容 pending_videos
+                const serverPendingRaw = (typeof sub.pending === 'number') ? sub.pending : ((typeof sub.pending_videos === 'number') ? sub.pending_videos : null);
+                const serverPending = (typeof serverPendingRaw === 'number') ? Math.max(serverPendingRaw, 0) : null;
                 
                 // 订阅类型显示
                 const typeTexts = {
@@ -1460,17 +1468,32 @@
                     `;
                 }
                 
-                // 远端信息优先级：后端 remote_total/pending_videos > 本地缓存 expected_total > 本地计算
+                // 远端信息优先级：后端 expected_total/pending > 后端 expected_total_cached > 本地缓存 expected_total；不再前端自算 pending
                 const cached = getExpectedCache(sub.id);
                 const cachedOk = cached && (Date.now() - cached.at < 3600*1000);
-                const expectedText = (remoteTotal !== null) ? String(remoteTotal) : (cachedOk ? String(cached.value) : '未获取');
-                const expectedForPending = (remoteTotal !== null) ? remoteTotal : (cachedOk ? cached.value : null);
-                const pendingFromExpected = (expectedForPending !== null) ? Math.max((expectedForPending - downloadedVideos), 0) : null;
-                const pendingToShow = (serverPending !== null) ? serverPending : ((pendingFromExpected !== null) ? pendingFromExpected : localPending);
-                const pendingSource = (serverPending !== null) ? '后端' : ((expectedForPending !== null) ? '远端' : '本地');
+                const serverCached = (typeof sub.expected_total_cached === 'number') ? sub.expected_total_cached : null;
+                const expectedText = (remoteTotal !== null)
+                    ? String(remoteTotal)
+                    : (serverCached !== null)
+                        ? String(serverCached)
+                        : (cachedOk ? String(cached.value) : '未获取');
+
+                // 新鲜度/TTL 展示：优先使用后端 expected_total_snapshot_at
+                let freshnessHtml = '';
+                if (sub.expected_total_snapshot_at) {
+                    const snapAt = new Date(sub.expected_total_snapshot_at);
+                    const ageMs = Date.now() - snapAt.getTime();
+                    const mins = Math.floor(ageMs / 60000);
+                    const expired = ageMs > 3600*1000;
+                    const label = expired ? '已过期' : '有效';
+                    const ageText = mins <= 0 ? '刚刚' : `${mins} 分钟前`;
+                    freshnessHtml = `<small class="expected-freshness" style="margin-left:6px;opacity:.75;">(${ageText} · ${label})</small>`;
+                }
+                const pendingToShow = (serverPending !== null) ? serverPending : '-';
+                const pendingSource = (serverPending !== null) ? '后端' : '未知';
 
                 html += `
-                    <div class="subscription-item" id="sub-${sub.id}" data-total="${totalVideos}" data-downloaded="${downloadedVideos}">
+                    <div class="subscription-item" id="sub-${sub.id}" data-total="${onDiskTotal}" data-downloaded="${onDiskTotal}">
                         <div class="subscription-header">
                             <div>
                                 <h3 class="subscription-title">${sub.name}</h3>
@@ -1490,16 +1513,15 @@
                         </div>
                         
                         <div class="subscription-stats">
-                            <span class="stat-item stat-total">本地(有文件): ${totalVideos}</span>
+                            <span class="stat-item stat-total">本地(有文件): ${onDiskTotal}</span>
                             <span class="stat-item" title="数据库中的视频记录总数（可能包含无本地文件的记录）">数据库记录: ${dbTotalVideos}</span>
-                            <span class="stat-item stat-downloaded">已下载: ${downloadedVideos}</span>
+                            <span class="stat-item stat-downloaded">已下载: ${onDiskTotal}</span>
                             <span class="stat-item stat-pending">待下载: <span id="pending-${sub.id}">${pendingToShow}</span> <small id="pending-src-${sub.id}" style="opacity:.7;">(${pendingSource})</small></span>
                             <span class="stat-item" id="retry-${sub.id}" style="background:#fff0f0;color:#b91c1c;">失败回补队列: <span class="retry-count">-</span></span>
                             ${sub.type === 'collection' ? `
                             <span class="stat-item" id="expected-${sub.id}" style="background-color:#f3e5f5;color:#6a1b9a;">
-                                远端总数: <span class="expected-count">${expectedText}</span>
-                                <button class="btn btn-small btn-outline" style="margin-left:6px;" onclick="refreshExpected(${sub.id})">获取</button>
-                                <button class="btn btn-small btn-outline" style="margin-left:6px;" onclick="refreshExpected(${sub.id}, true)">刷新</button>
+                                远端总数: <span class="expected-count">${expectedText}</span>${freshnessHtml}
+                                <button class="btn btn-small btn-outline" style="margin-left:6px;" onclick="refreshExpected(${sub.id}, true)">刷新远端快照</button>
                             </span>
                             ` : ''}
                         </div>
@@ -1614,12 +1636,17 @@
                 const items = (data && data.items) ? data.items : [];
                 items.forEach(stat => {
                     const sid = stat.subscription_id;
-                    // pending_estimated 优先展示
+                    // pending_estimated 仅在后端 pending 缺失时作为兜底显示，并标注“估算”
                     if (typeof stat.pending_estimated === 'number') {
                         const pEl = document.getElementById(`pending-${sid}`);
                         const sEl = document.getElementById(`pending-src-${sid}`);
-                        if (pEl) pEl.textContent = String(Math.max(0, stat.pending_estimated));
-                        if (sEl) sEl.textContent = '(后端)';
+                        if (pEl) {
+                            const cur = (pEl.textContent || '').trim();
+                            if (!cur || cur === '-' || cur === '—') {
+                                pEl.textContent = String(Math.max(0, stat.pending_estimated));
+                                if (sEl) sEl.textContent = '(估算)';
+                            }
+                        }
                     }
                     // retry 队列长度
                     const rEl = document.getElementById(`retry-${sid}`);
@@ -2555,8 +2582,22 @@
             const local = data.local_total ?? '-';
             const pending = data.pending_total ?? (typeof remote==='number' && typeof local==='number' ? Math.max(remote-local,0) : '-');
             const recentFail = data.recent_failed_24h ?? '-';
+            // 新鲜度：来自后端 computed_at（概览聚合计算时间），TTL=60s
+            let freshnessHtml = '';
+            if (data.computed_at) {
+                try {
+                    const t = new Date(data.computed_at);
+                    const ageMs = Date.now() - t.getTime();
+                    const mins = Math.floor(ageMs / 60000);
+                    const expired = ageMs > 60*1000;
+                    const label = expired ? '已过期' : '有效';
+                    const ageText = ageMs < 30*1000 ? '刚刚' : (mins <= 0 ? '不到1分钟' : `${mins} 分钟前`);
+                    freshnessHtml = `<div style="margin-bottom:6px; color:#6b7280; font-size:12px;">概览快照：${ageText} · ${label}</div>`;
+                } catch (_) {}
+            }
             
             box.innerHTML = `
+                ${freshnessHtml}
                 <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap:12px;">
                     <div class="stat-card">
                         <div class="stat-title">远端总数</div>
@@ -2894,6 +2935,16 @@
 
         async function loadSubscriptionDetailPage(sid, page) {
             const size = 20;
+            // 1) 订阅级指标（统一口径）：仅依赖后端 /api/subscriptions 列表返回
+            let subMetrics = null;
+            try {
+                const subs = await apiRequest('/api/subscriptions');
+                if (Array.isArray(subs)) {
+                    subMetrics = subs.find(s => String(s.id) === String(sid)) || null;
+                }
+            } catch (_) { subMetrics = null; }
+
+            // 2) 加载该订阅的视频明细
             const data = await apiRequest(`/api/media/subscriptions/${sid}/videos?page=${page}&size=${size}&include_disk=true`);
             const rows = (data.videos || []).map(v => `
                 <tr>
@@ -2913,7 +2964,24 @@
                     <span>第 ${page} / ${totalPages} 页，共 ${total} 条</span>
                     <button class="btn btn-outline" ${page>=totalPages?'disabled':''} onclick="loadSubscriptionDetailPage(${sid}, ${page+1})">下一页</button>
                 </div>`;
+            // 3) 渲染订阅指标 + 新鲜度/TTL 提示（1小时）
+            let metricsHtml = '';
+            if (subMetrics) {
+                const et = (subMetrics.expected_total ?? null);
+                const snapAt = subMetrics.expected_total_snapshot_at || null;
+                const cached = !!subMetrics.expected_total_cached;
+                const freshness = formatSnapshotFreshness(snapAt, 60); // 60 分钟 TTL
+                const etDisplay = (typeof et === 'number') ? et : '-';
+                const badge = cached ? '<span class="badge">有效</span>' : '<span class="badge" style="background:#fde68a; color:#92400e; border:1px solid #fcd34d;">可能已过期</span>';
+                metricsHtml = `
+                <div style="display:flex; align-items:center; gap:12px; margin-bottom:8px; color:#374151;">
+                  <div>远端总数：<strong>${etDisplay}</strong></div>
+                  <div style="color:#6b7280;">快照：${freshness.text} · ${freshness.valid ? '有效' : '已过期'}</div>
+                  ${badge}
+                </div>`;
+            }
             document.getElementById('media-sub-detail-content').innerHTML = `
+                ${metricsHtml}
                 <div class="table-wrap">
                   <table class="data">
                     <thead>
@@ -2942,6 +3010,29 @@
 
         function escapeHtml(s) {
             return String(s).replace(/[&<>"] /g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',' ':' ' }[c] || c));
+        }
+
+        // 统一：快照新鲜度/TTL 格式化（单位：分钟TTL）
+        function formatSnapshotFreshness(isoTime, ttlMinutes) {
+            const res = { text: '-', valid: false };
+            if (!isoTime) return res;
+            try {
+                const t = new Date(isoTime);
+                const now = new Date();
+                const diffMs = now - t;
+                const mins = Math.floor(diffMs / 60000);
+                let text = '刚刚';
+                if (mins <= 0) text = '刚刚';
+                else if (mins < 60) text = `${mins} 分钟前`;
+                else {
+                    const hours = Math.floor(mins / 60);
+                    const remMin = mins % 60;
+                    text = remMin ? `${hours} 小时 ${remMin} 分钟前` : `${hours} 小时前`;
+                }
+                return { text, valid: mins <= ttlMinutes };
+            } catch (_) {
+                return res;
+            }
         }
 
         // —— 目录统计与明细 ——

@@ -124,6 +124,21 @@ CREATE TABLE settings (
    - 兼容旧键：`expected_total:{sid}` 同步双写，读取时优先新键，逐步下线旧键
    - 统一读写封装：参见后端 `app/services/remote_total_store.py` 与常量定义 `app/constants.py`
 
+## 统一统计口径与快照字段（新增）
+
+- 统一统计与聚合由 `app/services/metrics_service.py` 提供，前端仅消费以下统一字段，不得在前端自行计算或覆盖：
+  - `expected_total`（远端应有总数，来自最近快照）
+  - `expected_total_cached`（布尔，是否命中快照TTL）
+  - `expected_total_snapshot_at`（ISO 时间，快照生成时间）
+  - `on_disk_total`、`db_total`、`failed_perm`、`pending`、`sizes.downloaded_size_bytes`
+- 快照与TTL规范：
+  - 概览端点 `GET /api/overview` 返回 `computed_at`，TTL=60 秒（仅读侧防抖，不改变统计口径）。
+  - 订阅端点 `GET /api/subscriptions` 返回 `expected_total_*` 字段，TTL=1 小时（远端总数快照）。
+  - 前端展示“新鲜度/TTL”时基于 `computed_at` 或 `expected_total_snapshot_at` 与 `expected_total_cached` 判定有效/已过期。
+- 兼容字段：
+  - `remote_total`、`expected_total_videos`、`downloaded_videos`、`pending_videos` 仅为过渡用途，保证与统一字段等值，逐步下线。
+
+
 ## 数据关系图
 
 ```

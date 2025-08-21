@@ -6,13 +6,27 @@
 - 远端总数字段统一：
   - 后端统一返回 `expected_total`（标准），同时保留兼容字段 `remote_total`/`expected_total_videos`（与标准字段等值，标记 deprecated）
   - `/api/subscriptions` 列表返回体已包含 `expected_total`、`remote_status`
+- 概览与订阅快照新鲜度/TTL 显示：
+  - 概览页：前端读取 `/api/overview` 的 `computed_at` 显示“快照新鲜度”，TTL=60 秒，超时标注“已过期”
+  - 订阅列表与详情页：显示 `expected_total` 的“快照新鲜度/TTL（1小时）”，基于 `expected_total_snapshot_at` 与 `expected_total_cached`；严格依赖统一字段
 - 前端订阅管理：
   - 仅对 `collection` 类型显示“远端总数（获取/刷新）”控件
   - 列表渲染优先读取 `expected_total`，兼容回退 `remote_total`
+  - 合并“获取/刷新”为单一“刷新远端快照”按钮，并增加 10s 节流与请求期间按钮禁用
+
+### 🔧 优化改进
+- `/api/overview` 增加 60 秒轻量缓存，减少高频访问时的 DB/磁盘遍历开销（不影响一致性口径）
+- `pending_estimated` 前端仅在后端 `pending` 缺失时作为兜底显示，并标注“(估算)”来源，避免覆盖统一口径
+
+### 🐛 问题修复
+- 聚合页待下载口径统一：`GET /api/download/aggregate` 改为复用 `metrics_service.compute_subscription_metrics` 的 `pending` 字段，确保与 `/api/subscriptions`、`/api/overview` 一致。
+- 容量统计三级回退：`total_size`/`file_size`/磁盘文件大小三级回退已在 `metrics_service._compute_sizes()` 生效，修复 DB 字段为 NULL 时容量统计为 0 的问题，并加入兜底。
 
 ### 📚 文档
-- 更新 `docs/API_SPECIFICATION.md`：补充 `expected_total` 标准字段与兼容策略、`expected-total` 接口的 `cached`/`job_id` 说明
+- 更新 `docs/API_SPECIFICATION.md`：补充 `expected_total` 标准字段与兼容策略、`expected-total` 接口的 `cached`/`job_id` 说明；新增 `expected_total_cached`、`expected_total_snapshot_at` 与 `overview.computed_at`（含TTL说明）
 - 更新 `docs/DATA_MODEL_DESIGN.md`：统一远端总数缓存键规范 `remote_total:{sid}`，兼容旧键 `expected_total:{sid}`，并指向封装模块
+- 新增“统一统计口径与快照字段”小节：明确 `metrics_service` 输出字段与 TTL（overview=60s、subscriptions=1h），前端仅依赖统一字段
+- 更新 `docs/PROJECT_STATUS.md`：记录概览/列表/详情页的新鲜度/TTL 展示与统一字段落地情况
 - 前端订阅管理：为 `uploader` 类型订阅新增“立即解析”按钮，支持手动触发解析并回填
 - 启用门控与友好提示：当 UP 主名称未解析成功时，启用（is_active=true）被拒绝并弹出提示，引导用户“立即解析”
 - API 文档与端点：

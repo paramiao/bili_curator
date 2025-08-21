@@ -1,6 +1,6 @@
 # 项目进度与下一步计划（V6）
 
-最后更新：2025-08-21 12:49 (+08:00)
+最后更新：2025-08-21 17:52 (+08:00)
 
 ## 1. 概览
 - 代码主目录：`bili_curator_v6/app/`
@@ -59,8 +59,8 @@
   - 建立数据一致性检查和自动修复服务
   - 优化待下载数量计算逻辑，基于实际API查询
 - Web界面增强（2025-08-19）
-  - 订阅管理表格字段完善：本地文件、数据库记录、待下载、失败数等
-  - 失败视频红色高亮显示和一键清理功能
+  - 订阅管理表格字段完善：本地文件、数据库记录、待下载、失败数等完整字段
+  - 失败视频可视化标识和一键清理功能
   - 手动同步按钮，支持实时数据刷新
 - UP主订阅能力（2025-08-21）
   - 新增“UP主名字↔ID”解析与自动回填服务（优先使用可用 Cookie）
@@ -75,22 +75,53 @@
   - 前端调整：仅对 `collection` 类型显示“远端总数（获取/刷新）”控件；列表渲染优先读取 `expected_total`，兼容回退 `remote_total`
   - 缓存键规范：标准 `remote_total:{sid}`，兼容旧键 `expected_total:{sid}`；封装见 `app/services/remote_total_store.py`
 
+- 统计口径统一（2025-08-21）
+  - 新增统一统计服务：`app/services/metrics_service.py`
+    - 字段：`expected_total`、`expected_total_cached`、`expected_total_snapshot_at`、`on_disk_total`、`db_total`、`failed_perm`、`pending`、`sizes.downloaded_size_bytes`
+    - 公式：`pending = max(0, expected_total - on_disk_total - failed_perm)`
+    - 容量：三级回退（`Video.total_size` → `Video.file_size` → 磁盘文件大小）
+  - 修正待下载列表口径：`app/services/pending_list_service.py::_compute_current_pending()` 扣除失败数，明细与数量保持一致
+  - 已验证一致性：`GET /api/download/aggregate`、`GET /api/subscriptions`、`GET /api/overview` 在 `pending`/`expected_total`/快照口径上一致（以 `metrics_service` 为准）
+
+- 概览性能优化（2025-08-21）
+  - `/api/overview` 增加 60 秒轻量缓存，降低高频访问时的 DB/磁盘遍历开销
+  - 不改变统计口径，仅对读侧聚合做防抖
+
+- 快照新鲜度/TTL 提示（2025-08-21）
+  - 概览页：前端读取 `GET /api/overview` 的 `computed_at` 显示“快照新鲜度”，TTL=60 秒，超时标注“已过期”
+  - 订阅列表页：显示 `expected_total` 的“快照新鲜度/TTL（1小时）”，基于 `expected_total_snapshot_at` 与 `expected_total_cached`
+  - 订阅详情页：与列表页一致显示远端总数与快照提示（TTL=1小时），严格依赖统一字段
+
+- 前端统一口径与交互收敛（2025-08-21）
+  - 合并“获取/刷新”为单一“刷新远端快照”按钮，增加 10 秒节流，请求期间禁用按钮
+  - `pending_estimated` 仅在后端 `pending` 缺失时兜底显示，并标注“(估算)”；默认不覆盖后端 `pending`
+  - 列表页 pending 严格依赖后端统一口径，取消任何前端自算覆盖
+
 ## 4. 正在进行（In Progress）
 - 增量管线小样本联调、守护与日志完善：`remote_sync_service -> local_index -> download_plan -> 入队`
 - 订阅增量同步支持扩展（按订阅开关/批量/回填）
 - 解析服务缓存与限流（TTL 缓存、失败计数与退避、速率限制）
+
+ - 远端统计统一落地（已完成）
+  - 后端：`/api/subscriptions`、`/api/subscriptions/{id}`、`/api/overview` 三端点统一接入 `metrics_service`
+  - 前端：字段收敛（仅消费统一字段），展示 `expected_total_cached` 与快照时间，提供“刷新远端快照”入口
+  - 前端（进行中）：详情页/总览页补充“快照新鲜度/TTL”提示与禁用策略，避免误解数据时效
+  - 文档：更新 `docs/API_SPECIFICATION.md`、`docs/DATA_MODEL_DESIGN.md`、`CHANGELOG.md`、本文件
 
 ## 5. 待办与优先级（Backlog & Priority）
 - 高优先级
   - 增量入队流水线审计与结构化日志完善（ID: `todo_inc_audit_logs`）
   - 端到端集成测试（入队协调器 + 任务管理器 + 去重/并发）（ID: `todo_inc_e2e_tests`）
   - 解析服务缓存与限流（TTL 缓存、失败计数/退避、速率限制）（ID: `todo_resolver_cache_ratelimit`）
+  - API 改造：三端点接入 `metrics_service`（ID: `refactor-api-to-metrics`）
+  - 契约与快照测试：pending/failed/expected_total 算法与端点一致性（ID: `add-contract-and-snapshot-tests`）
 - 中优先级
   - 订阅增量同步支持扩展与验证（按订阅开关/批量/回填）（ID: `todo_subscription_incremental`）
   - Specific URLs 订阅策略：一次性 vs 持续订阅（ID: `todo_specific_urls_strategy`）
   - 前端配置面板：Settings 关键键读写（并发、每订阅入队上限、时间预算、增量开关、间隔）（ID: `todo_frontend_config_panel`）
   - 数据模型对齐与迁移说明：本地优先统计、`expected_total` 与 `agg:*` 键口径文档化（ID: `todo_data_model_docs`）
   - CI 自检：扫描旧键 `expected_total:{sid}` 与旧字段直读，防止回归（ID: `todo_ci_guard_remote_total`)
+  - 开发者指南与 CR 清单：仅允许通过 `metrics_service` 取数（ID: `dev-guide-and-cr-checklist`）
 - 低优先级
   - 调度策略收敛：降低/改造 `check_subscriptions`，主推 `enqueue_coordinator` 轻量路径（ID: `todo_scheduler_converge`）
   - 观测指标与可视化：失败率、入队/完成吞吐、队列等待时长、失败回补队列长度（ID: `todo_observability`）
@@ -101,10 +132,13 @@
   - **UP主订阅功能实现**：集成 B 站 UP 主空间 API，实现视频列表获取、待下载计算与下载调度
   - **增量入队流水线审计**：落实按订阅/全局开关、批量限制、回填上限，补充结构化日志
   - 完善订阅类型扩展与调度器集成，确保与现有合集/关键词流程一致
+  - **统一统计口径落地（后端）**：改造 `/api/subscriptions`、`/api/subscriptions/{id}`、`/api/overview` 接入 `metrics_service`；保留兼容字段并标注 deprecated
+  - **统一统计口径落地（前端）**：字段收敛与 UI 提示（快照过期与刷新入口）
 - 第2周
   - 订阅增量同步支持扩展与验证，完善 `RemoteSyncService` 
   - 前端 SPA 联动新订阅类型，完善订阅创建和管理界面
   - 增量管线联调与端到端测试（包含 UP 主路径）
+  - 契约与端点快照测试完善，加入预提交扫描规则（禁止在新代码中自行计算 pending/直连 Settings 拼键）
 
 ## 6. 风险与依赖
 - 远端接口与 Cookie 稳定性：需确保 `cookie_manager.py` 的禁用与轮换策略在高失败率时不造成全局阻塞

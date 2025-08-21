@@ -573,16 +573,8 @@ class SimpleScheduler:
                                         continue
                                     videos.append({'id': vid, 'title': vid, 'webpage_url': url, 'url': url, 'is_queued': False})
                                 incremental_ok = True
-                            # 写观测键
+                            # 写观测键（移除旧的 pending_estimated 缓存，已统一到 compute_subscription_metrics）
                             try:
-                                pend_key = f"agg:{sub.id}:pending_estimated"
-                                pend_val = str(len(videos))
-                                s = db.query(Settings).filter(Settings.key == pend_key).first()
-                                if not s:
-                                    s = Settings(key=pend_key, value=pend_val)
-                                    db.add(s)
-                                else:
-                                    s.value = pend_val
                                 ts_key = f"agg:{sub.id}:last_incremental_at"
                                 s2 = db.query(Settings).filter(Settings.key == ts_key).first()
                                 now_iso = datetime.now().isoformat()
@@ -617,14 +609,7 @@ class SimpleScheduler:
                                 db.add(Settings(key=ts_key, value=now_iso))
                             else:
                                 s2.value = now_iso
-                            # 同步 pending 估算
-                            pend_key = f"agg:{sub.id}:pending_estimated"
-                            pend_val = str(len(videos))
-                            s = db.query(Settings).filter(Settings.key == pend_key).first()
-                            if not s:
-                                db.add(Settings(key=pend_key, value=pend_val))
-                            else:
-                                s.value = pend_val
+                            # 移除旧的 pending_estimated 缓存写入（已统一到 compute_subscription_metrics）
                             db.commit()
                         except Exception:
                             db.rollback()
