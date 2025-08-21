@@ -1429,7 +1429,8 @@
                 const totalVideos = sub.total_videos || 0; // 本地有文件数（口径A）
                 const dbTotalVideos = (typeof sub.db_total_videos === 'number') ? sub.db_total_videos : totalVideos; // 数据库记录总数
                 const downloadedVideos = sub.downloaded_videos || 0;
-                const remoteTotal = (typeof sub.remote_total === 'number') ? sub.remote_total : null;
+                // 远端总数优先读取标准字段 expected_total，兼容回退 remote_total
+                const remoteTotal = (typeof sub.expected_total === 'number') ? sub.expected_total : ((typeof sub.remote_total === 'number') ? sub.remote_total : null);
                 const serverPending = (typeof sub.pending_videos === 'number') ? Math.max(sub.pending_videos, 0) : null;
                 const localPending = Math.max((totalVideos - downloadedVideos), 0);
                 
@@ -1479,6 +1480,7 @@
                                 <button onclick="toggleSubscription(${sub.id}, ${sub.is_active})" class="btn ${sub.is_active ? 'btn-warning' : 'btn-success'}">
                                     ${sub.is_active ? '暂停' : '启用'}
                                 </button>
+                                ${sub.type === 'uploader' ? `<button onclick="resolveUploader(${sub.id}, this)" class="btn btn-outline" title="尝试解析并回填UP主名字/ID">立即解析</button>` : ''}
                                 <button onclick="viewPending(${sub.id})" class="btn btn-outline">查看待下载</button>
                                 <button onclick="editSubscription(${sub.id})" class="btn btn-info">详情/编辑</button>
                                 <button onclick="deleteSubscription(${sub.id})" class="btn btn-danger">删除</button>
@@ -1493,11 +1495,13 @@
                             <span class="stat-item stat-downloaded">已下载: ${downloadedVideos}</span>
                             <span class="stat-item stat-pending">待下载: <span id="pending-${sub.id}">${pendingToShow}</span> <small id="pending-src-${sub.id}" style="opacity:.7;">(${pendingSource})</small></span>
                             <span class="stat-item" id="retry-${sub.id}" style="background:#fff0f0;color:#b91c1c;">失败回补队列: <span class="retry-count">-</span></span>
+                            ${sub.type === 'collection' ? `
                             <span class="stat-item" id="expected-${sub.id}" style="background-color:#f3e5f5;color:#6a1b9a;">
                                 远端总数: <span class="expected-count">${expectedText}</span>
                                 <button class="btn btn-small btn-outline" style="margin-left:6px;" onclick="refreshExpected(${sub.id})">获取</button>
                                 <button class="btn btn-small btn-outline" style="margin-left:6px;" onclick="refreshExpected(${sub.id}, true)">刷新</button>
                             </span>
+                            ` : ''}
                         </div>
                         
                         <div style="margin-top: 8px; font-size: 14px; color: #666;">
@@ -1756,9 +1760,62 @@
             });
             
             if (result.error) {
-                alert('操作失败: ' + result.error);
+                // 针对UP主未解析导致的启用失败，给出友好提示并提供立即解析入口
+                const msg = String(result.error || '');
+                if (result.status === 400 && (/未解析/.test(msg) || /resolve/i.test(msg) || /UP主/.test(msg))) {
+                    const go = confirm('启用失败：UP主名称未解析成功，暂不能启用。\n是否现在尝试“立即解析”？');
+                    if (go) {
+                        try { await resolveUploader(subscriptionId); } catch (_) {}
+                        // 解析后尝试刷新订阅列表
+                        await loadSubscriptions();
+                    }
+                } else {
+                    alert('操作失败: ' + msg);
+                }
             } else {
                 loadSubscriptions();
+            }
+        }
+
+        // 解析并回填指定订阅的UP主名字/ID（仅对 type='uploader' 生效）
+        async function resolveUploader(subscriptionId, el) {
+            if (!subscriptionId) return;
+            let oldText = '';
+            if (el) { el.disabled = true; oldText = el.innerText; el.innerText = '解析中...'; }
+            try {
+                const res = await apiRequest(`/api/subscriptions/${subscriptionId}/resolve`, {
+                    method: 'POST'
+                });
+                if (res && res.error) {
+                    alert('解析失败：' + res.error);
+                } else {
+                    // 根据返回值给出更友好的提示
+                    if (res && typeof res.changed === 'boolean') {
+                        if (res.changed) {
+                            const after = res.after || {};
+                            const nm = after.name ? `名称：${after.name}` : '';
+                            const mid = after.uploader_id ? `ID：${after.uploader_id}` : '';
+                            const joined = [nm, mid].filter(Boolean).join('，');
+                            alert('解析成功，已回填' + (joined ? `（${joined}）` : '') + '。');
+                        } else {
+                            alert('已尝试解析，但没有可更新的字段（可能已解析过或仍无法解析）。');
+                        }
+                    } else {
+                        alert('已尝试解析并回填（若成功将自动保存）。');
+                    }
+                    // 刷新订阅列表
+                    await loadSubscriptions();
+                    // 若编辑模态打开且对应当前订阅，关闭并重新打开以获取最新数据
+                    if (window.__currentEditingSubId && Number(window.__currentEditingSubId) === Number(subscriptionId)) {
+                        try { closeEditModal(); } catch(_) {}
+                        // 略等一帧再打开，避免DOM尚未更新
+                        setTimeout(() => editSubscription(subscriptionId), 0);
+                    }
+                }
+            } catch (e) {
+                alert('解析失败：' + (e?.message || e));
+            } finally {
+                if (el) { el.disabled = false; el.innerText = oldText || '立即解析'; }
             }
         }
 
@@ -1848,13 +1905,37 @@
                     alert('请输入UP主ID或名称');
                     return;
                 }
-                data.uploader_id = uploader;
-                
-                // 如果没有名称，使用UP主信息
-                if (!name) {
-                    name = 'UP主订阅 - ' + uploader;
+                // 强制预解析校验：优先把纯数字当作ID，否则当作名称进行解析
+                const isNumericId = /^\d+$/.test(uploader.trim());
+                let preResolveBody = {};
+                if (isNumericId) preResolveBody.uploader_id = uploader.trim();
+                else preResolveBody.name = uploader.trim();
+
+                let pre;
+                try {
+                    pre = await apiRequest('/api/uploader/resolve', {
+                        method: 'POST',
+                        body: JSON.stringify(preResolveBody)
+                    });
+                } catch (e) {
+                    alert('解析接口异常：' + (e?.message || e));
+                    return;
                 }
-                
+                if (!pre || pre.error) {
+                    alert('解析失败：' + (pre?.error || '未知错误'));
+                    return;
+                }
+                const resolved = pre.resolved || {};
+                const resolvedName = (resolved.name || '').trim();
+                const resolvedMid = (resolved.uploader_id || '').toString().trim();
+                // 要求“名称”和“ID”都解析成功，否则禁止创建
+                if (!resolvedName || !resolvedMid) {
+                    alert('无法解析该UP主，请输入有效的UP主ID或名称（需能同时解析出名称与ID）');
+                    return;
+                }
+                // 回填解析结果：使用解析出的ID；若用户未自定义名称，则使用解析出的名称
+                data.uploader_id = resolvedMid;
+                if (!name) name = resolvedName;
             } else if (type === 'keyword') {
                 const keyword = document.getElementById('sub-keyword').value;
                 if (!keyword) {
@@ -2245,8 +2326,20 @@
                         </div>
                         <div class="form-group">
                             <label>订阅URL</label>
-                            <input type="url" id="edit-url" value="${sub.url}" required>
+                            <input type="url" id="edit-url" value="${sub.url || ''}" ${sub.type === 'collection' ? 'required' : ''}>
                         </div>
+                        ${sub.type === 'uploader' ? `
+                        <div class="form-group">
+                            <label>UP主ID <span class="help-text">纯数字ID，如：1850091</span></label>
+                            <input type="text" id="edit-uploader-id" value="${sub.uploader_id || ''}" required>
+                        </div>
+                        ` : ''}
+                        ${sub.type === 'keyword' ? `
+                        <div class="form-group">
+                            <label>搜索关键词</label>
+                            <input type="text" id="edit-keyword" value="${sub.keyword || ''}" required>
+                        </div>
+                        ` : ''}
                         <div class="form-group">
                             <label>状态</label>
                             <select id="edit-active">
@@ -2282,6 +2375,8 @@
                 </div>
             `;
             document.body.appendChild(modal);
+            // 记录正在编辑的订阅ID
+            window.__currentEditingSubId = id;
             // 阻止内容区域点击冒泡
             const contentEl = modal.querySelector('.modal-content');
             if (contentEl) contentEl.addEventListener('click', (e) => e.stopPropagation());
@@ -2301,6 +2396,8 @@
                 window.removeEventListener('keydown', window.__editModalEscHandler);
                 window.__editModalEscHandler = null;
             }
+            // 清理标记
+            window.__currentEditingSubId = null;
         }
         window.closeEditModal = closeEditModal;
 
@@ -2316,6 +2413,17 @@
                 min_favorites: parseInt(document.getElementById('edit-min-favorites').value) || null,
                 min_views: parseInt(document.getElementById('edit-min-views').value) || null
             };
+            
+            // 根据订阅类型添加特定字段
+            const uploaderIdField = document.getElementById('edit-uploader-id');
+            if (uploaderIdField) {
+                formData.uploader_id = uploaderIdField.value;
+            }
+            
+            const keywordField = document.getElementById('edit-keyword');
+            if (keywordField) {
+                formData.keyword = keywordField.value;
+            }
             
             const result = await apiRequest(`/api/subscriptions/${id}`, {
                 method: 'PUT',

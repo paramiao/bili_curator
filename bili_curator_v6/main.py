@@ -45,6 +45,9 @@ _setup_logging_once()
 async def lifespan(app):
     """应用生命周期管理"""
     # 启动时执行
+    logger.info("🎬 bili_curator V6 - B站视频下载管理系统")
+    logger.info("📝 版本: 6.0.0")
+    logger.info("🏠 专为家用个人设计的简化版本")
     logger.info("🚀 bili_curator V6 正在启动...")
     
     # 确保必要目录存在
@@ -107,10 +110,6 @@ app.router.lifespan_context = lifespan
 
 def main():
     """主函数"""
-    logger.info("🎬 bili_curator V6 - B站视频下载管理系统")
-    logger.info("📝 版本: 6.0.0")
-    logger.info("🏠 专为家用个人设计的简化版本")
-    
     # 运行FastAPI应用
     uvicorn.run(
         app,

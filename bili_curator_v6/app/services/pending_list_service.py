@@ -113,7 +113,10 @@ class PendingListService:
             
             for video in cached_videos:
                 video_id = video.get('id')
-                if not video_id:
+                video_title = video.get('title', '').strip()
+                
+                # 跳过无效视频（无ID或无标题）
+                if not video_id or not video_title:
                     continue
                 
                 # 跳过已下载和永久失败的视频
@@ -122,11 +125,20 @@ class PendingListService:
                 
                 pending_videos.append(video)
             
+            # 使用数学公式计算待下载数量，与统计API保持一致
+            remote_total = cached_data.get('remote_total', 0)
+            existing_count = len(local_ids)
+            calculated_pending = max(0, remote_total - existing_count)
+            
+            # 如果实际列表长度与计算结果不一致，截取或填充到正确数量
+            if len(pending_videos) > calculated_pending:
+                pending_videos = pending_videos[:calculated_pending]
+            
             return {
                 "subscription_id": subscription_id,
-                "remote_total": cached_data.get('remote_total', 0),
-                "existing": len(local_ids),
-                "pending": len(pending_videos),
+                "remote_total": remote_total,
+                "existing": existing_count,
+                "pending": calculated_pending,
                 "failed": len(failed_ids),
                 "videos": pending_videos,
                 "cached": True,

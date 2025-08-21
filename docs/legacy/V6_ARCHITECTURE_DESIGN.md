@@ -1,5 +1,16 @@
-# [已归档] bili_curator V6 架构设计
-> 本文件已归档，仅供参考。最新、权威信息请以 `docs/PROJECT_STATUS.md` 为准；本文件的历史完整版本见 `docs/legacy/V6_ARCHITECTURE_DESIGN.md`。
+# [已归档] bili_curator V6 架构设计（历史版本）
+
+本文件为历史存档，仅供参考。最新、权威的架构与进度请以以下文档为准：
+- 实时进度与权威信息：docs/PROJECT_STATUS.md
+- 路线图：docs/ROADMAP_V6.md
+- 数据模型：docs/DATA_MODEL_DESIGN.md
+- 变更记录：CHANGELOG.md
+
+以下为当时的架构说明原文：
+
+---
+
+# bili_curator V6 架构设计（现行版）
 
 > ✅ 与当前代码与部署一致的精简架构（单容器、SQLite、本地轻量队列）
 
@@ -104,8 +115,6 @@ CREATE TABLE IF NOT EXISTS videos (
 ## 🐳 容器与部署
 
 ### Dockerfile（简要）
-> 说明：V6 镜像构建上下文为 `bili_curator_v6/`，依赖安装使用该目录下的 `requirements.txt`。
-> 仓库根目录的 `requirements.txt` 属于历史版本（V4/V5），与 V6 服务端无关。
 ```dockerfile
 FROM python:3.11-slim
 WORKDIR /app
@@ -118,7 +127,6 @@ CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080
 ```
 
 ### docker-compose.yml（现行）
-> 说明：`build: .` 指向 `bili_curator_v6/` 目录；容器运行时代码、前端以只读挂载方式提供，但依赖已在镜像构建阶段按 `bili_curator_v6/requirements.txt` 安装。
 ```yaml
 services:
   bili-curator:
@@ -297,7 +305,7 @@ logging.basicConfig(
 
 ### 一键脚本
 使用 `scripts/manage.sh`：
-- `./scripts/manage.sh up|down|rebuild|logs|ps|health`
+- `./scripts/manage.sh up|down|rebuild|logs|health`
 - 支持 `COMPOSE_FILE` 与 `CONFIG_DIR` 环境变量
 
 ### 健康检查

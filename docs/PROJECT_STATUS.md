@@ -1,6 +1,6 @@
 # 项目进度与下一步计划（V6）
 
-最后更新：2025-08-19 16:48 (+08:00)
+最后更新：2025-08-21 12:49 (+08:00)
 
 ## 1. 概览
 - 代码主目录：`bili_curator_v6/app/`
@@ -49,6 +49,9 @@
   - 订阅统计表格增强：本地文件数、数据库记录数、待下载数、失败数等完整字段
   - 失败视频可视化标识和一键清理功能
   - 手动同步按钮，支持实时数据刷新
+ - 订阅类型支持现状
+   - 已支持：`collection`（合集/列表）、`keyword`（关键词）、`uploader`（UP主，已接入解析/回填与启用门控）
+   - 待决策：`specific_urls`（一次性导入还是持续订阅）
 
 ## 3. 最新完成（Recently Completed）
 - 数据一致性优化（2025-08-19）
@@ -59,32 +62,49 @@
   - 订阅管理表格字段完善：本地文件、数据库记录、待下载、失败数等
   - 失败视频红色高亮显示和一键清理功能
   - 手动同步按钮，支持实时数据刷新
+- UP主订阅能力（2025-08-21）
+  - 新增“UP主名字↔ID”解析与自动回填服务（优先使用可用 Cookie）
+  - 启用门控：当 UP 主名称未成功解析（空或“待解析UP主”）时，禁止 `is_active=true`
+  - 目录命名规范统一：关键词用“关键词：…”，UP 主用“up 主：…”，仅新建生效
+  - 新增手动解析端点：`POST /api/uploader/resolve`、`POST /api/subscriptions/{sid}/resolve`
+  - 前端适配：在订阅列表为 `uploader` 类型提供“立即解析”按钮；当启用因未解析而被拒绝（400）时，弹出友好提示并引导解析
+  
+- 远端总数统一（2025-08-21）
+  - 字段统一：标准字段为 `expected_total`；兼容字段 `remote_total`/`expected_total_videos` 仍返回且等值（标记 deprecated）
+  - 接口对齐：`GET /api/subscriptions` 返回体新增 `expected_total` 与可选 `remote_status`
+  - 前端调整：仅对 `collection` 类型显示“远端总数（获取/刷新）”控件；列表渲染优先读取 `expected_total`，兼容回退 `remote_total`
+  - 缓存键规范：标准 `remote_total:{sid}`，兼容旧键 `expected_total:{sid}`；封装见 `app/services/remote_total_store.py`
 
 ## 4. 正在进行（In Progress）
-- 增量管线小样本联调与日志完善：`remote_sync_service -> local_index -> download_plan -> 入队`
+- 增量管线小样本联调、守护与日志完善：`remote_sync_service -> local_index -> download_plan -> 入队`
+- 订阅增量同步支持扩展（按订阅开关/批量/回填）
+- 解析服务缓存与限流（TTL 缓存、失败计数与退避、速率限制）
 
 ## 5. 待办与优先级（Backlog & Priority）
 - 高优先级
-  - 增量管线联调与日志完善（ID: `todo_inc_e2e`）
-  - 前端 SPA 对齐新接口（ID: `todo_frontend_wire`）
+  - 增量入队流水线审计与结构化日志完善（ID: `todo_inc_audit_logs`）
+  - 端到端集成测试（入队协调器 + 任务管理器 + 去重/并发）（ID: `todo_inc_e2e_tests`）
+  - 解析服务缓存与限流（TTL 缓存、失败计数/退避、速率限制）（ID: `todo_resolver_cache_ratelimit`）
 - 中优先级
-  - 订阅类型扩展：`uploader` / `keyword` 下载与同步策略（ID: `todo_feature_types`）
+  - 订阅增量同步支持扩展与验证（按订阅开关/批量/回填）（ID: `todo_subscription_incremental`）
+  - Specific URLs 订阅策略：一次性 vs 持续订阅（ID: `todo_specific_urls_strategy`）
   - 前端配置面板：Settings 关键键读写（并发、每订阅入队上限、时间预算、增量开关、间隔）（ID: `todo_frontend_config_panel`）
   - 数据模型对齐与迁移说明：本地优先统计、`expected_total` 与 `agg:*` 键口径文档化（ID: `todo_data_model_docs`）
+  - CI 自检：扫描旧键 `expected_total:{sid}` 与旧字段直读，防止回归（ID: `todo_ci_guard_remote_total`)
 - 低优先级
   - 调度策略收敛：降低/改造 `check_subscriptions`，主推 `enqueue_coordinator` 轻量路径（ID: `todo_scheduler_converge`）
   - 观测指标与可视化：失败率、入队/完成吞吐、队列等待时长、失败回补队列长度（ID: `todo_observability`）
   - Cookie 表 schema 迁移与兼容验证：`failure_count`/`last_failure_at`（ID: `todo_cookie_schema`）
 
-## 5. 近两周行动计划（建议）
-- 第1周
-  - 完成增量管线小样本 E2E 联调（选择 1-2 个订阅作为样本），补齐关键日志埋点（阶段产物：联调报告与问题清单）
-  - 实现 `POST /api/auto-import/scan-associate` 并补充接口说明到 `docs/API_SPECIFICATION.md`（已完成）
-  - 扩展 `/api/status` 返回调度任务与运行中任务摘要（含 recent_tasks），便于前端态势总览（已完成）
+## 5. 近两周行动计划（更新）
+- 第1周（当前优先）
+  - **UP主订阅功能实现**：集成 B 站 UP 主空间 API，实现视频列表获取、待下载计算与下载调度
+  - **增量入队流水线审计**：落实按订阅/全局开关、批量限制、回填上限，补充结构化日志
+  - 完善订阅类型扩展与调度器集成，确保与现有合集/关键词流程一致
 - 第2周
-  - 前端 SPA 联动上述接口，完成最小可用运维面板（同步、队列、失败、容量设置）
-  - 数据模型文档化与口径对齐（`expected_total`、`agg:*`、本地优先统计），输出迁移/兼容说明
-  - 初步观测指标埋点方案（以 Settings/DB 汇总 + 简单接口返回为主，后续再可视化）
+  - 订阅增量同步支持扩展与验证，完善 `RemoteSyncService` 
+  - 前端 SPA 联动新订阅类型，完善订阅创建和管理界面
+  - 增量管线联调与端到端测试（包含 UP 主路径）
 
 ## 6. 风险与依赖
 - 远端接口与 Cookie 稳定性：需确保 `cookie_manager.py` 的禁用与轮换策略在高失败率时不造成全局阻塞
@@ -92,14 +112,29 @@
 - 队列与调度策略：`enqueue_coordinator` 与旧 `check_subscriptions` 并存期间的优先级与资源竞争需观察
  - 部署绑定：`docker-compose.yml` 存在 `./web` 只读挂载但仓库缺少该目录，需修正以免启动异常
  - 代码结构：`scheduler.py` 中方法定义位置需修复，避免任务注册代码悬空导致启动失败
+ - 名字解析歧义：UP 主名字→ID 可能多解/重名，需做最优匹配与 disambiguation 策略；提供缓存与回退（以 ID 为准）
+
+## 6.1 订阅标识与目录命名规范（新增）
+- UP 主订阅：
+  - 输入支持 name 或 id（两者至少其一）。
+  - 仅 name 时：自动解析 mid 并回填；仅 id 时：自动回填名字（解析失败则保留 id）。
+  - 解析具备：缓存（TTL，规划中）、限速（规划中）、重试与错误上报；对多解/重名进行最优匹配或提示。
+- 目录命名（仅对新建生效）：
+  - 关键词订阅：目录名为“关键词：{keyword}”。
+  - UP 主订阅：目录名为“up 主：{uploader_name}”；若名字不可得，回退为“up 主：{mid}”。
+  - 合集订阅：保持现有规则。
+
+## 6.2 手动解析端点（新增）
+- `POST /api/uploader/resolve`：传入 `name` 或 `uploader_id`，返回解析结果，不改数据库。
+- `POST /api/subscriptions/{sid}/resolve`：对 `uploader` 类型订阅尝试解析并回填缺失字段，成功则落库。
 
 ## 7. 里程碑（Milestones）
 - M1（已达成）
   - 基础 API、调度与 Cookie 管理打通；轻量同步与入队协调上线
-- M2（目标：本月内）
-  - 增量管线 E2E 稳定；自动导入手动触发 API；状态接口扩展；最小可用前端运维面板
+- M2（目标：本月内，重新调整）
+  - **UP主订阅功能完整实现**；增量管线 E2E 稳定；状态接口扩展；最小可用前端运维面板（关键词订阅已完成基础接入）
 - M3（目标：次月）
-  - 订阅类型扩展；观测指标初版；调度策略收敛；数据模型文档与迁移指南完善
+  - 新订阅类型增量同步支持；观测指标初版；调度策略收敛；数据模型文档与迁移指南完善
 
 ## 8. 附录：关键参考
 - 接口说明：`docs/API_SPECIFICATION.md`
@@ -109,4 +144,5 @@
   - `bili_curator_v6/app/api.py`
   - `bili_curator_v6/app/scheduler.py`
   - `bili_curator_v6/app/cookie_manager.py`
+
 

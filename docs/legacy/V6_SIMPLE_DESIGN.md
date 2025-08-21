@@ -81,6 +81,8 @@ bili_curator_v6/
 ## 🐳 超简单Docker部署
 
 ### Dockerfile
+> 说明：该简化示例针对 V6 放在 `bili_curator_v6/` 目录内，镜像构建阶段依赖从该目录下的 `requirements.txt` 安装。
+> 仓库根目录的 `requirements.txt` 属于历史版本（V4/V5 工具脚本用），不会被 V6 容器构建使用。
 ```dockerfile
 FROM python:3.11-slim
 

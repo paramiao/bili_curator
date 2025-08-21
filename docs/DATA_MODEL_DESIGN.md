@@ -120,6 +120,9 @@ CREATE TABLE settings (
 - 缓存轻量同步状态与统计：`sync:{sid}:status`（JSON），示例：`{"status":"running","remote_total":120,"updated_at":"..."}`
 - 缓存待下载估算：`agg:{sid}:pending_estimated`（字符串整数）
 - 缓存失败重试队列：`retry:{sid}:failed_backfill`（JSON 数组）
+ - 远端总数缓存（标准）：`remote_total:{sid}`（JSON，示例：`{"total":180,"url":"...","timestamp":1699999999}`）
+   - 兼容旧键：`expected_total:{sid}` 同步双写，读取时优先新键，逐步下线旧键
+   - 统一读写封装：参见后端 `app/services/remote_total_store.py` 与常量定义 `app/constants.py`
 
 ## 数据关系图
 

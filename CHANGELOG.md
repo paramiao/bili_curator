@@ -1,5 +1,32 @@
 # 更新日志
 
+## [Unreleased]
+
+### 🆕 新增/变更
+- 远端总数字段统一：
+  - 后端统一返回 `expected_total`（标准），同时保留兼容字段 `remote_total`/`expected_total_videos`（与标准字段等值，标记 deprecated）
+  - `/api/subscriptions` 列表返回体已包含 `expected_total`、`remote_status`
+- 前端订阅管理：
+  - 仅对 `collection` 类型显示“远端总数（获取/刷新）”控件
+  - 列表渲染优先读取 `expected_total`，兼容回退 `remote_total`
+
+### 📚 文档
+- 更新 `docs/API_SPECIFICATION.md`：补充 `expected_total` 标准字段与兼容策略、`expected-total` 接口的 `cached`/`job_id` 说明
+- 更新 `docs/DATA_MODEL_DESIGN.md`：统一远端总数缓存键规范 `remote_total:{sid}`，兼容旧键 `expected_total:{sid}`，并指向封装模块
+- 前端订阅管理：为 `uploader` 类型订阅新增“立即解析”按钮，支持手动触发解析并回填
+- 启用门控与友好提示：当 UP 主名称未解析成功时，启用（is_active=true）被拒绝并弹出提示，引导用户“立即解析”
+- API 文档与端点：
+  - 新增 `POST /api/uploader/resolve`（名字↔ID 解析，不落库）
+  - 新增 `POST /api/subscriptions/{id}/resolve`（解析并回填订阅字段）
+- 目录命名前缀统一（仅新建生效）：
+  - 关键词订阅前缀“关键词：{keyword}”
+  - UP 主订阅前缀“up 主：{uploader_name}”（无名则回退为 mid）
+
+### 📚 文档
+- 更新 `docs/PROJECT_STATUS.md`、`docs/API_SPECIFICATION.md`，补充解析端点、启用门控说明与目录前缀规范
+
+---
+
 ## [V6.1.0] - 2025-08-19
 
 ### 🆕 新增功能

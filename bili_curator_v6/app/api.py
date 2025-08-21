@@ -37,6 +37,15 @@ from .services.remote_sync_service import remote_sync_service
 from .services.pending_list_service import pending_list_service
 from .services.data_consistency_service import data_consistency_service
 from .auto_import import auto_import_service
+from .services.uploader_resolver_service import uploader_resolver_service
+from .constants import (
+    API_FIELD_EXPECTED_TOTAL,
+    API_FIELD_EXPECTED_TOTAL_COMPAT,
+)
+from .services.remote_total_store import (
+    read_remote_total_fresh,
+    write_remote_total,
+)
 
 # Logger
 logger = logging.getLogger(__name__)
@@ -82,6 +91,12 @@ class CookieUpdate(BaseModel):
     is_active: Optional[bool] = None
     active: Optional[bool] = None
     sessdata: Optional[str] = None
+    bili_jct: Optional[str] = None
+    dedeuserid: Optional[str] = None
+
+class ResolveUploaderBody(BaseModel):
+    name: Optional[str] = None
+    uploader_id: Optional[str] = None
     bili_jct: Optional[str] = None
     dedeuserid: Optional[str] = None
 
@@ -1533,7 +1548,9 @@ async def get_subscriptions(db: Session = Depends(get_db)):
             "is_active": sub.is_active,
             "total_videos": on_disk_total,
             "db_total_videos": total_videos_local_all,
-            "remote_total": remote_total,
+            "remote_total": remote_total,  # 兼容字段（deprecated）：请使用 expected_total
+            "expected_total": remote_total,  # 标准字段
+            "expected_total_videos": remote_total,  # 兼容字段（deprecated）
             "remote_status": remote_status,
             "downloaded_videos": downloaded_videos,
             "pending_videos": pending_videos,
@@ -1801,20 +1818,54 @@ async def create_subscription(subscription: dict, db: Session = Depends(get_db))
 
         # 若仍为空，使用传入名称（兼容非合集类型）；确保非空以满足 NOT NULL 约束
         if not name_to_use:
-            name_to_use = (subscription.get("name") or "未知订阅").strip() or "未知订阅"
+            name_to_use = (subscription.get("name") or "").strip()
+
+        # 对 UP主订阅执行名称↔ID 自动解析/回填（尽力而为，不抛错）
+        uploader_id_to_use = (subscription.get("uploader_id") or "").strip() or None
+        if sub_type == "uploader":
+            try:
+                resolved_name, resolved_mid = await uploader_resolver_service.resolve(name_to_use or None, uploader_id_to_use, db)
+                if resolved_name:
+                    name_to_use = resolved_name
+                if (not uploader_id_to_use) and resolved_mid:
+                    uploader_id_to_use = resolved_mid
+            except Exception:
+                pass
+
+        # 启用 gating：当为 UP 主订阅且名称未解析成功时，强制禁用订阅
+        # 约定：未解析成功的占位名称使用「待解析UP主」
+        want_active = bool(subscription.get("is_active", True))
+        unresolved_uploader = False
+        if (sub_type == "uploader"):
+            # 认为“有效名称”的条件：非空且不为占位
+            has_valid_name = bool(name_to_use)
+            if not has_valid_name:
+                name_to_use = "待解析UP主"
+                unresolved_uploader = True
+            # 若未提供 uploader_id，也视为尚未完全解析（但本规则仅基于名称禁用）
+        # 计算最终 is_active
+        final_active = want_active
+        if (sub_type == "uploader") and (unresolved_uploader):
+            final_active = False
+
+        # 创建约束：UP主订阅必须至少解析出 name 或 uploader_id 之一，否则拒绝创建
+        if (sub_type == "uploader"):
+            if (not uploader_id_to_use) and (not name_to_use or name_to_use == "待解析UP主"):
+                raise HTTPException(status_code=400, detail="创建失败：需要有效的UP主ID或名称，且需可解析")
         
         db_subscription = Subscription(
             name=name_to_use,
             type=subscription["type"],
             url=subscription.get("url"),
-            uploader_id=subscription.get("uploader_id"),
+            uploader_id=uploader_id_to_use,
             keyword=subscription.get("keyword"),
             specific_urls=subscription.get("specific_urls"),
             date_after=date_after,
             date_before=date_before,
             min_likes=subscription.get("min_likes"),
             min_favorites=subscription.get("min_favorites"),
-            min_views=subscription.get("min_views")
+            min_views=subscription.get("min_views"),
+            is_active=final_active,
         )
         db.add(db_subscription)
         db.commit()
@@ -1846,6 +1897,7 @@ async def create_subscription(subscription: dict, db: Session = Depends(get_db))
                 "total_videos": db_subscription.total_videos or 0,
                 "downloaded_videos": db_subscription.downloaded_videos or 0,
                 "pending_videos": pending_videos,
+                "is_active": bool(db_subscription.is_active),
             }
         except Exception as e:
             # 如果关联失败，不影响订阅创建
@@ -1858,6 +1910,7 @@ async def create_subscription(subscription: dict, db: Session = Depends(get_db))
                 "total_videos": 0,
                 "downloaded_videos": 0,
                 "pending_videos": 0,
+                "is_active": bool(db_subscription.is_active),
             }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1874,20 +1927,13 @@ async def get_subscription_expected_total(subscription_id: int, db: Session = De
         raise HTTPException(status_code=400, detail="该订阅不是合集或缺少URL")
 
     # 检查1小时内的缓存
-    cache_key = f"remote_total:{subscription_id}"
-    cached_setting = db.query(Settings).filter(Settings.key == cache_key).first()
-    if cached_setting:
-        try:
-            cache_data = json.loads(cached_setting.value)
-            cache_time = datetime.fromisoformat(cache_data.get('timestamp', ''))
-            if datetime.now() - cache_time < timedelta(hours=1):
-                return {
-                    "expected_total_videos": cache_data.get('total', 0),
-                    "cached": True,
-                    "cache_time": cache_data.get('timestamp')
-                }
-        except Exception:
-            pass
+    cached_total = read_remote_total_fresh(db, subscription_id, max_age_hours=1)
+    if isinstance(cached_total, int):
+        return {
+            API_FIELD_EXPECTED_TOTAL: int(cached_total),
+            API_FIELD_EXPECTED_TOTAL_COMPAT: int(cached_total),
+            "cached": True,
+        }
 
     try:
         import tempfile, os, json as json_lib
@@ -2038,7 +2084,8 @@ async def get_subscription_expected_total(subscription_id: int, db: Session = De
             expected = await run_expected_total(None, requires_cookie=False)
             if expected is not None:
                 await request_queue.mark_done(job_nc)
-                return {"expected_total_videos": int(expected), "job_id": job_nc}
+                total_val = int(expected)
+                return {API_FIELD_EXPECTED_TOTAL: total_val, API_FIELD_EXPECTED_TOTAL_COMPAT: total_val, "job_id": job_nc}
             else:
                 await request_queue.mark_failed(job_nc, "need_cookie_fallback")
         except Exception as e:
@@ -2069,22 +2116,13 @@ async def get_subscription_expected_total(subscription_id: int, db: Session = De
             if expected2 is None:
                 await request_queue.mark_failed(job_c, "cookie_fallback_failed")
                 raise HTTPException(status_code=502, detail="无法解析合集总数（Cookie 回退失败）")
-            # 缓存成功结果1小时
-            cache_data = {
-                "total": int(expected2),
-                "timestamp": datetime.now().isoformat(),
-                "url": sub.url
-            }
-            cache_setting = db.query(Settings).filter(Settings.key == cache_key).first()
-            if cache_setting:
-                cache_setting.value = json.dumps(cache_data)
-            else:
-                cache_setting = Settings(key=cache_key, value=json.dumps(cache_data))
-                db.add(cache_setting)
-            db.commit()
+            # 写入缓存
+            write_remote_total(db, sub.id, int(expected2), sub.url)
             await request_queue.mark_done(job_c)
+            total_val2 = int(expected2)
             return {
-                "expected_total_videos": int(expected2), 
+                API_FIELD_EXPECTED_TOTAL: total_val2,
+                API_FIELD_EXPECTED_TOTAL_COMPAT: total_val2,
                 "job_id": job_c,
                 "cached": False
             }
@@ -2136,6 +2174,24 @@ async def get_subscription(subscription_id: int, db: Session = Depends(get_db)):
         "updated_at": subscription.updated_at.isoformat() if subscription.updated_at else None
     }
 
+@app.post("/api/uploader/resolve")
+async def uploader_resolve(body: ResolveUploaderBody, db: Session = Depends(get_db)):
+    """手动解析UP主：根据提供的 name 或 uploader_id（mid）尽力解析回填另一项。
+    不修改数据库，仅返回解析结果。
+    """
+    try:
+        resolved_name, resolved_mid = await uploader_resolver_service.resolve(
+            (body.name or None),
+            (body.uploader_id or None),
+            db
+        )
+        return {
+            "input": {"name": body.name, "uploader_id": body.uploader_id},
+            "resolved": {"name": resolved_name, "uploader_id": resolved_mid}
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"解析失败: {str(e)}")
+
 @app.put("/api/subscriptions/{subscription_id}")
 async def update_subscription(
     subscription_id: int,
@@ -2158,14 +2214,64 @@ async def update_subscription(
     for field, value in data.items():
         setattr(db_subscription, field, value)
 
-    # 单独处理 is_active
+    # 若为 UP主订阅，尽力做一次名称↔ID 的自动补全（仅回填缺失项，不覆盖显式提供值）
+    try:
+        if db_subscription.type == 'uploader':
+            proposed_name = (data.get('name') if 'name' in data else db_subscription.name) or None
+            proposed_mid = (data.get('uploader_id') if 'uploader_id' in data else db_subscription.uploader_id) or None
+            resolved_name, resolved_mid = await uploader_resolver_service.resolve(proposed_name, proposed_mid, db)
+            # 回填缺失项
+            if (not proposed_name) and resolved_name:
+                db_subscription.name = resolved_name
+            if (not proposed_mid) and resolved_mid:
+                db_subscription.uploader_id = resolved_mid
+    except Exception:
+        pass
+
+    # 单独处理 is_active（启用 gating：UP主订阅名称未解析成功前不允许启用）
     if is_active_value is not None:
-        db_subscription.is_active = is_active_value
+        if bool(is_active_value) and (db_subscription.type == 'uploader'):
+            nm = (db_subscription.name or '').strip()
+            if not nm or nm == '待解析UP主':
+                # 拒绝启用，并返回明确错误
+                raise HTTPException(status_code=400, detail="UP主名称未解析成功，暂不能启用订阅")
+        db_subscription.is_active = bool(is_active_value)
     
     db_subscription.updated_at = datetime.now()
     db.commit()
     
     return {"message": "订阅更新成功"}
+
+@app.post("/api/subscriptions/{subscription_id}/resolve")
+async def resolve_and_backfill_subscription(subscription_id: int, db: Session = Depends(get_db)):
+    """手动为指定 UP 主订阅执行一次名称↔ID 解析，并回填缺失字段（若有变更则落库）。
+    仅对 type='uploader' 生效。
+    """
+    sub = db.query(Subscription).filter(Subscription.id == subscription_id).first()
+    if not sub:
+        raise HTTPException(status_code=404, detail="订阅不存在")
+    if sub.type != 'uploader':
+        raise HTTPException(status_code=400, detail="仅支持UP主订阅")
+
+    before = {"name": sub.name, "uploader_id": sub.uploader_id}
+    try:
+        resolved_name, resolved_mid = await uploader_resolver_service.resolve(sub.name, sub.uploader_id, db)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"解析失败: {str(e)}")
+
+    changed = False
+    # 将占位名视为未解析，允许被覆盖
+    if ((not (sub.name or '').strip()) or (sub.name or '').strip() == '待解析UP主') and resolved_name:
+        sub.name = resolved_name
+        changed = True
+    if (not (sub.uploader_id or '').strip()) and resolved_mid:
+        sub.uploader_id = resolved_mid
+        changed = True
+    if changed:
+        sub.updated_at = datetime.now()
+        db.commit()
+    after = {"name": sub.name, "uploader_id": sub.uploader_id}
+    return {"changed": changed, "before": before, "after": after}
 
 @app.delete("/api/subscriptions/{subscription_id}")
 async def delete_subscription(subscription_id: int, db: Session = Depends(get_db)):
@@ -2889,10 +2995,10 @@ async def get_directory_stats(db: Session = Depends(get_db)):
             return d
         elif s.type == 'keyword':
             base = s.keyword or s.name or '关键词订阅'
-            return _sanitize_filename(f"关键词_{base}")
+            return _sanitize_filename(f"关键词：{base}")
         elif s.type == 'uploader':
             base = s.name or getattr(s, 'uploader_id', None) or 'UP主订阅'
-            return _sanitize_filename(f"UP主_{base}")
+            return _sanitize_filename(f"up 主：{base}")
         else:
             d = _sanitize_filename(s.name or '')
             if not d:

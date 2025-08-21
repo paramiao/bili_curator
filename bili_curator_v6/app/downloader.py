@@ -84,7 +84,7 @@ class BilibiliDownloaderV6:
         self.list_max_chunks = _env_int('LIST_MAX_CHUNKS', 200, 10, 1000) # 分页抓取最大块数
 
         # yt-dlp 进程超时（秒）
-        self.list_fetch_cmd_timeout = _env_int('LIST_FETCH_CMD_TIMEOUT', 120, 10, 600)
+        self.list_fetch_cmd_timeout = _env_int('LIST_FETCH_CMD_TIMEOUT', 300, 10, 600)  # 增加到5分钟
         self.download_cmd_timeout = _env_int('DOWNLOAD_CMD_TIMEOUT', 1800, 60, 7200)
         self.meta_cmd_timeout = _env_int('META_CMD_TIMEOUT', 60, 10, 300)
         
@@ -154,13 +154,14 @@ class BilibiliDownloaderV6:
         # 高性能比对：针对大合集优化的智能查询策略
         remote_video_count = len([vi for vi in video_list if vi.get('id')])
         
-        # 智能查询：如果远端视频数量较大，使用 IN 查询只检查相关视频
+        # 智能查询：统一使用批量查询确保数据一致性
+        remote_ids = [vi.get('id') for vi in video_list if vi.get('id')]
         if remote_video_count > 100:
             logger.info(f"大合集模式：远端 {remote_video_count} 个视频，使用批量查询优化")
-            remote_ids = [vi.get('id') for vi in video_list if vi.get('id')]
             existing_videos = self._batch_check_existing(db, remote_ids, subscription_id=subscription_id, subscription_dir=subscription_dir)
         else:
-            existing_videos = self._scan_existing_files(db, subscription_id=subscription_id, subscription_dir=subscription_dir)
+            logger.info(f"标准模式：远端 {remote_video_count} 个视频，使用批量查询确保一致性")
+            existing_videos = self._batch_check_existing(db, remote_ids, subscription_id=subscription_id, subscription_dir=subscription_dir)
         
         existing_ids = set(existing_videos.keys())
         
@@ -200,8 +201,9 @@ class BilibiliDownloaderV6:
                 delay = random.uniform(self.delay_min, self.delay_max)
                 try:
                     await asyncio.sleep(delay)
-                except Exception:
-                    pass
+                except asyncio.CancelledError:
+                    logger.info("下载任务被取消")
+                    raise
         
         # 更新订阅检查时间并刷新统计
         subscription.last_check = datetime.now()
@@ -251,12 +253,14 @@ class BilibiliDownloaderV6:
 
         remote_video_count = len([vi for vi in video_list if vi.get('id')])
 
-        # 选择合适的已存在检查策略
+        # 统一使用批量检查策略确保数据一致性
+        remote_ids = [vi.get('id') for vi in video_list if vi.get('id')]
         if remote_video_count > 100:
-            remote_ids = [vi.get('id') for vi in video_list if vi.get('id')]
+            logger.info(f"大合集模式：远端 {remote_video_count} 个视频，使用批量查询优化")
             existing_videos = self._batch_check_existing(db, remote_ids, subscription_id=subscription.id, subscription_dir=subscription_dir)
         else:
-            existing_videos = self._scan_existing_files(db, subscription_id=subscription.id, subscription_dir=subscription_dir)
+            logger.info(f"标准模式：远端 {remote_video_count} 个视频，使用批量查询确保一致性")
+            existing_videos = self._batch_check_existing(db, remote_ids, subscription_id=subscription.id, subscription_dir=subscription_dir)
 
         existing_ids = set(existing_videos.keys())
         new_videos_full = [vi for vi in video_list if (vid := vi.get('id')) and vid not in existing_ids]
@@ -322,7 +326,453 @@ class BilibiliDownloaderV6:
             'pending': len(pending_list),
             'videos': pending_list,
         }
+
+    async def download_uploader(self, subscription_id: int, db: Session) -> Dict[str, Any]:
+        """下载UP主订阅"""
+        subscription = db.query(Subscription).filter(Subscription.id == subscription_id).first()
+        if not subscription:
+            raise ValueError(f"订阅 {subscription_id} 不存在")
+        
+        if not subscription.uploader_id:
+            raise ValueError(f"UP主订阅 {subscription_id} 缺少uploader_id")
+        
+        logger.info(f"开始下载UP主: {subscription.name} (ID: {subscription.uploader_id})")
+
+        # 同步状态：标记开始
+        try:
+            self._set_sync_status(db, subscription_id, status='running', extra={
+                'name': subscription.name,
+                'type': subscription.type,
+                'started_at': datetime.now().isoformat()
+            })
+            db.commit()
+        except Exception as e:
+            logger.debug(f"设置同步状态失败（开始）: {e}")
+
+        # 订阅目录
+        subscription_dir = Path(self._create_subscription_directory(subscription))
+
+        # 获取UP主视频列表
+        sub_lock = get_subscription_lock(subscription.id)
+        cache_path = subscription_dir / 'playlist.json'
+        try:
+            async with sub_lock:
+                video_list = await self._get_uploader_videos(subscription.uploader_id, db, subscription_id=subscription.id)
+            try:
+                with open(cache_path, 'w', encoding='utf-8') as cf:
+                    json.dump(video_list, cf, ensure_ascii=False)
+            except Exception as ce:
+                logger.warning(f"写入列表缓存失败: {ce}")
+        except Exception as e:
+            logger.warning(f"实时获取UP主视频列表失败，尝试使用缓存: {e}")
+            if cache_path.exists():
+                try:
+                    with open(cache_path, 'r', encoding='utf-8') as cf:
+                        video_list = json.load(cf)
+                    logger.info(f"使用缓存视频列表，共 {len(video_list)} 条")
+                except Exception as re:
+                    logger.error(f"读取缓存失败: {re}")
+                    raise
+            else:
+                raise
+        
+        # 统一使用批量检查策略确保数据一致性
+        remote_video_count = len([vi for vi in video_list if vi.get('id')])
+        remote_ids = [vi.get('id') for vi in video_list if vi.get('id')]
+        
+        if remote_video_count > 100:
+            logger.info(f"大UP主模式：远端 {remote_video_count} 个视频，使用批量查询优化")
+            existing_videos = self._batch_check_existing(db, remote_ids, subscription_id=subscription.id, subscription_dir=subscription_dir)
+        else:
+            logger.info(f"标准模式：远端 {remote_video_count} 个视频，使用批量查询确保一致性")
+            existing_videos = self._batch_check_existing(db, remote_ids, subscription_id=subscription.id, subscription_dir=subscription_dir)
+
+        existing_ids = set(existing_videos.keys())
+        new_videos = [vi for vi in video_list if (vid := vi.get('id')) and vid not in existing_ids]
+
+        # 更新订阅统计
+        try:
+            subscription.expected_total = remote_video_count
+            subscription.expected_total_synced_at = datetime.now()
+            subscription.last_check = datetime.now()
+            db.commit()
+        except Exception as e:
+            logger.warning(f"更新订阅统计失败: {e}")
+            db.rollback()
+
+        # 同步状态：完成
+        try:
+            self._set_sync_status(db, subscription_id, status='idle', extra={
+                'remote_total': remote_video_count,
+                'existing': len(existing_ids),
+                'pending': len(new_videos),
+                'updated_at': datetime.now().isoformat()
+            })
+            db.commit()
+        except Exception:
+            pass
+
+        logger.info(f"UP主 {subscription.name} 检查完成: 远端 {remote_video_count}, 本地已有 {len(existing_ids)}, 新增 {len(new_videos)}")
+        
+        return {
+            'subscription_id': subscription_id,
+            'remote_total': remote_video_count,
+            'existing_videos': len(existing_ids),
+            'new_videos': len(new_videos),
+            'videos': new_videos
+        }
+
+    async def download_keyword(self, subscription_id: int, db: Session) -> Dict[str, Any]:
+        """下载关键词订阅"""
+        subscription = db.query(Subscription).filter(Subscription.id == subscription_id).first()
+        if not subscription:
+            raise ValueError(f"订阅 {subscription_id} 不存在")
+        
+        if not subscription.keyword:
+            raise ValueError(f"关键词订阅 {subscription_id} 缺少keyword")
+        
+        logger.info(f"开始搜索关键词: {subscription.name} (关键词: {subscription.keyword})")
+
+        # 同步状态：标记开始
+        try:
+            self._set_sync_status(db, subscription_id, status='running', extra={
+                'name': subscription.name,
+                'type': subscription.type,
+                'started_at': datetime.now().isoformat()
+            })
+            db.commit()
+        except Exception as e:
+            logger.debug(f"设置同步状态失败（开始）: {e}")
+
+        # 订阅目录
+        subscription_dir = Path(self._create_subscription_directory(subscription))
+
+        # 获取关键词搜索结果
+        sub_lock = get_subscription_lock(subscription.id)
+        cache_path = subscription_dir / 'playlist.json'
+        try:
+            async with sub_lock:
+                video_list = await self._get_keyword_videos(subscription.keyword, db, subscription_id=subscription.id)
+            try:
+                with open(cache_path, 'w', encoding='utf-8') as cf:
+                    json.dump(video_list, cf, ensure_ascii=False)
+            except Exception as ce:
+                logger.warning(f"写入列表缓存失败: {ce}")
+        except Exception as e:
+            logger.warning(f"实时搜索关键词失败，尝试使用缓存: {e}")
+            if cache_path.exists():
+                try:
+                    with open(cache_path, 'r', encoding='utf-8') as cf:
+                        video_list = json.load(cf)
+                    logger.info(f"使用缓存搜索结果，共 {len(video_list)} 条")
+                except Exception as re:
+                    logger.error(f"读取缓存失败: {re}")
+                    raise
+            else:
+                raise
+        
+        # 统一使用批量检查策略确保数据一致性
+        remote_video_count = len([vi for vi in video_list if vi.get('id')])
+        remote_ids = [vi.get('id') for vi in video_list if vi.get('id')]
+        
+        logger.info(f"关键词模式：搜索到 {remote_video_count} 个视频，使用批量查询确保一致性")
+        existing_videos = self._batch_check_existing(db, remote_ids, subscription_id=subscription.id, subscription_dir=subscription_dir)
+
+        existing_ids = set(existing_videos.keys())
+        new_videos = [vi for vi in video_list if (vid := vi.get('id')) and vid not in existing_ids]
+
+        # 更新订阅统计
+        try:
+            subscription.expected_total = remote_video_count
+            subscription.expected_total_synced_at = datetime.now()
+            subscription.last_check = datetime.now()
+            db.commit()
+        except Exception as e:
+            logger.warning(f"更新订阅统计失败: {e}")
+            db.rollback()
+
+        # 同步状态：完成
+        try:
+            self._set_sync_status(db, subscription_id, status='idle', extra={
+                'remote_total': remote_video_count,
+                'existing': len(existing_ids),
+                'pending': len(new_videos),
+                'updated_at': datetime.now().isoformat()
+            })
+            db.commit()
+        except Exception:
+            pass
+
+        logger.info(f"关键词 {subscription.name} 搜索完成: 搜索到 {remote_video_count}, 本地已有 {len(existing_ids)}, 新增 {len(new_videos)}")
+        
+        return {
+            'subscription_id': subscription_id,
+            'remote_total': remote_video_count,
+            'existing_videos': len(existing_ids),
+            'new_videos': len(new_videos),
+            'videos': new_videos
+        }
     
+
+    async def _get_uploader_videos(self, uploader_id: str, db: Session, subscription_id: Optional[int] = None, *, disable_incremental: bool = False, limit: int = 500) -> List[Dict]:
+        """获取UP主视频列表"""
+        await rate_limiter.wait()
+
+        cookie = cookie_manager.get_available_cookie(db)
+        if not cookie:
+            raise Exception("没有可用的Cookie")
+
+        # 构建UP主空间URL
+        uploader_url = f"https://space.bilibili.com/{uploader_id}/video"
+        
+        # 队列登记：list_fetch
+        job_id: Optional[str] = None
+        try:
+            job_id = await request_queue.enqueue(
+                job_type="list_fetch",
+                subscription_id=subscription_id,
+                requires_cookie=True
+            )
+            await request_queue.mark_running(job_id)
+        except Exception:
+            job_id = None
+
+        cookies_path = None
+        try:
+            # 写入临时 cookies.txt
+            fd, cookies_path = tempfile.mkstemp(prefix='cookies_', suffix='.txt')
+            os.close(fd)
+            with open(cookies_path, 'w', encoding='utf-8') as cf:
+                cf.write("# Netscape HTTP Cookie File\n")
+                cf.write("# This file was generated by bili_curator V6\n\n")
+                if getattr(cookie, 'sessdata', None):
+                    cf.write(f".bilibili.com\tTRUE\t/\tFALSE\t0\tSESSDATA\t{cookie.sessdata}\n")
+                if getattr(cookie, 'bili_jct', None):
+                    if str(cookie.bili_jct).strip():
+                        cf.write(f".bilibili.com\tTRUE\t/\tFALSE\t0\tbili_jct\t{cookie.bili_jct}\n")
+                if getattr(cookie, 'dedeuserid', None):
+                    if str(cookie.dedeuserid).strip():
+                        cf.write(f".bilibili.com\tTRUE\t/\tFALSE\t0\tDedeUserID\t{cookie.dedeuserid}\n")
+
+            # 公共 yt-dlp 参数
+            common_args_base = [
+                'yt-dlp',
+                '--referer', 'https://www.bilibili.com/',
+                '--force-ipv4',
+                '--sleep-interval', '2',
+                '--max-sleep-interval', '5',
+                '--retries', '5',
+                '--fragment-retries', '5',
+                '--retry-sleep', '3',
+                '--ignore-errors',
+                '--no-warnings',
+                '--playlist-end', str(limit)  # 限制获取数量
+            ]
+
+            videos: List[Dict] = []
+            last_err = None
+            current_cookie = cookie
+            ua_requires_cookie = True
+
+            def _rebuild_common_args() -> List[str]:
+                ua = get_user_agent(ua_requires_cookie)
+                args = common_args_base + ['--user-agent', ua]
+                if cookies_path:
+                    args += ['--cookies', cookies_path]
+                return args
+
+            common_args = _rebuild_common_args()
+
+            # 尝试获取UP主视频列表
+            try:
+                cmd = common_args + ['--flat-playlist', '--dump-single-json', uploader_url]
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                
+                out, err = await asyncio.wait_for(proc.communicate(), timeout=self.list_fetch_cmd_timeout)
+                
+                if proc.returncode == 0:
+                    try:
+                        data = json.loads(out.decode('utf-8', errors='ignore') or '{}')
+                        
+                        # 提取UP主名称用于目录命名
+                        uploader_name = data.get('uploader') or data.get('channel') or data.get('title')
+                        if uploader_name and subscription_id:
+                            # 更新订阅名称为UP主真实名称
+                            try:
+                                subscription = db.query(Subscription).filter(Subscription.id == subscription_id).first()
+                                if subscription and subscription.type == 'uploader':
+                                    # 如果当前名称包含ID或是默认格式，则更新为UP主名称
+                                    if (not subscription.name or 
+                                        subscription.uploader_id in subscription.name or 
+                                        subscription.name.startswith('UP主订阅')):
+                                        new_name = f"UP主订阅 - {uploader_name}"
+                                        subscription.name = new_name
+                                        db.commit()
+                                        logger.info(f"更新UP主订阅名称: {new_name}")
+                            except Exception as e:
+                                logger.warning(f"更新UP主订阅名称失败: {e}")
+                        
+                        entries = data.get('entries', [])
+                        if isinstance(entries, list):
+                            for entry in entries:
+                                if isinstance(entry, dict) and entry.get('id'):
+                                    videos.append(entry)
+                        logger.info(f"UP主 {uploader_id} 获取到 {len(videos)} 个视频")
+                    except Exception as e:
+                        last_err = str(e)
+                        logger.error(f"解析UP主视频列表失败: {e}")
+                else:
+                    last_err = err.decode('utf-8', errors='ignore')
+                    logger.error(f"获取UP主视频列表失败: {last_err}")
+
+            except asyncio.TimeoutError:
+                logger.warning(f"UP主视频列表获取超时: {uploader_url}")
+                last_err = "获取超时"
+            except Exception as e:
+                logger.error(f"UP主视频列表获取异常: {e}")
+                last_err = str(e)
+
+            if not videos and last_err:
+                raise Exception(f"获取UP主视频列表失败: {last_err}")
+
+            return videos
+
+        finally:
+            if cookies_path and os.path.exists(cookies_path):
+                try:
+                    os.unlink(cookies_path)
+                except Exception:
+                    pass
+            if job_id:
+                try:
+                    await request_queue.mark_completed(job_id)
+                except Exception:
+                    pass
+
+    async def _get_keyword_videos(self, keyword: str, db: Session, subscription_id: Optional[int] = None, *, disable_incremental: bool = False, limit: int = 50) -> List[Dict]:
+        """获取关键词搜索视频列表"""
+        await rate_limiter.wait()
+
+        cookie = cookie_manager.get_available_cookie(db)
+        if not cookie:
+            raise Exception("没有可用的Cookie")
+
+        # 构建搜索URL
+        search_url = f"ytsearch{limit}:{keyword} site:bilibili.com"
+        
+        # 队列登记：list_fetch
+        job_id: Optional[str] = None
+        try:
+            job_id = await request_queue.enqueue(
+                job_type="list_fetch",
+                subscription_id=subscription_id,
+                requires_cookie=True
+            )
+            await request_queue.mark_running(job_id)
+        except Exception:
+            job_id = None
+
+        cookies_path = None
+        try:
+            # 写入临时 cookies.txt
+            fd, cookies_path = tempfile.mkstemp(prefix='cookies_', suffix='.txt')
+            os.close(fd)
+            with open(cookies_path, 'w', encoding='utf-8') as cf:
+                cf.write("# Netscape HTTP Cookie File\n")
+                cf.write("# This file was generated by bili_curator V6\n\n")
+                if getattr(cookie, 'sessdata', None):
+                    cf.write(f".bilibili.com\tTRUE\t/\tFALSE\t0\tSESSDATA\t{cookie.sessdata}\n")
+                if getattr(cookie, 'bili_jct', None):
+                    if str(cookie.bili_jct).strip():
+                        cf.write(f".bilibili.com\tTRUE\t/\tFALSE\t0\tbili_jct\t{cookie.bili_jct}\n")
+                if getattr(cookie, 'dedeuserid', None):
+                    if str(cookie.dedeuserid).strip():
+                        cf.write(f".bilibili.com\tTRUE\t/\tFALSE\t0\tDedeUserID\t{cookie.dedeuserid}\n")
+
+            # 公共 yt-dlp 参数
+            common_args_base = [
+                'yt-dlp',
+                '--referer', 'https://www.bilibili.com/',
+                '--force-ipv4',
+                '--sleep-interval', '3',
+                '--max-sleep-interval', '8',
+                '--retries', '3',
+                '--fragment-retries', '3',
+                '--retry-sleep', '5',
+                '--ignore-errors',
+                '--no-warnings'
+            ]
+
+            videos: List[Dict] = []
+            last_err = None
+            ua_requires_cookie = True
+
+            def _rebuild_common_args() -> List[str]:
+                ua = get_user_agent(ua_requires_cookie)
+                args = common_args_base + ['--user-agent', ua]
+                if cookies_path:
+                    args += ['--cookies', cookies_path]
+                return args
+
+            common_args = _rebuild_common_args()
+
+            # 尝试搜索关键词视频
+            try:
+                cmd = common_args + ['--flat-playlist', '--dump-single-json', search_url]
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                
+                out, err = await asyncio.wait_for(proc.communicate(), timeout=self.list_fetch_cmd_timeout)
+                
+                if proc.returncode == 0:
+                    try:
+                        data = json.loads(out.decode('utf-8', errors='ignore') or '{}')
+                        entries = data.get('entries', [])
+                        if isinstance(entries, list):
+                            for entry in entries:
+                                if isinstance(entry, dict) and entry.get('id'):
+                                    # 过滤只保留B站视频
+                                    url = entry.get('webpage_url', '')
+                                    if 'bilibili.com' in url and ('BV' in entry.get('id', '') or 'av' in entry.get('id', '')):
+                                        videos.append(entry)
+                        logger.info(f"关键词 '{keyword}' 搜索到 {len(videos)} 个B站视频")
+                    except Exception as e:
+                        last_err = str(e)
+                        logger.error(f"解析关键词搜索结果失败: {e}")
+                else:
+                    last_err = err.decode('utf-8', errors='ignore')
+                    logger.error(f"关键词搜索失败: {last_err}")
+
+            except asyncio.TimeoutError:
+                logger.warning(f"关键词搜索超时: {keyword}")
+                last_err = "搜索超时"
+            except Exception as e:
+                logger.error(f"关键词搜索异常: {e}")
+                last_err = str(e)
+
+            if not videos and last_err:
+                raise Exception(f"关键词搜索失败: {last_err}")
+
+            return videos
+
+        finally:
+            if cookies_path and os.path.exists(cookies_path):
+                try:
+                    os.unlink(cookies_path)
+                except Exception:
+                    pass
+            if job_id:
+                try:
+                    await request_queue.mark_completed(job_id)
+                except Exception:
+                    pass
 
     async def _get_collection_videos(self, collection_url: str, db: Session, subscription_id: Optional[int] = None, *, disable_incremental: bool = False) -> List[Dict]:
         """获取合集视频列表（对齐V4：支持仅SESSDATA、UA/Referer、重试参数、三段回退解析）"""
@@ -1963,13 +2413,13 @@ class BilibiliDownloaderV6:
                 # 兜底，避免落在根目录
                 dir_name = self._sanitize_filename(f"合集订阅_{subscription.id}")
         elif subscription.type == 'keyword':
-            # 关键词订阅：使用关键词
+            # 关键词订阅：使用统一前缀“关键词：”
             base = subscription.keyword or subscription.name or "关键词订阅"
-            dir_name = self._sanitize_filename(f"关键词_{base}")
+            dir_name = self._sanitize_filename(f"关键词：{base}")
         elif subscription.type == 'uploader':
-            # UP主订阅：使用UP主名称/ID
+            # UP主订阅：使用统一前缀“up 主：”；无名称时回退为 uploader_id
             base = subscription.name or getattr(subscription, 'uploader_id', None) or "UP主订阅"
-            dir_name = self._sanitize_filename(f"UP主_{base}")
+            dir_name = self._sanitize_filename(f"up 主：{base}")
         else:
             # 其他类型：使用订阅名称，必要时兜底
             dir_name = self._sanitize_filename(subscription.name or "")

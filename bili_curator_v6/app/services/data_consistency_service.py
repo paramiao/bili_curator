@@ -8,6 +8,11 @@ from sqlalchemy.orm import Session
 from loguru import logger
 
 from ..models import Subscription, Video, Settings
+from .remote_total_store import (
+    read_remote_total_raw,
+    read_remote_total_fresh,
+    write_remote_total,
+)
 from .pending_list_service import pending_list_service
 
 
@@ -37,18 +42,15 @@ class DataConsistencyService:
                 results["checked"] += 1
                 
                 try:
-                    # 检查expected-total缓存
-                    cache_key = f"expected_total:{sub.id}"
-                    cache_setting = db.query(Settings).filter(Settings.key == cache_key).first()
-                    
+                    # 读取原始缓存数据（统一入口，兼容新旧键）
+                    data = read_remote_total_raw(db, sub.id)
                     needs_refresh = False
-                    if not cache_setting:
+                    if not data:
                         needs_refresh = True
                         logger.info(f"订阅 {sub.id} 缺少远端总数缓存")
                     else:
                         try:
-                            cache_data = json.loads(cache_setting.value)
-                            cache_time = datetime.fromisoformat(cache_data.get('timestamp', ''))
+                            cache_time = datetime.fromisoformat(data.get('timestamp', ''))
                             if datetime.now() - cache_time > timedelta(hours=self.max_cache_age_hours):
                                 needs_refresh = True
                                 results["outdated"] += 1
@@ -59,29 +61,12 @@ class DataConsistencyService:
                     
                     # 刷新过期或缺失的缓存
                     if needs_refresh:
-                        from ..downloader import downloader
                         try:
                             # 使用双阶段策略获取远端总数
                             expected_total = await self._get_remote_total_with_fallback(sub.url, db)
                             
-                            # 更新缓存
-                            cache_data = {
-                                "total": expected_total,
-                                "timestamp": datetime.now().isoformat(),
-                                "url": sub.url
-                            }
-                            
-                            if cache_setting:
-                                cache_setting.value = json.dumps(cache_data)
-                            else:
-                                cache_setting = Settings(
-                                    key=cache_key,
-                                    value=json.dumps(cache_data),
-                                    description=f"订阅{sub.id}远端总数缓存"
-                                )
-                                db.add(cache_setting)
-                            
-                            db.commit()
+                            # 统一写入缓存（内部处理新旧键兼容与提交）
+                            write_remote_total(db, sub.id, expected_total, sub.url)
                             results["refreshed"] += 1
                             logger.info(f"订阅 {sub.id} 远端总数缓存已更新: {expected_total}")
                             
@@ -107,25 +92,16 @@ class DataConsistencyService:
         from ..downloader import downloader
         from ..cookie_manager import cookie_manager
         
-        # 第一阶段：无Cookie尝试
+        # 直接使用现有方法获取远端总数
         try:
-            expected_total = await downloader._get_collection_total_count(url, db, use_cookie=False)
-            if expected_total and expected_total > 0:
+            videos = await downloader._get_collection_videos(url, db)
+            expected_total = len(videos) if videos else 0
+            if expected_total > 0:
                 return expected_total
         except Exception as e:
-            logger.debug(f"无Cookie获取远端总数失败: {e}")
+            logger.warning(f"获取远端总数失败: {e}")
         
-        # 第二阶段：使用Cookie回退
-        try:
-            cookie = cookie_manager.get_available_cookie(db)
-            if cookie:
-                expected_total = await downloader._get_collection_total_count(url, db, use_cookie=True)
-                if expected_total and expected_total > 0:
-                    return expected_total
-        except Exception as e:
-            logger.warning(f"Cookie回退获取远端总数失败: {e}")
-        
-        raise Exception("双阶段策略均失败")
+        raise Exception("获取远端总数失败")
     
     def check_pending_counts_accuracy(self, db: Session) -> Dict:
         """检查待下载数量计算准确性"""
@@ -151,17 +127,9 @@ class DataConsistencyService:
                         Video.video_path.isnot(None)
                     ).count()
                     
-                    # 获取远端总数
-                    cache_key = f"expected_total:{sub.id}"
-                    cache_setting = db.query(Settings).filter(Settings.key == cache_key).first()
-                    remote_total = None
-                    
-                    if cache_setting:
-                        try:
-                            cache_data = json.loads(cache_setting.value)
-                            remote_total = cache_data.get('total', 0)
-                        except Exception:
-                            pass
+                    # 获取远端总数（统一读取）
+                    cache_data = read_remote_total_raw(db, sub.id)
+                    remote_total = cache_data.get('total') if cache_data else None
                     
                     if remote_total:
                         calculated_pending = max(0, remote_total - local_videos)
@@ -179,9 +147,8 @@ class DataConsistencyService:
                         
                         # 检查缓存时效性
                         try:
-                            cache_data = json.loads(cache_setting.value)
-                            cache_time = datetime.fromisoformat(cache_data.get('timestamp', ''))
-                            if datetime.now() - cache_time > timedelta(hours=24):
+                            cache_time = datetime.fromisoformat(cache_data.get('timestamp', '')) if cache_data else None
+                            if cache_time and datetime.now() - cache_time > timedelta(hours=24):
                                 results["recommendations"].append({
                                     "subscription_id": sub.id,
                                     "name": sub.name,

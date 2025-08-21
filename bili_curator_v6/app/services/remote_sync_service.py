@@ -210,8 +210,20 @@ class RemoteSyncService:
 
 
     async def refresh_subscription_snapshot(self, subscription_id: int, db: Session, cap: int = 200, reset_cursor: bool = True):
-        """刷新订阅快照的别名方法，保持向后兼容"""
-        return await self.refresh_head_snapshot(subscription_id, db, cap, reset_cursor)
+        """刷新订阅快照，支持所有订阅类型"""
+        from ..models import Subscription
+        
+        subscription = db.query(Subscription).filter(Subscription.id == subscription_id).first()
+        if not subscription:
+            raise ValueError(f"订阅 {subscription_id} 不存在")
+        
+        # 只有合集订阅才支持head_snapshot机制
+        if subscription.type == 'collection':
+            return await self.refresh_head_snapshot(subscription_id, db, cap, reset_cursor)
+        else:
+            # UP主和关键词订阅暂时跳过快照刷新
+            logger.info(f"订阅 {subscription_id} ({subscription.type}) 暂不支持快照刷新")
+            return {"ok": True, "message": f"{subscription.type} 订阅暂不支持快照刷新"}
 
 
 remote_sync_service = RemoteSyncService()

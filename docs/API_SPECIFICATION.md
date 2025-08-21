@@ -11,7 +11,7 @@ GET /api/queue/list
 
 本文档描述了 bili_curator V6 的完整 API 接口规范。
 
-更新时间：2025-08-18
+更新时间：2025-08-21
 
 ## 基础信息
 
@@ -49,6 +49,57 @@ GET /health
   "version": "6.0.0"
 }
 ```
+
+## 9. 解析与回填接口（UP 主）
+
+### 手动解析：名字 ↔ ID（不改数据库）
+```http
+POST /api/uploader/resolve
+Content-Type: application/json
+
+{
+  "name": "某UP主"
+  // 或者
+  // "uploader_id": 123456
+}
+```
+**说明**: 提供名字→ID 或 ID→名字的解析能力，不对数据库做持久化，仅返回解析结果。内部优先使用可用 Cookie 发起请求。
+**响应（示例）**:
+```json
+{
+  "ok": true,
+  "name": "某UP主",
+  "uploader_id": 123456
+}
+```
+**错误**:
+- 400 参数缺失或格式错误
+- 404 未找到匹配的 UP 主
+- 429 触发风控/限流（未来可能）
+
+### 手动解析并回填订阅
+```http
+POST /api/subscriptions/{id}/resolve
+```
+**说明**: 针对 `type = "uploader"` 的订阅，尝试解析缺失的 `name` 或 `uploader_id`，并将成功的解析结果回填到数据库。
+**响应（示例）**:
+```json
+{
+  "subscription_id": 18,
+  "updated": true,
+  "name": "某UP主",
+  "uploader_id": 123456
+}
+```
+**错误**:
+- 404 订阅不存在或类型不为 `uploader`
+- 409 订阅字段已完整，无需回填
+- 502 上游接口失败（解析失败）
+
+### 目录命名前缀（说明）
+- 关键词订阅：目录前缀统一为“关键词：{keyword}”。
+- UP 主订阅：目录前缀统一为“up 主：{uploader_name}”，如名字不可得回退为“up 主：{mid}”。
+- 该规范自新建目录起生效，历史目录不做批量迁移。
 
 ### 系统状态
 ```http
@@ -148,14 +199,22 @@ GET /api/subscriptions
     "url": "https://www.bilibili.com/list/xxx",
     "is_active": true,
     "total_videos": 120,
-    "remote_total": 150,
+    "expected_total": 150,
+    "remote_total": 150,              // 兼容字段（deprecated），与 expected_total 等值
+    "expected_total_videos": 150,     // 兼容字段（deprecated），与 expected_total 等值
+    "remote_status": "fetching",     // 可选：running 时且远端尚未写回
     "downloaded_videos": 120,
     "pending_videos": 30,
+    "last_check": "2025-01-15T10:00:00Z",
     "created_at": "2025-01-15T10:00:00Z",
     "updated_at": "2025-01-15T10:00:00Z"
   }
 ]
 ```
+
+说明：
+- 标准字段为 `expected_total`。历史兼容字段 `remote_total`、`expected_total_videos` 仍返回且与 `expected_total` 等值，后续将逐步移除。
+- 前端界面仅对 `type = "collection"` 的订阅显示“远端总数（获取/刷新）”按钮，其他类型不显示该控件。
 
 ### 获取订阅详情
 ```http
@@ -214,9 +273,18 @@ GET /api/subscriptions/{id}/expected-total
 {
   "subscription_id": 1,
   "expected_total": 200,
+  "expected_total_videos": 200,  // 兼容字段（deprecated）
+  "cached": true,
   "last_updated": "2025-01-15T21:00:00Z"
 }
 ```
+
+说明：
+- 若命中1小时内缓存，将返回 `cached: true`。
+- 在需要 Cookie 的回退路径运行时，响应可能包含 `job_id` 用于标识内部队列任务。
+
+### 启用门控（说明）
+对于 `type = "uploader"` 的订阅，若后端未成功解析出合法的 UP 主名称（例如为空或为占位“待解析UP主”），则禁止将 `is_active` 置为 `true`，返回 `400 Bad Request`，用于避免目录命名与数据模型不一致。
 
 ### 轻量远端同步（触发）
 ```http

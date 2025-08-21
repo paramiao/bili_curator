@@ -3,7 +3,7 @@
 """
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from ..database import get_db
+from ..models import get_db
 from ..services.data_consistency_service import data_consistency_service
 
 router = APIRouter(prefix="/api/maintenance", tags=["数据维护"])

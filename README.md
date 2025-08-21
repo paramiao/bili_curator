@@ -184,6 +184,8 @@ chmod +x scripts/manage.sh
 ```
 
 也可直接使用 compose：
+> 说明：Docker 构建上下文为 `bili_curator_v6/`，镜像在构建阶段会使用 `bili_curator_v6/requirements.txt` 安装依赖。
+> 仓库根目录的 `requirements.txt` 仅用于历史版本（V4/V5），与 V6 服务端无关。
 ```bash
 # 启动/重启服务
 docker compose -f bili_curator_v6/docker-compose.yml up -d
@@ -289,13 +291,13 @@ curl -s -X PATCH http://localhost:8080/api/subscriptions/1 \
 
 ## 🚀 快速开始
 
-### 环境准备
+### 环境准备（本机非 Docker 运行）
 ```bash
 # 激活Python虚拟环境
 source ~/.pydev/bin/activate
 
-# 安装依赖
-pip install -r requirements.txt
+# 安装依赖（使用 V6 专用清单）
+pip install -r bili_curator_v6/requirements.txt
 ```
 
 ### 基本使用

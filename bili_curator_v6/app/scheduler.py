@@ -11,12 +11,9 @@ from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy.orm import Session
 from loguru import logger
 
-from .models import Subscription, DownloadTask, Cookie, Settings, get_db
-from .auto_import import auto_import_service
-from .services.subscription_stats import recompute_all_subscriptions
+from .models import get_db
+from .models import Subscription, Settings
 from .downloader import downloader
-from .cookie_manager import cookie_manager
-from .task_manager import enhanced_task_manager
 from .services.remote_sync_service import remote_sync_service
 from .services.local_index_service import local_index_service
 from .services.download_plan_service import download_plan_service
@@ -109,7 +106,7 @@ class SimpleScheduler:
             trigger=IntervalTrigger(minutes=minutes),
             id='auto_import_and_recompute',
             replace_existing=True,
-            max_instances=1
+            max_instances=2
         )
         logger.info(f"注册周期任务 auto_import_and_recompute，间隔 {minutes} 分钟")
         
@@ -130,7 +127,7 @@ class SimpleScheduler:
             trigger=IntervalTrigger(minutes=enqueue_minutes),
             id='enqueue_coordinator',
             replace_existing=True,
-            max_instances=1
+            max_instances=3
         )
         logger.info(f"注册周期任务 enqueue_coordinator，间隔 {enqueue_minutes} 分钟")
 
@@ -149,7 +146,7 @@ class SimpleScheduler:
             trigger=IntervalTrigger(minutes=refresh_minutes),
             id='refresh_head_snapshots',
             replace_existing=True,
-            max_instances=1
+            max_instances=2
         )
         logger.info(f"注册周期任务 refresh_head_snapshots，间隔 {refresh_minutes} 分钟")
         
@@ -270,11 +267,16 @@ class SimpleScheduler:
                     # 避免请求过快
                     await asyncio.sleep(10)
                     
+                except asyncio.CancelledError:
+                    logger.info(f"订阅 {subscription.name} 处理被取消")
+                    return
                 except Exception as e:
                     logger.error(f"处理订阅 {subscription.name} 失败: {e}")
             
             logger.info("订阅检查完成")
             
+        except asyncio.CancelledError:
+            logger.info("订阅检查任务被取消")
         except Exception as e:
             logger.error(f"检查订阅时出错: {e}")
         finally:
@@ -597,8 +599,15 @@ class SimpleScheduler:
 
                     if not incremental_ok:
                         # 回退：compute_pending_list
-                        pending_info = await downloader.compute_pending_list(sub.id, db)
-                        videos = pending_info.get('videos', []) or []
+                        try:
+                            pending_info = await downloader.compute_pending_list(sub.id, db)
+                            videos = pending_info.get('videos', []) or []
+                        except asyncio.CancelledError:
+                            logger.info(f"订阅 {sub.id} 任务被取消，跳过处理")
+                            return
+                        except Exception as e:
+                            logger.warning(f"订阅 {sub.id} compute_pending_list 失败: {e}")
+                            continue
                         # 写观测：last_full_refresh_at
                         try:
                             ts_key = f"agg:{sub.id}:last_full_refresh_at"
@@ -622,7 +631,9 @@ class SimpleScheduler:
 
                     # 仅入队未在队列中的视频；考虑回补已占用配额
                     candidates = [v for v in videos if not v.get('is_queued')]
+                    logger.info(f"订阅 {sub.id} 候选视频: {len(videos)} 总数, {len(candidates)} 未入队")
                     if not candidates:
+                        logger.info(f"订阅 {sub.id} 无候选视频，跳过处理")
                         continue
                     try:
                         remaining = max(0, max_per_sub - (enq_retry if 'enq_retry' in locals() else 0))
@@ -659,6 +670,9 @@ class SimpleScheduler:
                             }, sub.id, db)
                             enq += 1
                             await asyncio.sleep(0.1)
+                        except asyncio.CancelledError:
+                            logger.info(f"订阅 {sub.id} 入队任务被取消")
+                            return
                         except Exception as ie:
                             logger.warning(f"订阅 {sub.id} 视频入队失败：{ie}")
                     if enq:
@@ -667,6 +681,8 @@ class SimpleScheduler:
                     logger.warning(f"订阅 {sub.id} 入队协调异常：{se}")
 
             logger.info("入队协调任务完成")
+        except asyncio.CancelledError:
+            logger.info("入队协调任务被取消")
         except Exception as e:
             logger.error(f"入队协调任务异常：{e}")
         finally:
@@ -692,12 +708,14 @@ class SimpleScheduler:
                 logger.info(f"合集 {subscription.name} 检查完成: {result['new_videos']} 个新视频")
                 
             elif subscription.type == 'uploader':
-                # 处理UP主订阅 (待实现)
-                logger.info(f"UP主订阅 {subscription.name} 暂未实现")
+                # 处理UP主订阅
+                result = await downloader.download_uploader(subscription.id, db)
+                logger.info(f"UP主 {subscription.name} 检查完成: {result['new_videos']} 个新视频")
                 
             elif subscription.type == 'keyword':
-                # 处理关键词订阅 (待实现)
-                logger.info(f"关键词订阅 {subscription.name} 暂未实现")
+                # 处理关键词订阅
+                result = await downloader.download_keyword(subscription.id, db)
+                logger.info(f"关键词 {subscription.name} 检查完成: {result['new_videos']} 个新视频")
                 
         except Exception as e:
             logger.error(f"处理订阅 {subscription.name} 失败: {e}")
@@ -929,4 +947,4 @@ class TaskManager:
         return tasks
 
 # 全局任务管理器实例
-task_manager = enhanced_task_manager
+task_manager = TaskManager()
