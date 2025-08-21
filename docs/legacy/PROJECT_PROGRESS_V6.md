@@ -2,9 +2,13 @@
 
 更新时间：2025-08-14 13:16 (Asia/Shanghai)
 
+> 状态说明（2025-08）：
+> - 实时推送（SSE/WebSocket）与仪表盘聚合接口暂缓，当前以 2s 轮询为主。
+> - Specific URLs 已改为“仅工具型一次性导入”，不作为订阅类型参与调度。
+
 ## 一、状态总览
 - 目标：V6 订阅/下载全链路与 V5/Emby 标准一致，支持 Web 管理与自动化服务化。
-- 当前进度：端到端联调闭环已打通（解析→订阅→下载→前端轮询/控制）；下载端统一目录/命名/Cookie；API 解析与下载一致；ID/路径入库一致；历史不一致实现已清理。
+- 当前进度：端到端联调闭环已打通（解析→订阅→下载→前端轮询/控制，SSE 暂缓）；下载端统一目录/命名/Cookie；API 解析与下载一致；ID/路径入库一致；历史不一致实现已清理。
 
 ## 二、已完成（Done）
 - 目录结构：按订阅/合集分目录，输出到 `DOWNLOAD_PATH/<订阅名>/`（兼容 Emby 与历史数据）。
@@ -22,7 +26,7 @@
 - 日志增强：输出“产物查找回退匹配/规范化重命名/已生成NFO”，定位问题更直观。
 
 新增：
-- 前端任务页：适配 `/api/tasks` 返回对象结构，使用 `task_id`/`progress_percent` 渲染，支持暂停/恢复/取消与轮询刷新。
+- 前端任务页：适配 `/api/tasks` 返回对象结构，使用 `task_id`/`progress_percent` 渲染，支持暂停/恢复/取消与轮询刷新（SSE 暂缓）。
 - 字段一致性：输入统一 `is_active`（兼容 `active`），模型/更新路径补齐 `updated_at` 并对外返回。
 - 兼容旧库：创建 `DownloadTask` 时同步写入 `video_id` 与 `bilibili_id`，避免旧库 `NOT NULL` 约束错误。
 - 联调闭环：解析→订阅→下载→前端轮询/控制 全流程打通。
@@ -68,7 +72,7 @@
   2. 解析合集名：`POST /api/subscriptions/parse-collection { url }`。
   3. 创建订阅：`POST /api/subscriptions { name, type: collection, url }`。
   4. 启动下载：`POST /api/subscriptions/{id}/download`。
-  5. 轮询任务：`GET /api/tasks` 或 `GET /api/tasks/{task_id}/status`（后续将提供 `dashboard/events` 聚合与SSE）。
+  5. 轮询任务：`GET /api/tasks` 或 `GET /api/tasks/{task_id}/status`（SSE 暂缓；Dashboard 聚合接口暂缓）。
   6. 验证落盘：`DOWNLOAD_PATH/<订阅名>/` 生成四件套，命名为标题；若冲突则“标题 - BV号”。
   7. 验证入库：`video_path/json_path/thumbnail_path` 指向订阅目录；`bilibili_id` 匹配。
   8. Emby 扫描识别 NFO 元数据。
@@ -93,7 +97,7 @@
 - [ ] 前端迁移至 `web/src/` 并增加构建链路。
 - [ ] 下载产物抽样核对与报告。
 - [ ] 定时自动导入与更新任务串接。
- - [ ] 订阅仪表盘聚合接口与 SSE 实时推送。
+ - [ ]【暂缓】订阅仪表盘聚合接口与 SSE 实时推送（当前以轮询为主）。
 
 ---
 ### 附：常用命令

@@ -17,6 +17,7 @@ from .downloader import downloader
 from .services.remote_sync_service import remote_sync_service
 from .services.local_index_service import local_index_service
 from .services.download_plan_service import download_plan_service
+from .queue_manager import request_queue
 
 def _get_int_setting(db: Session, key: str, default: int) -> int:
     """从 Settings 读取整数配置，读取失败返回默认值。"""
@@ -88,6 +89,15 @@ class SimpleScheduler:
             max_instances=1
         )
 
+        # 僵尸回收：清理 list_fetch RUNNING 超时任务 - 每5分钟
+        self.scheduler.add_job(
+            func=self.zombie_reaper,
+            trigger=IntervalTrigger(minutes=5),
+            id='zombie_reaper',
+            replace_existing=True,
+            max_instances=1
+        )
+
         # 周期性后台任务：自动导入 + 自动关联 + 统一重算订阅统计 - 间隔可配置
         # 读取 Settings.auto_import_interval_minutes，若无则回退到 Settings.check_interval，再回退 15
         minutes = 15
@@ -151,6 +161,33 @@ class SimpleScheduler:
         logger.info(f"注册周期任务 refresh_head_snapshots，间隔 {refresh_minutes} 分钟")
         
         logger.info("默认定时任务已添加")
+
+    async def zombie_reaper(self):
+        """僵尸回收任务：
+        - 读取阈值（Settings: zombie:list_fetch:timeout_minutes，默认20）
+        - 回收 RUNNING 超时的 list_fetch 任务
+        - 输出结构化日志
+        """
+        db = next(get_db())
+        try:
+            try:
+                threshold_minutes = _get_int_setting(db, 'zombie:list_fetch:timeout_minutes', 20)
+            except Exception:
+                threshold_minutes = 20
+        finally:
+            db.close()
+        try:
+            stats = await request_queue.reap_zombies(threshold_minutes=threshold_minutes, target_types=['list_fetch'])
+            logger.bind(component='zombie_reaper').info({
+                'event': 'reaper_run',
+                'threshold_minutes': threshold_minutes,
+                'stats': stats,
+            })
+        except Exception as e:
+            logger.bind(component='zombie_reaper').error({
+                'event': 'reaper_error',
+                'error': str(e),
+            })
 
     @staticmethod
     def _is_bvid(vid: str) -> bool:

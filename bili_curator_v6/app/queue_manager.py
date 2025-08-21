@@ -81,12 +81,47 @@ class RequestJob:
     wait_ms: int = 0
     last_wait_reason: str = ""
 
+    # 辅助：计算运行耗时（毫秒）
+    def runtime_ms(self) -> int:
+        try:
+            if self.started_at is None:
+                return 0
+            end = self.finished_at or datetime.now()
+            return int((end - self.started_at).total_seconds() * 1000)
+        except Exception:
+            return 0
+
 
 class RequestQueueManager:
     def __init__(self) -> None:
         self._jobs: Dict[str, RequestJob] = {}
         self._order: List[str] = []  # 简单双端队列可扩展为优先级队列
         self._lock = asyncio.Lock()
+
+    # 结构化日志输出
+    def _emit(self, event: str, job: Optional[RequestJob], **extra):
+        try:
+            payload = {
+                'event': event,
+                'job_id': getattr(job, 'id', None),
+                'type': getattr(job, 'type', None),
+                'subscription_id': getattr(job, 'subscription_id', None),
+                'requires_cookie': getattr(job, 'requires_cookie', None),
+                'status': getattr(job, 'status', None),
+                'priority': getattr(job, 'priority', None),
+                'acquired_scope': getattr(job, 'acquired_scope', None),
+                'created_at': getattr(job, 'created_at', None).isoformat() if getattr(job, 'created_at', None) else None,
+                'started_at': getattr(job, 'started_at', None).isoformat() if getattr(job, 'started_at', None) else None,
+                'finished_at': getattr(job, 'finished_at', None).isoformat() if getattr(job, 'finished_at', None) else None,
+                'wait_ms': getattr(job, 'wait_ms', None),
+                'run_ms': job.runtime_ms() if job else None,
+            }
+            if extra:
+                payload.update(extra)
+            logger.bind(component='request_queue').info(payload)
+        except Exception:
+            # 降级为普通日志，避免影响主流程
+            logger.info(f"queue_event_fallback event={event} job_id={getattr(job, 'id', None)} extra={extra}")
 
     async def enqueue(self, job_type: str, subscription_id: Optional[int], requires_cookie: bool, priority: Optional[int] = None, dedup_key: Optional[str] = None, video_id: Optional[str] = None) -> str:
         # 计算去重键：默认使用 job_type:subscription_id（若提供）
@@ -110,7 +145,7 @@ class RequestQueueManager:
                 exist = _dedup_keys.get(key)
                 if exist and exist in self._jobs:
                     existing_job = self._jobs[exist]
-                    logger.info(f"去重: 已存在相同任务, key={key}, existing_job_id={exist}, status={existing_job.status}")
+                    self._emit('enqueue_dedup_hit', existing_job, dedup_key=key)
                     return exist
                 # 预占去重键
                 _dedup_keys[key] = job_id
@@ -121,7 +156,7 @@ class RequestQueueManager:
                 self._order.insert(0, job_id)
             else:
                 self._order.append(job_id)
-        logger.info(f"入队: {job.type} sid={subscription_id} id={job_id} prio={job.priority}")
+        self._emit('enqueue', job, dedup_key=key)
         return job_id
 
     def get(self, job_id: str) -> Optional[Dict[str, Any]]:
@@ -217,7 +252,7 @@ class RequestQueueManager:
                     _run_cookie += 1
                 else:
                     _run_nocookie += 1
-                logger.info(f"开始执行: {job.type} sid={job.subscription_id} id={job_id} scope={acquired} wait_ms={job.wait_ms} cycles={job.wait_cycles} reason={job.last_wait_reason}")
+                self._emit('start', job, wait_cycles=job.wait_cycles, last_wait_reason=job.last_wait_reason)
             return
 
     async def mark_done(self, job_id: str):
@@ -238,6 +273,8 @@ class RequestQueueManager:
                 _run_cookie = max(0, _run_cookie - 1)
             else:
                 _run_nocookie = max(0, _run_nocookie - 1)
+        if 'job' in locals() and job:
+            self._emit('finish', job)
 
     async def mark_failed(self, job_id: str, err: str):
         async with self._lock:
@@ -258,6 +295,20 @@ class RequestQueueManager:
                 _run_cookie = max(0, _run_cookie - 1)
             else:
                 _run_nocookie = max(0, _run_nocookie - 1)
+        if 'job' in locals() and job:
+            # 结构化失败日志，尝试推断错误类别
+            err_class = 'unknown'
+            try:
+                s = (err or '').lower()
+                if any(k in s for k in ['timeout', 'time out']):
+                    err_class = 'timeout'
+                elif any(k in s for k in ['forbidden', '403', 'unauthorized', '401', 'permission']):
+                    err_class = 'auth'
+                elif any(k in s for k in ['not found', '404', 'deleted', 'private']):
+                    err_class = 'not_found'
+            except Exception:
+                pass
+            self._emit('fail', job, error=err, error_class=err_class)
 
     async def remove(self, job_id: str):
         async with self._lock:
@@ -291,6 +342,8 @@ class RequestQueueManager:
                 _run_cookie = max(0, _run_cookie - 1)
             else:
                 _run_nocookie = max(0, _run_nocookie - 1)
+        if 'job' in locals() and job:
+            self._emit('cancel', job, reason=reason)
         return True
 
     async def prioritize(self, job_id: str, new_priority: Optional[int] = None):
@@ -389,6 +442,64 @@ class RequestQueueManager:
             _cap_cookie = max(0, int(requires_cookie))
         if no_cookie is not None:
             _cap_nocookie = max(0, int(no_cookie))
+
+    async def reap_zombies(self, threshold_minutes: int = 20, target_types: Optional[List[str]] = None) -> Dict[str, Any]:
+        """
+        僵尸回收：将 RUNNING 且超时的任务标记为 FAILED，并安全释放信号量与运行计数。
+        默认仅针对 list_fetch 类型，可通过 target_types 覆盖。
+        返回回收统计数据。
+        """
+        if target_types is None:
+            target_types = ['list_fetch']
+        now = datetime.now()
+        threshold = threshold_minutes * 60
+        reaped = []
+        async with self._lock:
+            for jid in list(self._order):
+                job = self._jobs.get(jid)
+                if not job:
+                    continue
+                if job.status != JobStatus.RUNNING:
+                    continue
+                if job.type not in target_types:
+                    continue
+                try:
+                    started = job.started_at or job.created_at
+                    elapsed = (now - started).total_seconds()
+                except Exception:
+                    elapsed = 0
+                if elapsed >= threshold:
+                    # 标记失败并准备释放资源
+                    job.status = JobStatus.FAILED
+                    job.finished_at = datetime.now()
+                    job.last_error = f"zombie_reaped: running_timeout_{threshold_minutes}m"
+                    acquired = job.acquired_scope
+                    job.acquired_scope = None
+                    self._clear_dedup_for(jid)
+                    reaped.append((job, acquired))
+        # 锁外释放信号量与计数，记录日志
+        for job, acquired in reaped:
+            if acquired == 'cookie':
+                try:
+                    _sem_cookie.release()
+                except Exception:
+                    pass
+                global _run_cookie
+                _run_cookie = max(0, _run_cookie - 1)
+            elif acquired == 'nocookie':
+                try:
+                    _sem_nocookie.release()
+                except Exception:
+                    pass
+                global _run_nocookie
+                _run_nocookie = max(0, _run_nocookie - 1)
+            self._emit('zombie_reap', job, reason='running_timeout', threshold_minutes=threshold_minutes)
+        return {
+            'checked': len(self._order),
+            'reaped': len(reaped),
+            'types': target_types,
+            'threshold_minutes': threshold_minutes,
+        }
 
 
 # 全局实例

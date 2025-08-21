@@ -14,7 +14,7 @@ services:
       # 静态文件目录挂载（确保前端页面持久化）
       - ./static:/app/static:ro
       # Web前端文件挂载（确保前端界面更新）
-      - ./web:/app/web:ro
+      - ./web/dist:/app/web/dist:ro
       # 应用代码挂载（确保API和服务代码持久化）
       - ./app:/app/app:ro
       # 主应用文件挂载

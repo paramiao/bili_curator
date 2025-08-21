@@ -10,11 +10,11 @@
 CREATE TABLE subscriptions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,                  -- 订阅名称
-    type TEXT NOT NULL,                  -- 订阅类型：collection/uploader/keyword/specific_urls
+    type TEXT NOT NULL,                  -- 订阅类型：collection/uploader/keyword（specific_urls 已下线为“仅工具型导入”）
     url TEXT,                            -- 合集URL（type=collection）
     uploader_id TEXT,                    -- UP主ID（type=uploader）
     keyword TEXT,                        -- 关键词（type=keyword）
-    specific_urls TEXT,                  -- JSON字符串，特定URL列表（type=specific_urls）
+    specific_urls TEXT,                  -- [deprecated] JSON字符串，特定URL列表（仅供一次性导入工具读取，不作为订阅类型参与调度）
     -- 筛选条件
     date_after DATE,
     date_before DATE,
@@ -34,6 +34,13 @@ CREATE TABLE subscriptions (
 ```
 
 > 统计口径（本地优先）：`subscriptions.total_videos/downloaded_videos` 的计算以“磁盘真实存在的产物”为准（视频或配套 JSON），应用启动与关联操作后会按本地为准刷新统计，避免 DB 计数大于本地的情况。
+
+#### 订阅类型与 Specific URLs 取舍（重要）
+- 生效的订阅类型仅包含：`collection` / `uploader` / `keyword`。
+- `specific_urls` 已调整为“仅工具型一次性导入”：
+  - 不再允许创建 `type=specific_urls` 的订阅；调度与增量管线不消费该类型。
+  - 字段 `specific_urls` 暂保留用于导入工具读取和兼容旧数据；新代码不得依赖其作为活跃订阅入口。
+  - 文档与 API 说明以此为准，避免前后端残留入口。
 
 ### 2. 视频表（videos）
 

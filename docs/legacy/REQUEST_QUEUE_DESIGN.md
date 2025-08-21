@@ -2,15 +2,18 @@
 
 更新时间：2025-08-15 17:48 (Asia/Shanghai)
 
+> 状态说明（2025-08）：
+> - 实时推送（SSE/WebSocket）已下调为“可选/暂缓”，当前以 2s 轮询为主。
+> - Specific URLs 不再作为订阅类型，改为“仅工具型一次性导入”。
+
 ## 目标
 - 统一管理所有对 B 站的外网请求（expected-total、parse-collection、列表抓取、下载等），防止并发叠加引发风控。
 - 区分“需 Cookie”与“无 Cookie”两类请求，分别采用不同并发与 UA 策略。
-- 提供 Web 管理后台的可视化与可控能力：可查看队列、暂停/恢复、取消、调整优先级。
-- 对同一订阅（subscription_id）实现强互斥，确保同一订阅的外网请求严格串行。
+- 提供 Web 管理后台的可视化与可控能力：可查看队列、暂停/恢复、取消、调整优先级（当前以轮询为主，SSE 可选/暂缓）。
 
 ## 核心原则
 - 全链路一致：端点 → 队列 → 执行器（yt-dlp/HTTP 调用）参数一致（UA/Referer/重试/延时/分段/回退）。
-- 可观测可控：队列状态可查询、可订阅（SSE），支持工单级操作。
+- 可观测可控：队列状态可查询、轮询刷新（SSE 可选，当前暂缓），支持工单级操作。
 - 家用稳定优先：默认严格限流（Cookie 通道 = 1），可按需微调。
 
 ## 模型与组件
@@ -43,7 +46,7 @@
 - `GET /api/queue/stats`：总体统计（并发配置、运行计数、分通道排队数等）。
 - `POST /api/requests/enqueue`：入队（传入 RequestJob 必要字段）。
 - `POST /api/requests/{id}/pause`、`/resume`、`/cancel`、`/prioritize`。
-- `GET /api/requests/events`：SSE 推送任务状态变化（可选）。
+- `GET /api/requests/events`：SSE 推送任务状态变化（可选，暂缓）。
 
 ## 端点改造为“入队”模式
 - `GET /api/subscriptions/{id}/expected-total` → 入队 `type=expected_total`；
@@ -92,7 +95,7 @@
 ## 风险与缓解
 - 队列阻塞：提供优先级与置顶能力；必要时可临时提升无 Cookie 通道并发。
 - Cookie 失效：在 Cookie Lane 记录失败并结合阈值禁用；412 风控仅告警不记失败。
-- 观测不足：建议开启 SSE 并前端可视化，便于快速定位瓶颈与失败点。
+- 观测不足：建议通过轮询与前端可视化；SSE 可在需要时启用（当前暂缓）。
 
 ## 当前实现对比与完成度
 
@@ -144,7 +147,7 @@
 
 - 列表 API 过滤/分页：`GET /api/requests?status=&type=&subscription_id=&lane=&page=&size=`，支撑订阅页联动与大规模可观测。
 - 优先级调度升级：采用“priority（高优先）+ 创建时间”的稳定排序；置顶通过设置较高 priority 实现，减少直接队列结构操作。
-- SSE/WebSocket：`GET /api/requests/events` 推送任务状态变化，降低轮询负载并增强实时性。
+- SSE/WebSocket（暂缓）：`GET /api/requests/events` 推送任务状态变化，降低轮询负载并增强实时性。
 - UA 策略抽象：对无 Cookie 通道统一注入 UA 轮换策略，并通过 `UA_PROFILES` 配置。
 - 队列持久化：落地 SQLite，支持重启恢复与历史审计；内存实现在轻负载场景继续可用。
 
