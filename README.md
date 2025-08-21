@@ -41,6 +41,8 @@ chmod +x scripts/manage.sh
 open http://localhost:8080
 ```
 
+> 前端 SPA 由后端从 `web/dist` 提供。使用 docker-compose 时建议挂载 `./web/dist:/app/web/dist:ro`（本仓库的 `bili_curator_v6/docker-compose.yml` 已按此配置），确保构建产物可热更新且不覆盖其他目录。
+
 ### Docker Compose 部署
 
 ```bash
@@ -63,9 +65,9 @@ docker-compose logs -f
 访问地址：`http://localhost:8080`（统一单页应用入口）
 
 ### 核心功能模块
-- **📈 总览仪表板**：系统状态、媒体统计、订阅概览、目录分析
+- **📈 总览仪表板**：系统状态、媒体统计、订阅概览、目录分析（部分统计聚合暂缓）
 - **📺 订阅管理**：添加/编辑订阅、状态监控、手动触发同步、失败视频清理
-- **⏳ 任务队列**：实时任务监控、进度追踪、错误处理
+- **⏳ 任务队列**：轮询监控任务（SSE/WebSocket 暂缓）、进度追踪、状态管理
 - **🍪 Cookie 管理**：多账号管理、有效性验证、自动轮换
 - **⚙️ 系统设置**：下载配置、同步状态、数据维护工具
 - **📊 系统监控**：健康状态、任务执行、队列状态、资源使用
@@ -110,7 +112,7 @@ curl -s -X POST http://localhost:8080/api/subscriptions/1/clear-failed | jq .
 - ✅ **合集订阅**：完整支持，自动监控更新，智能增量下载
 - ✅ **UP主订阅**：支持UP主全部视频订阅，定期检查更新
 - ✅ **关键词订阅**：基于搜索关键词的视频订阅
-- ✅ **特定视频订阅**：指定视频URL列表的批量下载
+- 注：Specific URLs 仅作为“工具型一次性导入”，不作为订阅类型参与调度。
 
 ## 🔧 使用说明
 
@@ -354,7 +356,7 @@ python legacy/v5/bilibili_collection_downloader_v5.py \
 ## 🏗️ 技术架构
 
 ### 核心组件
-- **FastAPI 后端**：RESTful API，WebSocket 实时通信
+- **FastAPI 后端**：RESTful API（轮询为主，SSE/WebSocket 暂缓）
 - **SQLite 数据库**：轻量级本地存储，无需外部依赖
 - **APScheduler 调度**：定时任务，自动检查订阅更新
 - **yt-dlp 下载引擎**：稳定的视频下载核心
