@@ -12,6 +12,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from .models import Video, get_db
+from .utils.path_utils import strip_info_suffix
 
 logger = logging.getLogger(__name__)
 
@@ -309,9 +310,8 @@ class ConsistencyChecker:
     def _find_video_file(self, json_file: Path) -> Optional[Path]:
         """根据JSON文件查找对应的视频文件"""
         base_name = json_file.stem
-        # yt-dlp 元数据多为 *.info.json，此时 stem 为 "<name>.info"，需去除后缀再匹配视频
-        if base_name.endswith('.info'):
-            base_name = base_name[:-5]
+        # 统一使用工具函数处理 *.info.json 的基名
+        base_name = strip_info_suffix(base_name)
         video_dir = json_file.parent
         
         # 常见视频格式

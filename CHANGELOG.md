@@ -22,6 +22,10 @@
   - 修复 `app/auto_import.py::_find_video_file()` 同步逻辑，确保增量导入对 `*.info.json` 也能回填 `video_path`/`downloaded`。
   - 修复 `app/auto_import.py::_find_thumbnail_file()` 的 `.info` 兼容，缩略图可正确关联。
 - 调度器入队节流键名修正：统一读取 `enqueue_time_budget_seconds` 与 `max_enqueue_per_subscription`，避免误用旧键导致轮次入队不足。
+- 代码去重与可维护性：抽取 `app/utils/path_utils.py` 提供 `strip_info_suffix()`、`base_name_from_json_path()`，并重构 `auto_import.py`、`consistency_checker.py` 统一使用；新增 `app/utils/__init__.py`。
+
+### 🧪 测试
+- 新增 `tests/test_path_utils.py`，覆盖 `*.info.json` 与普通 `.json` 的基名解析；包含中文文件名用例。
 
 ### 🐛 问题修复
 - 聚合页待下载口径统一：`GET /api/download/aggregate` 改为复用 `metrics_service.compute_subscription_metrics` 的 `pending` 字段，确保与 `/api/subscriptions`、`/api/overview` 一致。

@@ -8,6 +8,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import List, Optional
 from .models import Database, Video, Subscription
+from .utils.path_utils import strip_info_suffix, base_name_from_json_path
 from .services.subscription_stats import (
     recompute_all_subscriptions,
     recompute_subscription_stats,
@@ -214,8 +215,8 @@ class AutoImportService:
             if existing_video:
                 return "skipped"
             
-            # 查找对应的视频文件
-            base_name = json_file.stem
+            # 查找对应的视频/缩略图文件（统一使用工具函数处理 *.info.json）
+            base_name = base_name_from_json_path(json_file)
             video_file = self._find_video_file(json_file.parent, base_name)
             thumbnail_file = self._find_thumbnail_file(json_file.parent, base_name)
             
@@ -262,9 +263,8 @@ class AutoImportService:
     
     def _find_video_file(self, directory: Path, base_name: str) -> Optional[Path]:
         """查找对应的视频文件"""
-        # 兼容 yt-dlp 生成的 *.info.json 元数据：传入的 base_name 可能已包含 ".info"
-        if base_name.endswith('.info'):
-            base_name = base_name[:-5]
+        # 再次兜底剥离 .info，确保调用方传参异常时也能匹配
+        base_name = strip_info_suffix(base_name)
         video_extensions = ['.mp4', '.mkv', '.flv', '.webm', '.avi']
         
         for ext in video_extensions:
@@ -276,9 +276,7 @@ class AutoImportService:
     
     def _find_thumbnail_file(self, directory: Path, base_name: str) -> Optional[Path]:
         """查找对应的缩略图文件"""
-        # 兼容 yt-dlp 生成的 *.info.json 元数据：传入的 base_name 可能已包含 ".info"
-        if base_name.endswith('.info'):
-            base_name = base_name[:-5]
+        base_name = strip_info_suffix(base_name)
         thumbnail_extensions = ['.jpg', '.jpeg', '.png', '.webp']
         
         for ext in thumbnail_extensions:
