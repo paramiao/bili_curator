@@ -18,6 +18,10 @@ from .services.remote_sync_service import remote_sync_service
 from .services.local_index_service import local_index_service
 from .services.download_plan_service import download_plan_service
 from .queue_manager import request_queue
+from .auto_import import auto_import_service
+from .cookie_manager import cookie_manager
+from .services.subscription_stats import recompute_all_subscriptions
+from .models import DownloadTask
 
 def _get_int_setting(db: Session, key: str, default: int) -> int:
     """从 Settings 读取整数配置，读取失败返回默认值。"""

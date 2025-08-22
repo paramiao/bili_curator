@@ -262,6 +262,9 @@ class AutoImportService:
     
     def _find_video_file(self, directory: Path, base_name: str) -> Optional[Path]:
         """查找对应的视频文件"""
+        # 兼容 yt-dlp 生成的 *.info.json 元数据：传入的 base_name 可能已包含 ".info"
+        if base_name.endswith('.info'):
+            base_name = base_name[:-5]
         video_extensions = ['.mp4', '.mkv', '.flv', '.webm', '.avi']
         
         for ext in video_extensions:
@@ -273,6 +276,9 @@ class AutoImportService:
     
     def _find_thumbnail_file(self, directory: Path, base_name: str) -> Optional[Path]:
         """查找对应的缩略图文件"""
+        # 兼容 yt-dlp 生成的 *.info.json 元数据：传入的 base_name 可能已包含 ".info"
+        if base_name.endswith('.info'):
+            base_name = base_name[:-5]
         thumbnail_extensions = ['.jpg', '.jpeg', '.png', '.webp']
         
         for ext in thumbnail_extensions:

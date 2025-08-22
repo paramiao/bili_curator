@@ -99,6 +99,67 @@
 - [ ] 定时自动导入与更新任务串接。
  - [ ]【暂缓】订阅仪表盘聚合接口与 SSE 实时推送（当前以轮询为主）。
 
+## 七、长尾治理进展（2025-08-22 11:52, Asia/Shanghai）
+### 7.1 问题定位与根因分析（已完成）
+- **目标**：解决订阅 6（podcast播客每天更新）与订阅 9（Web3天空之城合集）长尾 pending 久不下降的问题，保证"入队协调→下载完成→统计收敛"。
+
+- **初步诊断结论**：
+  - 订阅 6：pending≈4，均为真实未下载尾巴，其中 1 条仅有 info.json；本次强制执行一次 `enqueue_coordinator()` 后，已可正常入队与下载。
+  - 订阅 9：pending≈36，入队在 `compute_pending_list()` 前置阶段发生 `list_fetch` 失败，原因是 yt-dlp 抽取器错误。
+
+- **关键日志**（`bili_curator_v6/app/downloader.py` → `_get_collection_videos()`）：
+  - ERROR: An extractor error has occurred. (caused by KeyError('data')); Confirm you are on the latest version using yt-dlp -U
+  - 说明：bilibili 站点结构/接口变更导致旧版本 yt-dlp 提取失败。
+
+- **环境约束**：`bili_curator_v6/requirements.txt` 中为 `yt-dlp>=2023.7.0`，未固定到已验证版本，存在「被动升级/旧版本不兼容」风险。
+
+### 7.2 深度根因发现与修复（已完成）
+- **真实根因**：yt-dlp 生成的元数据文件为 `*.info.json`，但一致性回填逻辑中 `json_file.stem` 得到 `xxx.info`，导致查找视频文件时寻找 `xxx.info.mp4` 而非 `xxx.mp4`，造成：
+  - 数据库记录长期缺失 `video_path` 和 `downloaded=True`
+  - 入队协调每次都将这些视频视为"待下载"候选
+  - 下载器检测到本地已存在而跳过入库，pending 不下降
+
+- **修复实施**：
+  1. **代码修复**（已完成）：
+     - `bili_curator_v6/app/consistency_checker.py` 的 `_find_video_file()`：处理 `*.info.json` 情况，去除 `.info` 后缀再匹配视频文件
+     - `bili_curator_v6/app/auto_import.py` 的 `_find_video_file()`：同样处理 `.info` 后缀兼容性
+  
+  2. **调度器参数优化**（已完成）：
+     - 修正 Settings 键名：`enqueue_time_budget_seconds=180`、`max_enqueue_per_subscription=4`
+     - 提高入队配额与时间预算以加速长尾消化
+  
+  3. **yt-dlp 版本固定**（已完成）：
+     - 热修：容器内升级到 2025.08.20
+     - 长期：`bili_curator_v6/requirements.txt` 固定为 `yt-dlp==2025.8.20`
+     - 镜像重建：已完成，版本验证通过
+
+### 7.3 修复效果验证（已完成）
+- **一致性回填结果**：
+  - `records_updated: 8`，成功为已存在视频补齐 `video_path` 和 `downloaded=True`
+  - `files_missing: 0`，无文件丢失
+  - `orphan_files: 113`，孤立文件数量合理
+
+- **最终诊断结果**（2025-08-22 11:47）：
+  - 订阅 6：`downloaded=64, pending_estimated=0`（已清零）
+  - 订阅 9：`downloaded=1004, pending_estimated=0`（已清零）
+  - 全局：`pending_total=0`（长尾完全消化）
+  - yt-dlp 版本：2025.08.20（已固定并生效）
+
+### 7.4 发现的新问题
+- **本地文件数 > 远端总数**：
+  - 订阅 9：本地 downloaded=1004，远端 remote_total=999
+  - 可能原因：目录混入非该合集视频、同 bvid 多版本文件并存、历史迁移导致的重复文件
+  - 影响：统计口径不一致，需进一步核查与净化
+
+### 7.5 执行清单完成状态
+- [x]（热修）升级 yt-dlp 并验证版本：2025.08.20
+- [x] 手动执行入队协调并观察 pending 下降趋势
+- [x] 运行诊断对比：pending 已全部清零
+- [x]（长期）固定 `yt-dlp` 版本并重建镜像
+- [x] 修复 `*.info.json` 文件名匹配问题
+- [x] 一致性回填与数据库状态修正
+- [ ] 本地文件数与远端总数差异分析与净化（新发现问题）
+
 ---
 ### 附：常用命令
 ```bash
