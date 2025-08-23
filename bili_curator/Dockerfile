@@ -40,7 +40,13 @@ RUN set -eux; \
 
 # 复制并安装Python依赖
 COPY requirements.txt .
+COPY requirements-v7.txt .
+
+# 安装Python依赖 (根据VERSION环境变量决定)
 RUN pip install --no-cache-dir -r requirements.txt && \
+    if [ "${VERSION:-v6}" != "v6" ]; then \
+        pip install --no-cache-dir -r requirements-v7.txt; \
+    fi && \
     pip install --no-cache-dir --upgrade yt-dlp
 
 # 复制应用代码

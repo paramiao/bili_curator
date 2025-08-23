@@ -10,7 +10,7 @@ apscheduler>=3.9.0
 
 # HTTP请求
 httpx>=0.24.0
-aiofiles>=0.8.0
+aiofiles==23.2.0
 
 # 视频下载 (基于V5)
 yt-dlp==2025.8.20

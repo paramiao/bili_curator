@@ -207,6 +207,12 @@ class AutoImportService:
             if not video_id:
                 return "skipped"
             
+            # 过滤非标准BV格式的bilibili_id（如直播回放的数字格式ID）
+            video_id_str = str(video_id).strip()
+            if not video_id_str.startswith('BV') or len(video_id_str) != 12:
+                logger.debug(f"跳过非标准BV格式的视频ID: {video_id_str} (文件: {json_file})")
+                return "skipped"
+            
             # 检查是否已存在
             existing_video = session.query(Video).filter(
                 Video.bilibili_id == video_id

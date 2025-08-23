@@ -4,13 +4,15 @@ set -euo pipefail
 # One-click manager for bili_curator (Docker Compose)
 # Usage:
 #   ./scripts/manage.sh up|down|restart|rebuild|logs|ps|health
+#   VERSION=v7 ./scripts/manage.sh up    # 部署V7版本
 # Env:
-#   COMPOSE_FILE (optional): path to compose file. Default: bili_curator_v6/docker-compose.yml
+#   VERSION (optional): v6 or v7. Default: v6
+#   COMPOSE_FILE (optional): path to compose file. Default: docker-compose.yml
 #   CONFIG_DIR (optional): host config dir. Default: ~/bilibili_config
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-COMPOSE_FILE_DEFAULT="$REPO_ROOT/bili_curator_v6/docker-compose.yml"
+COMPOSE_FILE_DEFAULT="$REPO_ROOT/docker-compose.yml"
 COMPOSE_FILE_PATH="${COMPOSE_FILE:-$COMPOSE_FILE_DEFAULT}"
 CONFIG_DIR_PATH="${CONFIG_DIR:-$HOME/bilibili_config}"
 

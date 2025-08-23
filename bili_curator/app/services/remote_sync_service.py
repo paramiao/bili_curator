@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from ..models import Settings, Subscription
 from ..downloader import downloader
+from .remote_total_store import write_remote_total
 
 
 class RemoteSyncService:
@@ -67,10 +68,18 @@ class RemoteSyncService:
         if not head:
             return {"ids": [], "source": "head_snapshot"}
 
-        # remote_total_cached
+        # 统一缓存：同时更新新旧缓存系统
         try:
+            # 更新新系统缓存
             self._set_setting(db, key_total, str(len(head)), description="远端总数缓存（基于快照）")
-        except Exception:
+            
+            # 同步更新旧系统缓存，确保数据一致性
+            sub = db.query(Subscription).filter(Subscription.id == sid).first()
+            if sub:
+                write_remote_total(db, sid, len(head), sub.url)
+                logger.debug(f"[sync] 统一缓存更新: sid={sid}, total={len(head)}")
+        except Exception as e:
+            logger.warning(f"[sync] 缓存统一更新失败: sid={sid}, error={e}")
             pass
 
         # 定位 last_seen
@@ -119,9 +128,15 @@ class RemoteSyncService:
                 norm.append(s)
             key_head = f"sync:{sid}:head_snapshot"
             self._set_setting(db, key_head, json.dumps(norm, ensure_ascii=False), description="增量头部ID快照")
-            # 同步 remote_total_cached
+            # 统一缓存：同时更新新旧缓存系统
             key_total = f"sync:{sid}:remote_total_cached"
             self._set_setting(db, key_total, str(len(norm)), description="远端总数缓存（基于快照）")
+            
+            # 同步更新旧系统缓存，确保数据一致性
+            sub = db.query(Subscription).filter(Subscription.id == sid).first()
+            if sub:
+                write_remote_total(db, sid, len(norm), sub.url)
+                logger.debug(f"[sync] head_snapshot更新统一缓存: sid={sid}, total={len(norm)}")
         except Exception:
             db.rollback()
 
@@ -179,16 +194,21 @@ class RemoteSyncService:
                         break
                 except Exception:
                     continue
-            # 写入快照与总数缓存
+            # 写入 head_snapshot（内部会统一更新缓存）
             self.update_head_snapshot(db, sid, ids)
-            if reset_cursor:
-                self.set_last_cursor(db, sid, None)
+            
+            # 确保远端总数与快照长度一致（避免不同步）
+            remote_total = len(videos)
+            if remote_total != len(ids):
+                logger.warning(f"[sync] 远端总数({remote_total})与快照长度({len(ids)})不一致，以快照为准")
+                remote_total = len(ids)
             # 写入完成状态
             try:
                 payload = {
                     "status": "idle",
                     "updated_at": datetime.now().isoformat(),
-                    "remote_total": len(videos),
+                    "last_sync_total": len(ids),
+                    "cache_unified": True,
                     "head_size": len(ids),
                 }
                 self._set_setting(db, status_key, json.dumps(payload, ensure_ascii=False), description="订阅同步状态")

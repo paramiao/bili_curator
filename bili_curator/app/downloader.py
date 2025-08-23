@@ -22,6 +22,7 @@ from .cookie_manager import cookie_manager, rate_limiter, simple_retry
 from .queue_manager import yt_dlp_semaphore, get_subscription_lock, request_queue
 from .services.subscription_stats import recompute_subscription_stats
 from .services.http_utils import get_user_agent
+from .utils.path_utils import strip_info_suffix, base_name_from_json_path
 
 
 
@@ -1059,7 +1060,7 @@ class BilibiliDownloaderV6:
             # 仅限当前订阅目录（若提供），否则回退到全局下载目录
             base_dir = Path(subscription_dir) if subscription_dir else self.output_dir
             scanned = set()
-            for json_file in list(base_dir.rglob("*.json")) + list(base_dir.rglob("*.info.json")):
+            for json_file in list(base_dir.rglob("*.json")):
                 # 避免重复处理相同路径
                 if json_file in scanned:
                     continue
@@ -1085,13 +1086,7 @@ class BilibiliDownloaderV6:
                             continue
 
                         # 计算可能的视频文件名（与json同名）并登记
-                        name = json_file.name
-                        if name.endswith('.info.json'):
-                            base_name = name[:-10]
-                        elif name.endswith('.json'):
-                            base_name = name[:-5]
-                        else:
-                            base_name = json_file.stem
+                        base_name = base_name_from_json_path(json_file)
                         # 假设视频文件与json同目录（多后缀尝试）
                         for vid in ids:
                             if vid in existing_videos:
@@ -1167,7 +1162,7 @@ class BilibiliDownloaderV6:
         found_videos = {}
         scanned = set()
         
-        for json_file in list(base_dir.rglob("*.json")) + list(base_dir.rglob("*.info.json")):
+        for json_file in list(base_dir.rglob("*.json")):
             if json_file in scanned:
                 continue
             scanned.add(json_file)
@@ -1195,13 +1190,7 @@ class BilibiliDownloaderV6:
                         continue
                     
                     # 计算视频文件路径
-                    name = json_file.name
-                    if name.endswith('.info.json'):
-                        base_name = name[:-10]
-                    elif name.endswith('.json'):
-                        base_name = name[:-5]
-                    else:
-                        base_name = json_file.stem
+                    base_name = base_name_from_json_path(json_file)
                     
                     for vid in relevant_ids:
                         if vid in found_videos:
@@ -1468,6 +1457,13 @@ class BilibiliDownloaderV6:
                 json_path = subscription_dir / f"{base_filename}.info.json"
                 thumbnail_path = subscription_dir / f"{base_filename}.jpg"
 
+                # 回填文件大小并记录完成时间
+                file_size_val = None
+                try:
+                    file_size_val = Path(video_path).stat().st_size
+                except Exception:
+                    file_size_val = None
+
                 video = Video(
                     bilibili_id=video_id,
                     title=title,
@@ -1480,6 +1476,9 @@ class BilibiliDownloaderV6:
                     json_path=str(json_path) if json_path.exists() else None,
                     thumbnail_path=str(thumbnail_path) if thumbnail_path.exists() else None,
                     downloaded=True,
+                    downloaded_at=datetime.now(),
+                    file_size=file_size_val,
+                    total_size=file_size_val,
                     subscription_id=subscription_id
                 )
                 db.add(video)
