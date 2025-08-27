@@ -1,0 +1,41 @@
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+
+# Python caches
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual envs
+.venv/
+.env
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Logs
+logs/
+
+# Project-specific runtime data
+# Local database and runtime media outputs should not be tracked
+bili_curator/data/bilibili_curator.db
+bili_curator/data/*.db
+bili_curator/data/*.sqlite*
+
+# STRM/Downloads runtime directories (persisted at runtime only)
+bili_curator/data/downloads/
+bili_curator/data/strm/
+
+downloads/

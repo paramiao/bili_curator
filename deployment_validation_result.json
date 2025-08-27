@@ -1,0 +1,32 @@
+{
+  "status": "FAILED",
+  "passed_checks": 7,
+  "total_checks": 11,
+  "validation_results": [
+    "✓ Python版本: 3.13.6",
+    "✓ Python依赖完整: 7个包已安装",
+    "✓ 目录结构完整: 7个目录",
+    "✓ requirements.txt存在",
+    "✓ 端口可用: 8000, 8888",
+    "✓ 磁盘空间充足: 14.4GB可用 / 228.3GB总计",
+    "✓ 文件权限正常"
+  ],
+  "warnings": [
+    "⚠️  .env文件不存在，将使用默认配置"
+  ],
+  "errors": [
+    "✗ FFmpeg响应超时",
+    "✗ STRM模块缺失: [\"bili_curator.app.services.strm_proxy_service (No module named 'pydantic_settings')\", \"bili_curator.app.services.strm_file_manager (No module named 'pydantic_settings')\", \"bili_curator.app.services.strm_downloader (No module named 'pydantic_settings')\", \"bili_curator.app.services.enhanced_downloader (No module named 'pydantic_settings')\", \"bili_curator.app.services.strm_performance_optimizer (No module named 'pydantic_settings')\"]",
+    "✗ 数据库连接检查失败: No module named 'pydantic_settings'",
+    "✗ 网络连接失败: ['https://www.bilibili.com (HTTP Error 412: Precondition Failed)', 'https://api.bilibili.com (HTTP Error 412: Precondition Failed)']"
+  ],
+  "recommendations": [
+    "🔧 修复所有错误后重新运行验证",
+    "📦 安装FFmpeg: https://ffmpeg.org/download.html",
+    "🌐 检查网络连接和防火墙设置",
+    "📖 查看部署指南: docs/v7/STRM_DEPLOYMENT_GUIDE.md",
+    "🔍 运行功能测试: python tests/test_strm_basic.py",
+    "📊 监控系统资源使用情况",
+    "🔒 配置适当的安全设置"
+  ]
+}

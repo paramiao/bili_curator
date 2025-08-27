@@ -1,3 +1,3 @@
 # 注意：此根目录 requirements.txt 仅用于历史版本（V4/V5 工具脚本）。
 # V6 构建与本地运行请使用 bili_curator_v6/requirements.txt。
-yt-dlp
+yt-dlp==2025.8.20

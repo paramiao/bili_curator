@@ -5,6 +5,7 @@
 FastAPI API路由定义
 """
 from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
@@ -22,12 +23,28 @@ import os
 from pathlib import Path
 
 from .models import (
-    Subscription, Video, DownloadTask, Cookie, Settings, SubscriptionUpdate, CookieCreate, CookieUpdate, SettingUpdate,
+    Subscription, Video, DownloadTask, Cookie, Settings,
     get_db
 )
+from .schemas import (
+    SubscriptionCreate, SubscriptionUpdate, SubscriptionResponse,
+    CookieCreate, CookieUpdate, CookieResponse,
+    SettingUpdate, SuccessResponse, ErrorResponse
+)
+from .core.config import get_settings
+from .core.exceptions import (
+    subscription_not_found, video_not_found, cookie_not_found,
+    validation_failed, BiliCuratorException
+)
+from .core.exception_handlers import setup_exception_handlers
 from .scheduler import scheduler, task_manager
 from .services.subscription_stats import recompute_all_subscriptions
 from .cookie_manager import cookie_manager
+from .api_endpoints.cache_management import router as cache_router
+from .api_endpoints.subscription_management import router as subscription_router
+from .api_endpoints.cookie_management import router as cookie_router
+from .api_endpoints.migration_management import router as migration_router
+from .api_endpoints.strm_management import router as strm_router
 from .downloader import downloader
 from .video_detection_service import video_detection_service
 from .queue_manager import yt_dlp_semaphore, get_subscription_lock, request_queue
@@ -65,35 +82,7 @@ def _safe_bilibili_url(vid: Optional[str]) -> Optional[str]:
 
 
 
-# Pydantic模型定义
-class SubscriptionCreate(BaseModel):
-    name: str
-    type: str  # 'collection', 'uploader', 'keyword'
-    url: Optional[str] = None
-    uploader_id: Optional[str] = None
-    keyword: Optional[str] = None
-
-class SubscriptionUpdate(BaseModel):
-    name: Optional[str] = None
-    is_active: Optional[bool] = None
-    active: Optional[bool] = None
-    url: Optional[str] = None
-    uploader_id: Optional[str] = None
-    keyword: Optional[str] = None
-
-class CookieCreate(BaseModel):
-    name: str
-    sessdata: str
-    bili_jct: Optional[str] = ""
-    dedeuserid: Optional[str] = ""
-
-class CookieUpdate(BaseModel):
-    name: Optional[str] = None
-    is_active: Optional[bool] = None
-    active: Optional[bool] = None
-    sessdata: Optional[str] = None
-    bili_jct: Optional[str] = None
-    dedeuserid: Optional[str] = None
+# 移除重复的Pydantic模型定义，使用统一的schemas模块
 
 class ResolveUploaderBody(BaseModel):
     name: Optional[str] = None
@@ -101,18 +90,123 @@ class ResolveUploaderBody(BaseModel):
     bili_jct: Optional[str] = None
     dedeuserid: Optional[str] = None
 
-class SettingUpdate(BaseModel):
-    value: str
+# SettingUpdate已移至schemas.common模块
 
 # 创建FastAPI应用
-app = FastAPI(
-    title="bili_curator V6",
-    description="B站视频下载管理系统",
-    version="6.0.0"
-)
+app = FastAPI(title="Bilibili Curator API", version="7.0.0")
+
+# 启用 CORS（跨域）
+try:
+    _origins_raw = os.getenv('CORS_ALLOW_ORIGINS', '*')
+    _origins = [o.strip() for o in _origins_raw.split(',') if o.strip()] if _origins_raw else ['*']
+    _allow_all = (len(_origins) == 1 and _origins[0] == '*')
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_origins,
+        allow_credentials=(not _allow_all),  # 当为通配符时，浏览器不允许携带凭据
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["*"],
+        max_age=600,
+    )
+except Exception as _e:
+    logger = logging.getLogger(__name__)
+    logger.warning(f"CORS middleware setup failed: {_e}")
+
+# 设置全局异常处理器
+setup_exception_handlers(app)
+
+# 注册API路由
+app.include_router(cache_router, prefix="/api")
+app.include_router(subscription_router, prefix="/api")
+app.include_router(cookie_router, prefix="/api")
+app.include_router(migration_router, prefix="/api")
+app.include_router(strm_router, prefix="/api")
+
+# 路径常量：指向包根目录 bili_curator/，以及前端打包目录 web/dist
+BASE_DIR = Path(__file__).resolve().parents[1]
+SPA_DIST = BASE_DIR / "web" / "dist"
 
 # 挂载静态文件
 app.mount("/static", StaticFiles(directory="static"), name="static")
+# 挂载前端打包资源目录（SPA 资源）
+try:
+    spa_assets_dir = SPA_DIST / "assets"
+    if spa_assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=str(spa_assets_dir)), name="assets")
+except Exception:
+    pass
+
+# 首页：优先返回 static/index.html，不存在则返回简易欢迎页
+@app.get("/", response_class=HTMLResponse)
+async def read_root():
+    # 1) 优先返回打包后的 SPA 首页
+    try:
+        spa_index = SPA_DIST / "index.html"
+        if spa_index.exists():
+            with open(spa_index, "r", encoding="utf-8") as f:
+                return HTMLResponse(content=f.read())
+    except Exception:
+        pass
+    # 2) 其次尝试 static/index.html（若用户将前端拷贝至 static）
+    try:
+        static_index = Path("static") / "index.html"
+        if static_index.exists():
+            with open(static_index, "r", encoding="utf-8") as f:
+                return HTMLResponse(content=f.read())
+    except Exception:
+        pass
+    # 3) 最终回退：返回一个简单的入口页面
+    return HTMLResponse(content=(
+        """
+        <!doctype html>
+        <html lang=\"zh-CN\">
+          <head>
+            <meta charset=\"utf-8\" />
+            <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+            <title>Bili Curator</title>
+            <style>
+              body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;line-height:1.6;padding:24px;color:#1f2937;background:#f9fafb}
+              .card{max-width:720px;margin:0 auto;background:#fff;border:1px solid #e5e7eb;border-radius:12px;box-shadow:0 1px 2px rgba(0,0,0,0.04)}
+              .card h1{margin:0;padding:20px 24px;border-bottom:1px solid #f1f5f9;font-size:20px}
+              .card .content{padding:20px 24px}
+              a.btn{display:inline-block;margin-right:12px;margin-top:8px;padding:10px 14px;border-radius:8px;text-decoration:none;color:#fff;background:#3b82f6}
+              a.btn.secondary{background:#10b981}
+              code{background:#f1f5f9;padding:2px 6px;border-radius:6px}
+            </style>
+          </head>
+          <body>
+            <div class=\"card\">
+              <h1>Bili Curator 已启动</h1>
+              <div class=\"content\">
+                <p>欢迎使用。主要 API 前缀为 <code>/api</code>。</p>
+                <p>
+                  <a class=\"btn\" href=\"/api/status\">系统状态</a>
+                  <a class=\"btn secondary\" href=\"/legacy/admin\">管理页(旧版)</a>
+                </p>
+              </div>
+            </div>
+          </body>
+        </html>
+        """
+    ))
+
+# 使用中间件实现 SPA 回退：仅当 404 且非 /api、/static、/assets 下时，返回前端 index.html
+@app.middleware("http")
+async def spa_fallback_middleware(request, call_next):
+    response = await call_next(request)
+    try:
+        if response.status_code == 404 and request.method.upper() == "GET":
+            path = request.url.path or "/"
+            if not (path.startswith("/api") or path.startswith("/static") or path.startswith("/assets")):
+                spa_index = SPA_DIST / "index.html"
+                if spa_index.exists():
+                    with open(spa_index, "r", encoding="utf-8") as f:
+                        return HTMLResponse(content=f.read())
+    except Exception:
+        # 任何异常都回退到原始响应
+        pass
+    return response
 
 # ------------------------------
 # 应用启动与关闭事件
@@ -215,6 +309,7 @@ async def api_sync_trigger(body: SyncTriggerBody, background_tasks: BackgroundTa
     async def _run_for_sid(sid: int):
         ldb = next(get_db())
         try:
+            logger.info(f"开始处理订阅同步请求: sid={sid}, force={body.force}")
             # 读取最近一次 sync 状态，决定是否复用缓存或跳过重复抓取
             try:
                 status_key = f"sync:{sid}:status"
@@ -246,11 +341,23 @@ async def api_sync_trigger(body: SyncTriggerBody, background_tasks: BackgroundTa
                 except Exception:
                     fresh = False
 
+            # 检查订阅的下载模式，STRM模式需要特殊处理
+            subscription = ldb.query(Subscription).filter(Subscription.id == sid).first()
+            if not subscription:
+                raise ValueError(f"订阅 {sid} 不存在")
+            
+            download_mode = getattr(subscription, 'download_mode', 'local')
+            logger.info(f"订阅 {sid} ({subscription.name}) 检测到模式: {download_mode}")
+            
             # 若已有运行中：
-            # - 若缓存新鲜且已有 remote_total，则直接按本地下载数刷新 pending，并将状态置为 idle 后返回
+            # - STRM模式：强制执行完整同步流程
+            # - LOCAL模式：若缓存新鲜且已有 remote_total，则直接按本地下载数刷新 pending，并将状态置为 idle 后返回
             # - 否则保持早退，避免并发外网抓取
             if status_str == 'running':
-                if fresh and isinstance(remote_total_cached, int):
+                if download_mode == 'strm':
+                    # STRM模式：不使用缓存优化，强制执行完整同步
+                    logger.info(f"STRM订阅 {subscription.name} 跳过缓存优化，执行完整同步")
+                elif fresh and isinstance(remote_total_cached, int):
                     try:
                         downloaded = ldb.query(Video).filter(Video.subscription_id == sid, Video.video_path.isnot(None)).count()
                         if downloaded > int(remote_total_cached):
@@ -283,7 +390,8 @@ async def api_sync_trigger(body: SyncTriggerBody, background_tasks: BackgroundTa
                     return
 
             # 若未强制，且缓存新鲜且有 remote_total，则仅用本地下载数重新计算 pending，并写入缓存，避免外网抓取
-            if (not (body and body.force)) and fresh and isinstance(remote_total_cached, int):
+            # STRM模式跳过此优化，确保完整同步流程
+            if (not (body and body.force)) and fresh and isinstance(remote_total_cached, int) and download_mode != 'strm':
                 try:
                     downloaded = ldb.query(Video).filter(Video.subscription_id == sid, Video.video_path.isnot(None)).count()
                     # 纠偏：如本地下载数 > 缓存远端数，认为缓存可疑，转为强制刷新
@@ -333,7 +441,30 @@ async def api_sync_trigger(body: SyncTriggerBody, background_tasks: BackgroundTa
                 ldb.rollback()
 
             try:
-                info = await downloader.compute_pending_list(sid, ldb)
+                
+                if download_mode == 'strm':
+                    # STRM模式：使用增强下载器
+                    from .services.enhanced_downloader import EnhancedDownloader
+                    from .services.strm_proxy_service import STRMProxyService
+                    from .services.strm_file_manager import STRMFileManager
+                    from .services.unified_cache_service import UnifiedCacheService
+                    from .cookie_manager import cookie_manager
+                    
+                    # 初始化STRM服务
+                    strm_proxy = STRMProxyService(cookie_manager=cookie_manager)
+                    strm_file_manager = STRMFileManager()
+                    cache_service = UnifiedCacheService()
+                    
+                    enhanced_downloader = EnhancedDownloader(
+                        strm_proxy, strm_file_manager, cache_service
+                    )
+                    
+                    logger.info(f"API触发STRM同步: {subscription.name} (ID: {sid})")
+                    result = await enhanced_downloader.compute_pending_list(subscription, ldb)
+                    logger.info(f"STRM同步完成: {subscription.name}, 结果: {result}")
+                else:
+                    # LOCAL模式：使用传统下载器
+                    result = await downloader.compute_pending_list(sid, db)
                 # 移除旧的 pending_estimated 缓存写入（已统一到 compute_subscription_metrics）
                 # 成功：将 sync 状态从 running 更新为 idle（使用 UPSERT，避免被并发覆盖）
                 try:
@@ -341,24 +472,24 @@ async def api_sync_trigger(body: SyncTriggerBody, background_tasks: BackgroundTa
                     payload = {
                         'status': 'idle',
                         'updated_at': datetime.now().isoformat(),
-                        'remote_total': info.get('remote_total'),
-                        'existing': info.get('existing'),
-                        'pending': info.get('pending'),
+                        'remote_total': result.get('remote_total'),
+                        'existing': result.get('existing'),
+                        'pending': result.get('pending'),
                     }
                     val = json.dumps(payload, ensure_ascii=False)
-                    ldb.execute(text("""
+                    db.execute(text("""
                         INSERT INTO settings (key, value, description)
                         VALUES (:key, :val, '订阅同步状态')
                         ON CONFLICT(key) DO UPDATE SET
                           value = :val,
                           updated_at = CURRENT_TIMESTAMP
                     """), {"key": status_key, "val": val})
-                    ldb.commit()
+                    db.commit()
                 except Exception as e:
                     logger.debug(f"post-compute set idle failed: {e}")
-                    ldb.rollback()
+                    db.rollback()
             except Exception as e:
-                logger.warning(f"sync trigger (sid={sid}) failed: {e}")
+                logger.error(f"sync trigger (sid={sid}) failed: {e}", exc_info=True)
                 # 失败：将 sync 状态更新为 failed，避免长时间停留在 running
                 try:
                     status_key = f"sync:{sid}:status"
@@ -388,12 +519,12 @@ async def api_sync_trigger(body: SyncTriggerBody, background_tasks: BackgroundTa
         except Exception as e:
             logger.warning(f"sync trigger (global) failed: {e}")
 
-    # 注意：不要把 asyncio.create_task 交给 BackgroundTasks（其在线程池里无事件循环）
+    # 使用 BackgroundTasks 确保任务执行
     if body and body.sid:
-        asyncio.create_task(_run_for_sid(body.sid))
+        background_tasks.add_task(_run_for_sid, body.sid)
         return {"triggered": True, "scope": "subscription", "sid": body.sid}
     else:
-        asyncio.create_task(_run_global())
+        background_tasks.add_task(_run_global)
         return {"triggered": True, "scope": "global"}
 
 # ------------------------------
@@ -677,28 +808,31 @@ async def api_sync_status(sid: Optional[int] = None, db: Session = Depends(get_d
         return {"items": items}
     finally:
         db.close()
-app.mount("/web", StaticFiles(directory="web/dist"), name="web")
 
-# 根路径仅返回 SPA（web/dist/index.html），缺失则直接报错，避免回退到 legacy 页面造成混淆
-@app.get("/", response_class=HTMLResponse)
-async def read_root():
-    """返回 SPA 首页：仅 web/dist/index.html。缺失则 500 提示构建缺失。"""
+# ------------------------------
+# 统一统计 Metrics API（纯指标，不含队列状态）
+# ------------------------------
+
+@app.get("/api/metrics/subscription/{sid}")
+async def api_metrics_subscription(sid: int, ttl_hours: int = 1, db: Session = Depends(get_db)):
+    """返回单个订阅的统一统计（带容量回退）。
+    ttl_hours 控制远端快照新鲜度判断，默认1小时。
+    """
     try:
-        with open("web/dist/index.html", "r", encoding="utf-8") as f:
-            return HTMLResponse(content=f.read())
-    except FileNotFoundError:
-        logger.warning("SPA index.html 缺失：web/dist/index.html 不存在")
-        return HTMLResponse(content="""
-        <html>
-            <head><title>bili_curator V6</title></head>
-            <body>
-                <h1>🎬 bili_curator V6</h1>
-                <p style='color:#b91c1c;'>前端构建缺失：未找到 web/dist/index.html</p>
-                <p>请先构建前端或确认部署包包含 SPA 产物。</p>
-                <p>API文档: <a href="/docs">/docs</a></p>
-            </body>
-        </html>
-        """, status_code=500)
+        return compute_subscription_metrics(db, int(sid), ttl_hours=max(1, int(ttl_hours)))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/metrics/overview")
+async def api_metrics_overview(ttl_hours: int = 1, db: Session = Depends(get_db)):
+    """返回全局聚合统计（带轻量缓存）。
+    ttl_hours 控制各订阅远端快照新鲜度判断，默认1小时。
+    """
+    try:
+        return compute_overview_metrics(db, ttl_hours=max(1, int(ttl_hours)))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Legacy 管理页面：仅当仍保留文件时可访问
 @app.get("/legacy/admin", response_class=HTMLResponse)

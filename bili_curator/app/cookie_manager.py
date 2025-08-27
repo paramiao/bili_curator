@@ -11,6 +11,7 @@ import httpx
 import asyncio
 from loguru import logger
 from .services.http_utils import get_user_agent
+import os
 
 class SimpleCookieManager:
     def __init__(self):
@@ -66,6 +67,37 @@ class SimpleCookieManager:
         self.current_cookie_id = None
         return self.get_available_cookie(db)
     
+    async def get_valid_cookies(self) -> Dict[str, str]:
+        """为外部服务提供可用的Cookie字典。
+        优先读取环境变量(BILIBILI_SESSDATA/BILIBILI_BILI_JCT/BILIBILI_BUVID3)，
+        否则从数据库选择一个活跃Cookie。
+        返回键名与B站兼容：SESSDATA、bili_jct、DedeUserID、buvid3(可选)。
+        """
+        # 1) env 优先
+        sess = os.getenv("BILIBILI_SESSDATA")
+        jct = os.getenv("BILIBILI_BILI_JCT")
+        buvid3 = os.getenv("BILIBILI_BUVID3")
+        if sess and jct:
+            cookies = {"SESSDATA": sess, "bili_jct": jct}
+            if buvid3:
+                cookies["buvid3"] = buvid3
+            return cookies
+
+        # 2) 回退到数据库
+        try:
+            db = next(get_db())
+            cookie = self.get_available_cookie(db)
+            if cookie:
+                return {
+                    "SESSDATA": cookie.sessdata,
+                    "bili_jct": cookie.bili_jct,
+                    "DedeUserID": cookie.dedeuserid,
+                }
+            return {}
+        except Exception as e:
+            logger.error(f"获取可用Cookie失败: {e}")
+            return {}
+
     def update_cookie_usage(self, db: Session, cookie_id: int):
         """更新Cookie使用统计"""
         cookie = db.query(Cookie).filter(Cookie.id == cookie_id).first()

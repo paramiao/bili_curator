@@ -1,0 +1,39 @@
+# Python bytecode and cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+
+# Test and tooling caches
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# OS / editor
+.DS_Store
+*.swp
+*.swo
+
+# Git
+.git/
+.gitmodules
+.gitignore
+
+# Docker artifacts not needed in image
+**/docker-compose*.yml
+
+# Runtime data (mounted as volumes at runtime)
+data/
+downloads/
+logs/
+strm/
+
+# Node/Frontend caches if present
+web/node_modules/
+web/.cache/
+# keep web/dist and static in image (do not ignore)

@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  bili-curator:
+    environment:
+      - RELOAD=0
+      - LOG_LEVEL=DEBUG
+      - DEBUG=1
+    volumes:
+      # Mount app code for hot-reload of Python backend
+      - ./bili_curator:/app:rw
+      # Mount built frontend and static assets for instant updates
+      - ./bili_curator/web/dist:/app/web/dist:ro
+      - ./static:/app/static:ro
+    # In dev, allow rapid restarts without rebuilds
+    restart: unless-stopped

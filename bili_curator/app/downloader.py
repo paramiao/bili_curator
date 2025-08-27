@@ -235,13 +235,13 @@ class BilibiliDownloaderV6:
     async def compute_pending_list(self, subscription_id: int, db: Session) -> Dict[str, Any]:
         """计算远端-本地的差值列表（不触发下载）。
         返回：{ subscription_id, remote_total, existing, pending, videos: [ {id,title,webpage_url} ] }
-        仅对 type=collection 有效。
+        支持 type=collection 和 type=uploader。
         """
         subscription = db.query(Subscription).filter(Subscription.id == subscription_id).first()
         if not subscription:
             raise ValueError(f"订阅 {subscription_id} 不存在")
-        if subscription.type != 'collection' or not subscription.url:
-            raise ValueError("仅支持合集订阅或订阅缺少URL")
+        if subscription.type not in ['collection', 'uploader'] or not subscription.url:
+            raise ValueError("仅支持合集订阅和UP主订阅，且订阅必须有URL")
 
         # 订阅目录，便于现有去重路径使用
         subscription_dir = Path(self._create_subscription_directory(subscription))
@@ -250,7 +250,18 @@ class BilibiliDownloaderV6:
         sub_lock = get_subscription_lock(subscription.id)
         async with sub_lock:
             # 禁用增量提前停止，确保远端总数准确
-            video_list = await self._get_collection_videos(subscription.url, db, subscription_id=subscription.id, disable_incremental=True)
+            if subscription.type == 'collection':
+                video_list = await self._get_collection_videos(subscription.url, db, subscription_id=subscription.id, disable_incremental=True)
+            elif subscription.type == 'uploader':
+                # 从UP主空间URL中提取uploader_id
+                import re
+                uploader_match = re.search(r'/(\d+)(?:/|$)', subscription.url)
+                if not uploader_match:
+                    raise ValueError(f"无法从URL中提取UP主ID: {subscription.url}")
+                uploader_id = uploader_match.group(1)
+                video_list = await self._get_uploader_videos(uploader_id, db, subscription_id=subscription.id, disable_incremental=True)
+            else:
+                raise ValueError(f"不支持的订阅类型: {subscription.type}")
 
         remote_video_count = len([vi for vi in video_list if vi.get('id')])
 

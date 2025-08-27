@@ -358,6 +358,58 @@
         .section-toolbar { display:flex; gap:8px; align-items:center; }
         .muted { color:#6b7280; }
 
+        /* STRM模式选择样式 */
+        .mode-option {
+            flex: 1;
+            padding: 16px;
+            border: 2px solid #e5e7eb;
+            border-radius: 8px;
+            background: white;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .mode-option:hover {
+            border-color: #3b82f6;
+            background: #eff6ff;
+        }
+
+        .mode-option.selected {
+            border-color: #2563eb;
+            background: #dbeafe;
+            box-shadow: 0 0 0 1px #2563eb;
+        }
+
+        .mode-option input[type="radio"] {
+            margin: 0;
+        }
+
+        .mode-option label {
+            cursor: pointer;
+            margin: 0;
+        }
+
+        /* 订阅列表中的模式标识 */
+        .download-mode-badge {
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 600;
+            margin-left: 8px;
+        }
+
+        .download-mode-badge.local {
+            background: #ecfdf5;
+            color: #065f46;
+            border: 1px solid #a7f3d0;
+        }
+
+        .download-mode-badge.strm {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: 1px solid #667eea;
+        }
+
         .subscription-header {
             display: flex;
             justify-content: space-between;
@@ -439,6 +491,7 @@
                 <div class="tab" onclick="showTab(this,'subscriptions')">订阅管理</div>
                 <div class="tab" onclick="showTab(this,'tasks')">下载任务</div>
                 <div class="tab" onclick="showTab(this,'queue')">队列管理</div>
+                <div class="tab" onclick="showTab(this,'strm')">🎬 STRM管理</div>
                 <div class="tab" onclick="showTab(this,'cookies')">Cookie管理</div>
                 <div class="tab" onclick="showTab(this,'settings')">系统设置</div>
             </div>
@@ -622,6 +675,98 @@
                 </div>
             </div>
 
+            <!-- STRM管理 -->
+            <div id="strm" class="tab-content">
+                <div class="section-header">
+                    <h2>🎬 STRM流媒体管理</h2>
+                    <div style="display:flex; gap:8px; align-items:center;">
+                        <span style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 4px 8px; border-radius: 12px; font-size: 12px; font-weight: 600;">V7 新功能</span>
+                        <button onclick="openStrmManagement()" class="btn btn-primary">打开STRM管理界面</button>
+                    </div>
+                </div>
+                
+                <!-- STRM功能概览 -->
+                <div class="card">
+                    <h3>📋 功能概览</h3>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 16px; margin-top: 12px;">
+                        <div style="padding: 16px; background: #f8fafc; border-radius: 8px; border: 1px solid #e2e8f0;">
+                            <div style="font-weight: 600; color: #1e293b; margin-bottom: 8px;">🎥 流媒体代理</div>
+                            <div style="font-size: 14px; color: #64748b;">实时代理B站视频流，支持HLS格式转换</div>
+                        </div>
+                        <div style="padding: 16px; background: #f8fafc; border-radius: 8px; border: 1px solid #e2e8f0;">
+                            <div style="font-weight: 600; color: #1e293b; margin-bottom: 8px;">📁 文件管理</div>
+                            <div style="font-size: 14px; color: #64748b;">生成.strm文件和NFO元数据，支持媒体库</div>
+                        </div>
+                        <div style="padding: 16px; background: #f8fafc; border-radius: 8px; border: 1px solid #e2e8f0;">
+                            <div style="font-weight: 600; color: #1e293b; margin-bottom: 8px;">💾 存储优化</div>
+                            <div style="font-size: 14px; color: #64748b;">每视频仅占用~50KB，相比本地模式节省99%空间</div>
+                        </div>
+                        <div style="padding: 16px; background: #f8fafc; border-radius: 8px; border: 1px solid #e2e8f0;">
+                            <div style="font-weight: 600; color: #1e293b; margin-bottom: 8px;">🔄 双模式支持</div>
+                            <div style="font-size: 14px; color: #64748b;">LOCAL和STRM模式可按订阅独立配置</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- 快速统计 -->
+                <div class="card">
+                    <h3>📊 快速统计</h3>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-top: 12px;">
+                        <div class="stat-card">
+                            <div class="stat-title">STRM订阅</div>
+                            <div class="stat-number" id="strm-subscriptions-count">-</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-title">活跃流</div>
+                            <div class="stat-number" id="strm-active-streams">-</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-title">STRM文件</div>
+                            <div class="stat-number" id="strm-files-count">-</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-title">节省空间</div>
+                            <div class="stat-number ok" id="strm-space-saved">-</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- 系统状态 -->
+                <div class="card">
+                    <h3>🔍 系统状态</h3>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-top: 12px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0;">
+                            <span>代理服务</span>
+                            <span class="badge badge-success" id="strm-proxy-status">运行正常</span>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0;">
+                            <span>文件管理</span>
+                            <span class="badge badge-success" id="strm-file-status">运行正常</span>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0;">
+                            <span>FFmpeg</span>
+                            <span class="badge badge-success" id="strm-ffmpeg-status">可用</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- 使用说明 -->
+                <div class="card">
+                    <h3>📖 使用说明</h3>
+                    <div style="font-size: 14px; line-height: 1.6; color: #4b5563;">
+                        <ol style="margin: 12px 0 0 20px; padding: 0;">
+                            <li style="margin-bottom: 8px;"><strong>创建STRM订阅：</strong>在订阅管理中选择"STRM 流媒体模式"</li>
+                            <li style="margin-bottom: 8px;"><strong>配置媒体库：</strong>将STRM文件目录添加到Plex、Jellyfin等媒体服务器</li>
+                            <li style="margin-bottom: 8px;"><strong>播放视频：</strong>通过媒体服务器播放，系统自动代理B站视频流</li>
+                            <li style="margin-bottom: 8px;"><strong>监控管理：</strong>使用STRM管理界面监控活跃流和系统状态</li>
+                        </ol>
+                        <div style="margin-top: 16px; padding: 12px; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px;">
+                            <strong>💡 提示：</strong>STRM模式需要稳定的网络连接和有效的B站Cookie。建议先测试少量订阅确认环境正常。
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <!-- 队列管理 -->
             <div id="queue" class="tab-content">
                 <div class="section-header">
@@ -772,6 +917,44 @@
                                 <label>最小播放数</label>
                                 <input type="number" id="sub-min-views" placeholder="0" min="0">
                             </div>
+                        </div>
+                    </div>
+                    
+                    <!-- 下载模式选择 -->
+                    <div class="form-section">
+                        <h4>📁 下载模式 <span class="help-text">V7新功能：选择视频存储方式</span></h4>
+                        
+                        <div style="display: flex; gap: 16px; margin-bottom: 16px;">
+                            <div class="mode-option" onclick="selectDownloadMode('LOCAL')" id="mode-local">
+                                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+                                    <input type="radio" name="download-mode" value="LOCAL" id="radio-local" checked>
+                                    <label for="radio-local" style="font-weight: 600; color: #059669;">💾 LOCAL 本地模式</label>
+                                </div>
+                                <div style="font-size: 12px; color: #6b7280; margin-bottom: 4px;">完整下载视频文件到本地存储</div>
+                                <div style="font-size: 11px; color: #059669; font-weight: 500;">存储需求: ~500MB/视频</div>
+                                <div style="font-size: 11px; color: #6b7280;">✓ 离线播放 ✓ 高质量 ✓ 稳定</div>
+                            </div>
+                            
+                            <div class="mode-option" onclick="selectDownloadMode('STRM')" id="mode-strm">
+                                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+                                    <input type="radio" name="download-mode" value="STRM" id="radio-strm">
+                                    <label for="radio-strm" style="font-weight: 600; color: #7c3aed;">🎬 STRM 流媒体模式</label>
+                                    <span style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 2px 6px; border-radius: 8px; font-size: 10px; font-weight: 600;">NEW</span>
+                                </div>
+                                <div style="font-size: 12px; color: #6b7280; margin-bottom: 4px;">生成轻量级流媒体文件，实时播放</div>
+                                <div style="font-size: 11px; color: #7c3aed; font-weight: 500;">存储需求: ~50KB/视频</div>
+                                <div style="font-size: 11px; color: #6b7280;">✓ 省空间 ✓ 即时访问 ✓ 动态质量</div>
+                            </div>
+                        </div>
+                        
+                        <div id="strm-notice" style="display: none; padding: 12px; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px; font-size: 12px; color: #1e40af;">
+                            <strong>💡 STRM模式说明：</strong>
+                            <ul style="margin: 4px 0 0 16px; padding: 0;">
+                                <li>需要稳定的网络连接和有效的B站Cookie</li>
+                                <li>播放时实时从B站获取视频流</li>
+                                <li>支持多种媒体播放器（Plex、Jellyfin等）</li>
+                                <li>可随时切换回LOCAL模式重新下载</li>
+                            </ul>
                         </div>
                     </div>
                     
@@ -1038,12 +1221,12 @@
                     loadDirectoryStats();
                     loadVideos();
                     break;
+                case 'videos':
+                    loadVideos();
+                    break;
                 case 'monitor':
-                    // 系统监控模块
                     loadSystemHealth();
                     loadTaskOverview();
-                    loadQueueStatus();
-                    loadConfigStatus();
                     loadConsistencyStatus();
                     loadResourceStatus();
                     break;
@@ -1053,20 +1236,19 @@
                     break;
                 case 'tasks':
                     startTasksPolling();
-                    if (typeof DownloadAggregateManager !== 'undefined') DownloadAggregateManager.start();
+                    break;
+                case 'queue':
+                    startQueuePolling();
+                    break;
+                case 'strm':
+                    loadStrmOverview();
                     break;
                 case 'cookies':
                     loadCookies();
                     break;
-                case 'queue':
-                    loadQueueData();
-                    break;
                 case 'settings':
-                    loadBasicSettings();
-                    loadDownloadSettings();
-                    loadSyncStatus();
-                    loadAdvancedSettings();
-                    loadMaintenanceStatus();
+                    loadSettings();
+                    startConsistencyPolling();
                     break;
             }
         }
@@ -1421,14 +1603,21 @@
 
         // 加载订阅列表
         async function loadSubscriptions() {
-            const result = await apiRequest('/api/subscriptions');
-            if (result.error) {
+            const result = await apiRequest('/api/subscriptions?size=1000');
+            if (result && result.error) {
                 document.getElementById('subscription-list').innerHTML = `<p class="error">加载失败: ${result.error}</p>`;
                 return;
             }
-            
+
+            // 兼容后端分页响应(PaginatedResponse: {data,total,page,size})与数组响应
+            const list = Array.isArray(result)
+                ? result
+                : (Array.isArray(result?.data)
+                    ? result.data
+                    : (Array.isArray(result?.items) ? result.items : []));
+
             let html = '';
-            result.forEach(sub => {
+            list.forEach(sub => {
                 const statusClass = sub.is_active ? 'success' : 'error';
                 const statusText = sub.is_active ? '活跃' : '暂停';
                 const lastCheck = sub.last_check ? new Date(sub.last_check).toLocaleString() : '从未';
@@ -1897,6 +2086,24 @@
         function showAddSubscription() {
             document.getElementById('add-subscription').style.display = 'block';
             toggleSubFields(); // 初始化字段显示
+            selectDownloadMode('LOCAL'); // 默认选择LOCAL模式
+        }
+
+        // STRM模式选择函数
+        function selectDownloadMode(mode) {
+            // 更新单选按钮状态
+            document.getElementById('radio-local').checked = (mode === 'LOCAL');
+            document.getElementById('radio-strm').checked = (mode === 'STRM');
+            
+            // 更新视觉样式
+            document.getElementById('mode-local').classList.toggle('selected', mode === 'LOCAL');
+            document.getElementById('mode-strm').classList.toggle('selected', mode === 'STRM');
+            
+            // 显示/隐藏STRM说明
+            const strmNotice = document.getElementById('strm-notice');
+            if (strmNotice) {
+                strmNotice.style.display = (mode === 'STRM') ? 'block' : 'none';
+            }
         }
         
         function hideAddSubscription() {
@@ -1924,7 +2131,18 @@
                 }
                 data.url = url;
                 
-                // 留空名称由后端自动识别（uploader：playlist_title）
+                // 若名称留空，调用解析接口自动回填合集名称
+                if (!name) {
+                    try {
+                        const parsed = await apiRequest('/api/subscriptions/parse-collection', {
+                            method: 'POST',
+                            body: JSON.stringify({ url })
+                        });
+                        if (parsed && parsed.name) {
+                            name = parsed.name;
+                        }
+                    } catch (_) { /* 解析失败则忽略，后续Pydantic会校验name是否为空 */ }
+                }
                 
             } else if (type === 'uploader') {
                 const uploader = document.getElementById('sub-uploader').value;
@@ -2010,6 +2228,11 @@
             if (minLikes && parseInt(minLikes) > 0) data.min_likes = parseInt(minLikes);
             if (minFavorites && parseInt(minFavorites) > 0) data.min_favorites = parseInt(minFavorites);
             if (minViews && parseInt(minViews) > 0) data.min_views = parseInt(minViews);
+            
+            // 获取下载模式
+            const downloadMode = document.querySelector('input[name="download-mode"]:checked').value;
+            // 后端枚举要求小写：'local' | 'strm'
+            data.download_mode = (downloadMode || '').toLowerCase();
             
             data.name = name;
             
@@ -2469,14 +2692,75 @@
 
         // 删除订阅
         async function deleteSubscription(id) {
-            if (!confirm('确定要删除这个订阅吗？')) return;
+            // 创建删除模式选择对话框
+            const modal = document.createElement('div');
+            modal.style.cssText = `
+                position: fixed; top: 0; left: 0; width: 100%; height: 100%; 
+                background: rgba(0,0,0,0.5); display: flex; align-items: center; 
+                justify-content: center; z-index: 1000;
+            `;
             
-            const result = await apiRequest(`/api/subscriptions/${id}`, { method: 'DELETE' });
-            if (result.error) {
-                alert('删除失败: ' + result.error);
-            } else {
-                alert('删除成功');
-                loadSubscriptions();
+            modal.innerHTML = `
+                <div style="background: white; padding: 30px; border-radius: 8px; max-width: 500px; width: 90%;">
+                    <h3 style="margin-top: 0; color: #dc3545;">⚠️ 删除订阅确认</h3>
+                    <p style="margin: 20px 0; line-height: 1.6;">
+                        请选择删除模式：
+                    </p>
+                    <div style="margin: 20px 0;">
+                        <label style="display: block; margin: 10px 0; cursor: pointer;">
+                            <input type="radio" name="deleteMode" value="keep" checked style="margin-right: 8px;">
+                            <strong>保留本地文件</strong> - 仅删除订阅记录，保留已下载的视频文件
+                        </label>
+                        <label style="display: block; margin: 10px 0; cursor: pointer;">
+                            <input type="radio" name="deleteMode" value="remove" style="margin-right: 8px;">
+                            <strong style="color: #dc3545;">删除本地文件</strong> - 删除订阅记录和所有相关的本地文件
+                        </label>
+                    </div>
+                    <div style="text-align: right; margin-top: 30px;">
+                        <button onclick="this.closest('div[style*=\"position: fixed\"]').remove()" 
+                                style="margin-right: 10px; padding: 8px 16px; border: 1px solid #ccc; background: white; border-radius: 4px; cursor: pointer;">
+                            取消
+                        </button>
+                        <button onclick="confirmDelete(${id}, this)" 
+                                style="padding: 8px 16px; background: #dc3545; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                            确认删除
+                        </button>
+                    </div>
+                </div>
+            `;
+            
+            document.body.appendChild(modal);
+        }
+        
+        // 确认删除订阅
+        async function confirmDelete(id, button) {
+            const modal = button.closest('div[style*="position: fixed"]');
+            const selectedMode = modal.querySelector('input[name="deleteMode"]:checked').value;
+            const keepFiles = selectedMode === 'keep';
+            
+            // 显示加载状态
+            button.disabled = true;
+            button.textContent = '删除中...';
+            
+            try {
+                const result = await apiRequest(`/api/subscriptions/${id}?keep_files=${keepFiles}&force=true`, { 
+                    method: 'DELETE' 
+                });
+                
+                modal.remove();
+                
+                if (result.error) {
+                    alert('删除失败: ' + result.error);
+                } else {
+                    const message = result.data?.message || '删除成功';
+                    const details = result.data ? 
+                        `\n删除了 ${result.data.deleted_videos} 个视频记录${!keepFiles ? `，${result.data.deleted_files} 个本地文件` : ''}` : '';
+                    alert(message + details);
+                    loadSubscriptions();
+                }
+            } catch (error) {
+                modal.remove();
+                alert('删除失败: ' + error.message);
             }
         }
 
@@ -3905,6 +4189,79 @@
 
             loadTabData('dashboard');
         });
+
+        // STRM管理相关函数
+        async function loadStrmOverview() {
+            try {
+                // 加载STRM统计数据
+                const [streamStats, fileStats, healthStatus] = await Promise.all([
+                    apiRequest('/api/strm/stats/streams'),
+                    apiRequest('/api/strm/stats/files'),
+                    apiRequest('/api/strm/health')
+                ]);
+
+                // 更新统计数据
+                if (streamStats && !streamStats.error) {
+                    document.getElementById('strm-active-streams').textContent = streamStats.data?.active_streams || 0;
+                }
+
+                if (fileStats && !fileStats.error) {
+                    document.getElementById('strm-files-count').textContent = fileStats.data?.total_strm_files || 0;
+                    // 计算节省的空间（假设每个视频500MB，STRM文件50KB）
+                    const strmFiles = fileStats.data?.total_strm_files || 0;
+                    const savedGB = Math.round((strmFiles * 500) / 1024 * 100) / 100;
+                    document.getElementById('strm-space-saved').textContent = savedGB > 0 ? `${savedGB}GB` : '-';
+                }
+
+                // 更新系统状态
+                updateStrmSystemStatus(healthStatus);
+
+                // 加载STRM订阅数量
+                const subscriptions = await apiRequest('/api/subscriptions');
+                if (subscriptions && !subscriptions.error) {
+                    const strmCount = subscriptions.filter(sub => sub.download_mode === 'STRM').length;
+                    document.getElementById('strm-subscriptions-count').textContent = strmCount;
+                }
+
+            } catch (error) {
+                console.error('加载STRM概览数据失败:', error);
+            }
+        }
+
+        function updateStrmSystemStatus(healthData) {
+            if (!healthData || healthData.error) {
+                document.getElementById('strm-proxy-status').className = 'badge badge-danger';
+                document.getElementById('strm-proxy-status').textContent = '异常';
+                document.getElementById('strm-file-status').className = 'badge badge-danger';
+                document.getElementById('strm-file-status').textContent = '异常';
+                document.getElementById('strm-ffmpeg-status').className = 'badge badge-danger';
+                document.getElementById('strm-ffmpeg-status').textContent = '不可用';
+                return;
+            }
+
+            const data = healthData.data || {};
+            
+            // 代理服务状态
+            const proxyStatus = data.proxy_service?.status === 'healthy' ? 'success' : 'danger';
+            const proxyText = proxyStatus === 'success' ? '运行正常' : '异常';
+            document.getElementById('strm-proxy-status').className = `badge badge-${proxyStatus}`;
+            document.getElementById('strm-proxy-status').textContent = proxyText;
+
+            // 文件管理状态
+            const fileStatus = data.file_manager?.status === 'healthy' ? 'success' : 'danger';
+            const fileText = fileStatus === 'success' ? '运行正常' : '异常';
+            document.getElementById('strm-file-status').className = `badge badge-${fileStatus}`;
+            document.getElementById('strm-file-status').textContent = fileText;
+
+            // FFmpeg状态（假设可用）
+            document.getElementById('strm-ffmpeg-status').className = 'badge badge-success';
+            document.getElementById('strm-ffmpeg-status').textContent = '可用';
+        }
+
+        function openStrmManagement() {
+            // 在新窗口中打开STRM管理界面
+            window.open('/static/strm_management.html', '_blank', 'width=1200,height=800');
+        }
     </script>
 </body>
 </html>

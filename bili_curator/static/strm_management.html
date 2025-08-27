@@ -1,0 +1,683 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>STRM流媒体管理 - Bilibili Curator V7</title>
+  <style>
+    body { 
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; 
+      margin: 0; 
+      padding: 16px; 
+      color: #1f2937; 
+      background: #f9fafb; 
+    }
+    
+    .container { max-width: 1200px; margin: 0 auto; }
+    
+    h1 { 
+      font-size: 28px; 
+      margin: 0 0 24px; 
+      color: #111827; 
+      display: flex; 
+      align-items: center; 
+      gap: 12px; 
+    }
+    
+    .mode-badge {
+      padding: 6px 12px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      box-shadow: 0 2px 4px rgba(102, 126, 234, 0.3);
+    }
+    
+    .nav-tabs {
+      display: flex;
+      gap: 2px;
+      margin-bottom: 24px;
+      border-bottom: 1px solid #e5e7eb;
+    }
+    
+    .nav-tab {
+      padding: 12px 20px;
+      border: none;
+      background: transparent;
+      color: #6b7280;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: all 0.2s;
+      font-weight: 500;
+    }
+    
+    .nav-tab.active {
+      color: #2563eb;
+      border-bottom-color: #2563eb;
+      background: rgba(37, 99, 235, 0.05);
+    }
+    
+    .tab-content {
+      display: none;
+    }
+    
+    .tab-content.active {
+      display: block;
+    }
+    
+    .card { 
+      border: 1px solid #e5e7eb; 
+      border-radius: 12px; 
+      padding: 20px; 
+      background: #fff; 
+      margin-bottom: 20px; 
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    }
+    
+    .card h2 { 
+      margin: 0 0 16px; 
+      font-size: 18px; 
+      color: #111827;
+    }
+    
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    
+    .stat-card {
+      background: linear-gradient(135deg, #f3f4f6 0%, #ffffff 100%);
+      border: 1px solid #e5e7eb;
+      border-radius: 12px;
+      padding: 20px;
+      text-align: center;
+    }
+    
+    .stat-value {
+      font-size: 32px;
+      font-weight: 700;
+      color: #111827;
+      margin-bottom: 4px;
+    }
+    
+    .stat-value.strm { color: #7c3aed; }
+    .stat-value.local { color: #059669; }
+    .stat-value.active { color: #dc2626; }
+    .stat-value.total { color: #2563eb; }
+    
+    .stat-label {
+      font-size: 14px;
+      color: #6b7280;
+      font-weight: 500;
+    }
+    
+    button { 
+      padding: 10px 16px; 
+      border-radius: 8px; 
+      border: 1px solid #d1d5db; 
+      background: #f9fafb; 
+      cursor: pointer; 
+      font-weight: 500;
+      transition: all 0.2s;
+    }
+    
+    button.primary { 
+      background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%); 
+      color: #fff; 
+      border-color: #1d4ed8; 
+    }
+    
+    button.success {
+      background: linear-gradient(135deg, #059669 0%, #047857 100%);
+      color: #fff;
+      border-color: #047857;
+    }
+    
+    button.warning {
+      background: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%);
+      color: #fff;
+      border-color: #b91c1c;
+    }
+    
+    .status-indicator {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 8px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    
+    .status-healthy { background: #ecfdf5; color: #065f46; }
+    .status-warning { background: #fef3c7; color: #92400e; }
+    .status-error { background: #fef2f2; color: #991b1b; }
+    
+    .stream-list {
+      max-height: 400px;
+      overflow-y: auto;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+    }
+    
+    .stream-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 16px;
+      border-bottom: 1px solid #f3f4f6;
+    }
+    
+    .stream-info {
+      flex: 1;
+    }
+    
+    .stream-title {
+      font-weight: 500;
+      color: #111827;
+      margin-bottom: 4px;
+    }
+    
+    .stream-meta {
+      font-size: 12px;
+      color: #6b7280;
+    }
+    
+    .loading {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 40px;
+      color: #6b7280;
+    }
+    
+    .alert {
+      padding: 12px 16px;
+      border-radius: 8px;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    
+    .alert-info {
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+      color: #1e40af;
+    }
+    
+    .row {
+      display: flex;
+      gap: 16px;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    
+    .flex-1 { flex: 1; }
+    .text-center { text-align: center; }
+    .mt-4 { margin-top: 16px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>
+      🎬 STRM流媒体管理
+      <span class="mode-badge">V7 新功能</span>
+    </h1>
+    
+    <!-- 导航标签 -->
+    <div class="nav-tabs">
+      <button class="nav-tab active" data-tab="overview">📊 总览</button>
+      <button class="nav-tab" data-tab="streams">🎥 活跃流</button>
+      <button class="nav-tab" data-tab="settings">⚙️ 设置</button>
+    </div>
+    
+    <!-- 总览标签 -->
+    <div class="tab-content active" id="overview">
+      <!-- 统计卡片 -->
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-value strm" id="stat-strm-subscriptions">-</div>
+          <div class="stat-label">STRM订阅</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value local" id="stat-local-subscriptions">-</div>
+          <div class="stat-label">LOCAL订阅</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value active" id="stat-active-streams">-</div>
+          <div class="stat-label">活跃流</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value total" id="stat-total-files">-</div>
+          <div class="stat-label">STRM文件</div>
+        </div>
+      </div>
+      
+      <!-- 系统状态 -->
+      <div class="card">
+        <h2>🔍 系统状态</h2>
+        <div class="row">
+          <div class="flex-1">
+            <strong>代理服务:</strong>
+            <span class="status-indicator status-healthy" id="proxy-status">
+              ● 运行正常
+            </span>
+          </div>
+          <div class="flex-1">
+            <strong>文件管理:</strong>
+            <span class="status-indicator status-healthy" id="file-status">
+              ● 运行正常
+            </span>
+          </div>
+          <div class="flex-1">
+            <strong>FFmpeg:</strong>
+            <span class="status-indicator status-healthy" id="ffmpeg-status">
+              ● 可用
+            </span>
+          </div>
+        </div>
+        <div class="mt-4">
+          <button class="primary" onclick="checkSystemHealth()">🔄 检查系统健康</button>
+          <button onclick="cleanupExpiredStreams()">🧹 清理过期流</button>
+        </div>
+      </div>
+      
+      <!-- 快速操作 -->
+      <div class="card">
+        <h2>⚡ 快速操作</h2>
+        <div class="row">
+          <button class="success" onclick="showCreateStreamDialog()">➕ 创建流</button>
+          <button onclick="syncAllDirectories()">🔄 同步目录</button>
+          <button onclick="refreshStats()">📊 刷新统计</button>
+          <button class="warning" onclick="showSystemDiagnostics()">🔧 系统诊断</button>
+        </div>
+      </div>
+    </div>
+    
+    <!-- 活跃流标签 -->
+    <div class="tab-content" id="streams">
+      <div class="card">
+        <h2>🎥 活跃流列表</h2>
+        <div class="alert alert-info">
+          <span>💡</span>
+          <span>显示当前正在播放的STRM流，包括播放状态和访问统计</span>
+        </div>
+        <div class="stream-list" id="active-streams-list">
+          <div class="loading">加载活跃流列表...</div>
+        </div>
+      </div>
+    </div>
+    
+    <!-- 设置标签 -->
+    <div class="tab-content" id="settings">
+      <div class="card">
+        <h2>⚙️ STRM设置</h2>
+        <div class="alert alert-info">
+          <span>⚙️</span>
+          <span>STRM功能配置和环境验证</span>
+        </div>
+        <div class="settings-content">
+          <div class="row">
+            <div class="flex-1">
+              <label><strong>STRM文件目录:</strong></label>
+              <input type="text" id="strm-directory" placeholder="/path/to/strm/files" style="width: 100%; margin-top: 4px;">
+            </div>
+            <button onclick="browseDirectory()">📁 浏览</button>
+          </div>
+          <div class="row">
+            <div class="flex-1">
+              <label><strong>FFmpeg路径:</strong></label>
+              <input type="text" id="ffmpeg-path" placeholder="/usr/local/bin/ffmpeg" style="width: 100%; margin-top: 4px;">
+            </div>
+            <button onclick="detectFFmpeg()">🔍 自动检测</button>
+          </div>
+          <div class="row">
+            <label><strong>服务端口:</strong></label>
+            <input type="number" id="proxy-port" value="8080" style="width: 100px; margin-left: 8px;">
+          </div>
+          <div class="mt-4">
+            <button class="primary" onclick="validateEnvironment()">🔍 验证环境</button>
+            <button onclick="saveSettings()">💾 保存设置</button>
+            <button class="warning" onclick="resetSettings()">🔄 重置</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // 全局状态
+    let currentTab = 'overview';
+    let refreshInterval = null;
+    
+    // 初始化
+    document.addEventListener('DOMContentLoaded', function() {
+      initializeTabs();
+      loadInitialData();
+      loadSettings();
+      startAutoRefresh();
+    });
+    
+    // 标签切换
+    function initializeTabs() {
+      const tabs = document.querySelectorAll('.nav-tab');
+      tabs.forEach(tab => {
+        tab.addEventListener('click', function() {
+          const tabId = this.dataset.tab;
+          switchTab(tabId);
+        });
+      });
+    }
+    
+    function switchTab(tabId) {
+      document.querySelectorAll('.nav-tab').forEach(tab => {
+        tab.classList.remove('active');
+      });
+      document.querySelector(`[data-tab="${tabId}"]`).classList.add('active');
+      
+      document.querySelectorAll('.tab-content').forEach(content => {
+        content.classList.remove('active');
+      });
+      document.getElementById(tabId).classList.add('active');
+      
+      currentTab = tabId;
+      
+      if (tabId === 'streams') {
+        loadActiveStreams();
+      }
+    }
+    
+    // 加载初始数据
+    async function loadInitialData() {
+      await loadOverviewData();
+    }
+    
+    // 加载总览数据
+    async function loadOverviewData() {
+      try {
+        const [streamStats, fileStats, healthStatus] = await Promise.all([
+          fetch('/api/strm/stats/streams').then(r => r.json()),
+          fetch('/api/strm/stats/files').then(r => r.json()),
+          fetch('/api/strm/health').then(r => r.json())
+        ]);
+        
+        if (streamStats.success) {
+          document.getElementById('stat-active-streams').textContent = streamStats.data.active_streams || 0;
+        }
+        
+        if (fileStats.success) {
+          document.getElementById('stat-total-files').textContent = fileStats.data.total_strm_files || 0;
+        }
+        
+        updateSystemStatus(healthStatus);
+        
+      } catch (error) {
+        console.error('加载总览数据失败:', error);
+      }
+    }
+    
+    // 更新系统状态
+    function updateSystemStatus(healthData) {
+      if (!healthData.success) {
+        updateStatusIndicator('proxy-status', 'error', '● 异常');
+        updateStatusIndicator('file-status', 'error', '● 异常');
+        updateStatusIndicator('ffmpeg-status', 'error', '● 不可用');
+        return;
+      }
+      
+      const data = healthData.data;
+      const proxyStatus = data.proxy_service?.status === 'healthy' ? 'healthy' : 'error';
+      const proxyText = proxyStatus === 'healthy' ? '● 运行正常' : '● 异常';
+      updateStatusIndicator('proxy-status', proxyStatus, proxyText);
+      
+      const fileStatus = data.file_manager?.status === 'healthy' ? 'healthy' : 'error';
+      const fileText = fileStatus === 'healthy' ? '● 运行正常' : '● 异常';
+      updateStatusIndicator('file-status', fileStatus, fileText);
+      
+      updateStatusIndicator('ffmpeg-status', 'healthy', '● 可用');
+    }
+    
+    function updateStatusIndicator(elementId, status, text) {
+      const element = document.getElementById(elementId);
+      element.className = `status-indicator status-${status}`;
+      element.textContent = text;
+    }
+    
+    // 加载活跃流
+    async function loadActiveStreams() {
+      const container = document.getElementById('active-streams-list');
+      container.innerHTML = '<div class="loading">加载活跃流列表...</div>';
+      
+      try {
+        const response = await fetch('/api/strm/stats/streams');
+        const data = await response.json();
+        
+        if (data.success && data.data.streams) {
+          renderActiveStreams(data.data.streams);
+        } else {
+          container.innerHTML = '<div class="text-center">暂无活跃流</div>';
+        }
+      } catch (error) {
+        console.error('加载活跃流失败:', error);
+        container.innerHTML = '<div class="text-center" style="color: #dc2626;">加载失败</div>';
+      }
+    }
+    
+    function renderActiveStreams(streams) {
+      const container = document.getElementById('active-streams-list');
+      
+      if (streams.length === 0) {
+        container.innerHTML = '<div class="text-center">暂无活跃流</div>';
+        return;
+      }
+      
+      const html = streams.map(stream => `
+        <div class="stream-item">
+          <div class="stream-info">
+            <div class="stream-title">${stream.bilibili_id}</div>
+            <div class="stream-meta">
+              质量: ${stream.quality} | 
+              访问次数: ${stream.access_count} | 
+              创建时间: ${new Date(stream.created_at).toLocaleString()}
+            </div>
+          </div>
+        </div>
+      `).join('');
+      
+      container.innerHTML = html;
+    }
+    
+    // 工具函数
+    async function checkSystemHealth() {
+      try {
+        const response = await fetch('/api/strm/health');
+        const data = await response.json();
+        updateSystemStatus(data);
+        showAlert(data.success ? '系统健康检查完成' : '系统检查发现问题');
+      } catch (error) {
+        showAlert('健康检查失败');
+      }
+    }
+    
+    async function cleanupExpiredStreams() {
+      try {
+        const response = await fetch('/api/strm/cleanup/expired', { method: 'POST' });
+        const data = await response.json();
+        
+        if (data.success) {
+          showAlert('过期流清理完成');
+          loadActiveStreams();
+        } else {
+          showAlert('清理失败');
+        }
+      } catch (error) {
+        showAlert('清理操作失败');
+      }
+    }
+    
+    function refreshStats() {
+      loadOverviewData();
+      showAlert('统计数据已刷新');
+    }
+    
+    function showAlert(message) {
+      const alert = document.createElement('div');
+      alert.className = 'alert alert-info';
+      alert.innerHTML = `<span>✓</span><span>${message}</span>`;
+      alert.style.position = 'fixed';
+      alert.style.top = '20px';
+      alert.style.right = '20px';
+      alert.style.zIndex = '1000';
+      
+      document.body.appendChild(alert);
+      
+      setTimeout(() => {
+        alert.remove();
+      }, 3000);
+    }
+    
+    function startAutoRefresh() {
+      refreshInterval = setInterval(() => {
+        if (currentTab === 'overview') {
+          loadOverviewData();
+        } else if (currentTab === 'streams') {
+          loadActiveStreams();
+        }
+      }, 30000);
+    }
+    
+    // 实用功能函数
+    async function showCreateStreamDialog() {
+      const bilibiliId = prompt('请输入B站视频BV号:');
+      if (!bilibiliId) return;
+      
+      try {
+        const response = await fetch('/api/strm/streams/create', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ bilibili_id: bilibiliId, quality: 'auto' })
+        });
+        const data = await response.json();
+        
+        if (data.success) {
+          showAlert('流创建成功');
+          loadActiveStreams();
+        } else {
+          showAlert('创建失败: ' + data.message);
+        }
+      } catch (error) {
+        showAlert('创建失败: 网络错误');
+      }
+    }
+    
+    async function syncAllDirectories() {
+      try {
+        const response = await fetch('/api/strm/files/sync', { method: 'POST' });
+        const data = await response.json();
+        
+        if (data.success) {
+          showAlert(`同步完成，处理了 ${data.data.synced_count} 个文件`);
+          refreshStats();
+        } else {
+          showAlert('同步失败: ' + data.message);
+        }
+      } catch (error) {
+        showAlert('同步失败: 网络错误');
+      }
+    }
+    
+    async function showSystemDiagnostics() {
+      try {
+        const response = await fetch('/api/strm/health');
+        const data = await response.json();
+        
+        let diagnostics = '🔧 系统诊断结果:\n\n';
+        if (data.success) {
+          const health = data.data;
+          diagnostics += `代理服务: ${health.proxy_service?.status || 'unknown'}\n`;
+          diagnostics += `文件管理: ${health.file_manager?.status || 'unknown'}\n`;
+          diagnostics += `FFmpeg: ${health.ffmpeg?.available ? '可用' : '不可用'}\n`;
+          diagnostics += `内存使用: ${health.system?.memory_usage || 'N/A'}\n`;
+          diagnostics += `CPU使用: ${health.system?.cpu_usage || 'N/A'}\n`;
+        } else {
+          diagnostics += '诊断失败: ' + data.message;
+        }
+        
+        alert(diagnostics);
+      } catch (error) {
+        showAlert('诊断失败: 网络错误');
+      }
+    }
+    
+    async function validateEnvironment() {
+      try {
+        const response = await fetch('/api/strm/health');
+        const data = await response.json();
+        
+        if (data.success) {
+          const health = data.data;
+          let issues = [];
+          
+          if (health.proxy_service?.status !== 'healthy') issues.push('代理服务异常');
+          if (health.file_manager?.status !== 'healthy') issues.push('文件管理异常');
+          if (!health.ffmpeg?.available) issues.push('FFmpeg不可用');
+          
+          if (issues.length === 0) {
+            showAlert('✅ 环境验证通过，所有组件正常');
+          } else {
+            showAlert('⚠️ 发现问题: ' + issues.join(', '));
+          }
+        } else {
+          showAlert('验证失败: ' + data.message);
+        }
+      } catch (error) {
+        showAlert('验证失败: 网络错误');
+      }
+    }
+    
+    function browseDirectory() {
+      showAlert('请手动输入目录路径');
+    }
+    
+    function detectFFmpeg() {
+      // 常见FFmpeg路径
+      const commonPaths = ['/usr/local/bin/ffmpeg', '/usr/bin/ffmpeg', '/opt/homebrew/bin/ffmpeg'];
+      document.getElementById('ffmpeg-path').value = commonPaths[0];
+      showAlert('已设置为常见路径，请根据实际情况调整');
+    }
+    
+    function saveSettings() {
+      const settings = {
+        strm_directory: document.getElementById('strm-directory').value,
+        ffmpeg_path: document.getElementById('ffmpeg-path').value,
+        proxy_port: document.getElementById('proxy-port').value
+      };
+      
+      localStorage.setItem('strm_settings', JSON.stringify(settings));
+      showAlert('设置已保存到本地');
+    }
+    
+    function resetSettings() {
+      document.getElementById('strm-directory').value = '';
+      document.getElementById('ffmpeg-path').value = '/usr/local/bin/ffmpeg';
+      document.getElementById('proxy-port').value = '8080';
+      showAlert('设置已重置');
+    }
+    
+    // 加载保存的设置
+    function loadSettings() {
+      const saved = localStorage.getItem('strm_settings');
+      if (saved) {
+        const settings = JSON.parse(saved);
+        if (settings.strm_directory) document.getElementById('strm-directory').value = settings.strm_directory;
+        if (settings.ffmpeg_path) document.getElementById('ffmpeg-path').value = settings.ffmpeg_path;
+        if (settings.proxy_port) document.getElementById('proxy-port').value = settings.proxy_port;
+      }
+    }
+  </script>
+</body>
+</html>

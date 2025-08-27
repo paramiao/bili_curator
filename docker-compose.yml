@@ -5,25 +5,23 @@ services:
     build: 
       context: ./bili_curator
       args:
-        VERSION: ${VERSION:-v6}
-    image: bili_curator:${VERSION:-v6}
-    container_name: bili_curator_${VERSION:-v6}
+        VERSION: ${VERSION:-v7}
+    image: bili_curator:${VERSION:-v7}
+    container_name: bili_curator_${VERSION:-v7}
     ports:
       - "8080:8080"
-      # STRM代理端口 (仅V7使用)
-      - "${STRM_PROXY_PORT:-8081}:${STRM_PROXY_PORT:-8081}"
     volumes:
       # 本地下载目录
       - ${DOWNLOAD_HOST_PATH:-/Volumes/nas-mk/xiaoya_emby/xiaoya/bilibili}:/app/downloads
       # STRM文件目录 (V7)
       - ${STRM_HOST_PATH:-/Volumes/nas-mk/xiaoya_emby/xiaoya/bilibili_strm}:/app/strm
       # 配置目录
-      - ${CONFIG_HOST_PATH:-~/bilibili_config}:/app/data
+      - ${CONFIG_HOST_PATH:-${HOME}/bilibili_config}:/app/data
       # 日志目录
-      - ${CONFIG_HOST_PATH:-~/bilibili_config}/logs:/app/logs
+      - ${CONFIG_HOST_PATH:-${HOME}/bilibili_config}/logs:/app/logs
     environment:
       - PYTHONUNBUFFERED=1
-      - VERSION=${VERSION:-v6}
+      - VERSION=${VERSION:-v7}
       - TZ=${TZ:-Asia/Shanghai}
       
       # 基础配置
@@ -35,11 +33,14 @@ services:
       
       # STRM配置 (V7)
       - STRM_PATH=/app/strm
-      - STRM_PROXY_PORT=${STRM_PROXY_PORT:-8081}
       - STRM_DEFAULT_QUALITY=${STRM_DEFAULT_QUALITY:-720p}
       - STRM_CACHE_TTL=${STRM_CACHE_TTL:-300}
       - STRM_MAX_CONCURRENT_STREAMS=${STRM_MAX_CONCURRENT_STREAMS:-10}
       - STRM_RATE_LIMIT_PER_IP=${STRM_RATE_LIMIT_PER_IP:-5}
+      - FFMPEG_PATH=${FFMPEG_PATH:-/usr/bin/ffmpeg}
+      
+      # 指标统计刷新（调度器预热 metrics 缓存，单位：分钟，范围 5~720）
+      - METRICS_REFRESH_INTERVAL_MINUTES=${METRICS_REFRESH_INTERVAL_MINUTES:-30}
       
       # B站认证 (STRM模式需要)
       - BILIBILI_SESSDATA=${BILIBILI_SESSDATA:-}
@@ -54,5 +55,5 @@ services:
       retries: 3
       start_period: 60s
     labels:
-      - "bili_curator.version=${VERSION:-v6}"
-      - "bili_curator.mode=${VERSION:-v6}"
+      - "bili_curator.version=${VERSION:-v7}"
+      - "bili_curator.mode=${VERSION:-v7}"

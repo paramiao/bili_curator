@@ -11,7 +11,8 @@ from sqlalchemy.orm import Session
 from loguru import logger
 
 from .models import DownloadTask, Video, Subscription, get_db
-from .services.subscription_stats import record_recompute_event, maybe_try_recompute_all
+from .services.subscription_stats import record_recompute_event
+from .services.cache_invalidation_service import invalidate_video_caches, invalidate_subscription_caches
 from .downloader import downloader
 from .queue_manager import get_subscription_lock
 
@@ -221,19 +222,74 @@ class EnhancedTaskManager:
                 await self._update_task_log(task_id, f"开始下载: {video_title}")
                 
                 try:
-                    # 下载单个视频
-                    result = await downloader._download_single_video(
-                        video_info, subscription.id, db
+                    # 检查下载模式并选择合适的下载器
+                    download_mode = getattr(subscription, 'download_mode', 'local')
+                    logger.info(
+                        f"[Task {task_id}] Subscription {subscription.id} ({subscription.name}) download_mode={download_mode}"
                     )
+                    
+                    if str(download_mode).lower() == 'strm':
+                        # STRM模式：使用EnhancedDownloader
+                        await self._update_task_log(task_id, f"进入STRM模式: 将为 {video_title} 生成/更新 .strm 文件")
+                        from .services.enhanced_downloader import EnhancedDownloader
+                        from .services.strm_proxy_service import STRMProxyService
+                        from .services.strm_file_manager import STRMFileManager
+                        from .services.unified_cache_service import UnifiedCacheService
+                        
+                        # 初始化STRM服务（如果尚未初始化）
+                        if not hasattr(self, '_strm_downloader'):
+                            from .cookie_manager import cookie_manager
+                            strm_proxy = STRMProxyService(cookie_manager=cookie_manager)
+                            strm_file_manager = STRMFileManager()
+                            cache_service = UnifiedCacheService()
+                            self._strm_downloader = EnhancedDownloader(
+                                strm_proxy, strm_file_manager, cache_service
+                            )
+                        
+                        # 构造任务对象
+                        from .schemas.task import DownloadTaskResponse
+                        task_obj = DownloadTaskResponse(
+                            bilibili_id=video_info.get('id'),
+                            subscription_id=subscription.id,
+                            title=video_info.get('title'),
+                            uploader=video_info.get('uploader', ''),
+                            duration=video_info.get('duration', 0)
+                        )
+                        
+                        # 使用STRM下载器处理
+                        success = await self._strm_downloader.process_download_task(task_obj, db)
+                        result = {'success': success, 'title': video_info.get('title')}
+                    else:
+                        # LOCAL模式：使用传统下载器
+                        await self._update_task_log(task_id, f"进入LOCAL模式: 将下载到本地目录 {downloader.output_dir}")
+                        result = await downloader._download_single_video(
+                            video_info, subscription.id, db
+                        )
                     
                     if result['success']:
                         task_progress.downloaded_videos += 1
                         # 优先使用下载结果返回的实际标题
                         done_title = result.get('title') or video_title
                         await self._update_task_log(task_id, f"下载完成: {done_title}")
+                        
+                        # 触发缓存失效：视频下载完成
+                        try:
+                            video_id = video_info.get('id') or video_info.get('bilibili_id')
+                            if video_id:
+                                invalidate_video_caches(db, video_id, subscription.id, 'video_downloaded')
+                        except Exception as e:
+                            logger.warning(f"Cache invalidation failed for downloaded video: {e}")
                     else:
                         fail_title = result.get('title') or video_title
                         await self._update_task_log(task_id, f"下载失败: {fail_title} - {result.get('error', 'Unknown error')}")
+                        
+                        # 触发缓存失效：视频下载失败
+                        try:
+                            video_id = video_info.get('id') or video_info.get('bilibili_id')
+                            if video_id:
+                                invalidate_video_caches(db, video_id, subscription.id, 'video_failed')
+                        except Exception as e:
+                            logger.warning(f"Cache invalidation failed for failed video: {e}")
                         
                 except Exception as e:
                     err_title = self._safe_log_title(video_info)

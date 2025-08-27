@@ -14,6 +14,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from app.api import app
 from app.scheduler import scheduler
 from app.models import db
+from app.core.config import get_config
 
 _LOGGING_CONFIGURED = False
 
@@ -45,15 +46,28 @@ _setup_logging_once()
 async def lifespan(app):
     """应用生命周期管理"""
     # 启动时执行
-    logger.info("🎬 bili_curator V6 - B站视频下载管理系统")
-    logger.info("📝 版本: 6.0.0")
-    logger.info("🏠 专为家用个人设计的简化版本")
-    logger.info("🚀 bili_curator V6 正在启动...")
+    version = os.getenv('VERSION', 'v6')
+    if version == 'v7':
+        logger.info("🎬 bili_curator V7 - B站视频智能管理平台")
+        logger.info("📝 版本: 7.0.0")
+        logger.info("🚀 支持本地下载 + STRM流媒体双模式")
+        logger.info("🚀 bili_curator V7 正在启动...")
+    else:
+        logger.info("🎬 bili_curator V6 - B站视频下载管理系统")
+        logger.info("📝 版本: 6.0.0")
+        logger.info("🏠 专为家用个人设计的简化版本")
+        logger.info("🚀 bili_curator V6 正在启动...")
     
     # 确保必要目录存在
     os.makedirs("data", exist_ok=True)
     os.makedirs("data/downloads", exist_ok=True)
     os.makedirs("logs", exist_ok=True)
+    
+    # V7版本：创建STRM目录
+    if version == 'v7':
+        strm_path = os.getenv('STRM_PATH', '/app/strm')
+        os.makedirs(strm_path, exist_ok=True)
+        logger.info(f"📁 STRM目录已创建: {strm_path}")
     
     # 初始化数据库
     logger.info("📊 初始化数据库...")
@@ -85,14 +99,23 @@ async def lifespan(app):
     logger.info("⏰ 启动定时任务调度器...")
     scheduler.start()
     
-    logger.info("✅ bili_curator V6 启动完成!")
-    logger.info("🌐 Web界面: http://localhost:8080")
-    logger.info("📚 API文档: http://localhost:8080/docs")
+    if version == 'v7':
+        logger.info("✅ bili_curator V7 启动完成!")
+        logger.info("🌐 Web界面: http://localhost:8080")
+        logger.info("📚 API文档: http://localhost:8080/docs")
+        logger.info("🎯 STRM流媒体服务: http://localhost:8080/strm")
+    else:
+        logger.info("✅ bili_curator V6 启动完成!")
+        logger.info("🌐 Web界面: http://localhost:8080")
+        logger.info("📚 API文档: http://localhost:8080/docs")
     
     yield
     
     # 关闭时执行
-    logger.info("🛑 bili_curator V6 正在关闭...")
+    if version == 'v7':
+        logger.info("🛑 bili_curator V7 正在关闭...")
+    else:
+        logger.info("🛑 bili_curator V6 正在关闭...")
     
     # 停止视频检测服务
     try:
@@ -111,11 +134,12 @@ app.router.lifespan_context = lifespan
 def main():
     """主函数"""
     # 运行FastAPI应用
+    cfg = get_config()
     uvicorn.run(
         app,
-        host="0.0.0.0",
-        port=8080,
-        reload=False,  # 生产环境关闭热重载
+        host=cfg.web_server.host,
+        port=cfg.web_server.port,
+        reload=cfg.web_server.reload,
         access_log=True,
         log_config=None  # 使用自定义日志配置
     )

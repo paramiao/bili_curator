@@ -9,6 +9,7 @@ except ImportError:
     from sqlalchemy.ext.declarative import declarative_base
 from datetime import datetime
 import os
+from .core.config import get_config
 
 Base = declarative_base()
 
@@ -23,6 +24,8 @@ class Subscription(Base):
     uploader_id = Column(String(100))  # UP主ID
     keyword = Column(String(255))  # 搜索关键词
     specific_urls = Column(Text)  # JSON格式存储特定URL列表
+    # V7扩展字段：下载模式（local/strm）
+    download_mode = Column(String(20), default='local')
     
     # 筛选条件
     date_after = Column(Date)  # 只下载此日期之后的视频
@@ -175,15 +178,40 @@ class DownloadTask(Base):
 # 数据库连接和会话管理
 class Database:
     def __init__(self, db_path: str = None):
-        # 统一数据库路径：优先环境变量 DB_PATH，其次默认 /app/data/bili_curator.db
+        # 统一数据库路径：优先传入参数；否则读取全局配置 Settings.database.db_path
         if db_path is None:
-            db_path = os.environ.get("DB_PATH", "/app/data/bili_curator.db")
+            cfg = get_config()
+            db_path = cfg.database.db_path
         # 确保数据目录存在
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         
-        self.engine = create_engine(f'sqlite:///{db_path}', echo=False)
-        self.SessionLocal = sessionmaker(bind=self.engine)
+        # SQLite简化配置：去除连接池，使用单连接模式
+        # SQLite本质是文件数据库，连接池反而增加复杂性和锁竞争
+        # 采用NullPool禁用连接池，每次请求创建新连接，用完即关闭
+        from sqlalchemy.pool import NullPool
         
+        self.engine = create_engine(
+            f'sqlite:///{db_path}',
+            echo=False,
+            poolclass=NullPool,  # 禁用连接池，每次创建新连接
+            connect_args={
+                "check_same_thread": False,
+                "timeout": 30,  # 降低超时，快速失败
+            },
+        )
+        self.SessionLocal = sessionmaker(bind=self.engine, autoflush=False, autocommit=False)
+        
+        # SQLite 简化PRAGMA设置：专注稳定性而非性能
+        try:
+            with self.engine.connect() as conn:
+                conn.exec_driver_sql("PRAGMA journal_mode=DELETE")  # 使用传统日志模式，更稳定
+                conn.exec_driver_sql("PRAGMA synchronous=FULL")     # 完全同步，确保数据安全
+                conn.exec_driver_sql("PRAGMA busy_timeout=30000")   # 30秒忙等待，快速失败
+                conn.exec_driver_sql("PRAGMA cache_size=2000")      # 适中缓存大小
+                conn.exec_driver_sql("PRAGMA temp_store=memory")     # 临时表存储在内存
+        except Exception as ee:
+            print(f"设置 SQLite PRAGMA 失败: {ee}")
+
         # 创建所有表
         Base.metadata.create_all(self.engine)
 
@@ -238,6 +266,17 @@ class Database:
                 conn.exec_driver_sql("ALTER TABLE subscriptions ADD COLUMN expected_total INTEGER DEFAULT 0")
             if not has_column('subscriptions', 'expected_total_synced_at'):
                 conn.exec_driver_sql("ALTER TABLE subscriptions ADD COLUMN expected_total_synced_at DATETIME")
+            # 新增：下载模式（local/strm），并为现有数据回填默认值
+            if not has_column('subscriptions', 'download_mode'):
+                try:
+                    conn.exec_driver_sql("ALTER TABLE subscriptions ADD COLUMN download_mode VARCHAR(20) DEFAULT 'local'")
+                except Exception as ee:
+                    print(f"新增 subscriptions.download_mode 失败: {ee}")
+            # 回填 NULL 值为 'local'，确保业务逻辑读取可靠
+            try:
+                conn.exec_driver_sql("UPDATE subscriptions SET download_mode = 'local' WHERE download_mode IS NULL")
+            except Exception as ee:
+                print(f"回填 subscriptions.download_mode 失败: {ee}")
 
             # cookies 表缺失列
             if not has_column('cookies', 'updated_at'):
@@ -290,6 +329,12 @@ class Database:
                 conn.exec_driver_sql("CREATE UNIQUE INDEX IF NOT EXISTS idx_settings_key_unique ON settings(key)")
             except Exception as ee:
                 print(f"创建 settings.key 唯一索引失败: {ee}")
+
+            # 兼容历史数据：将 subscriptions.type 中的 'user' 统一修正为 'uploader'
+            try:
+                conn.exec_driver_sql("UPDATE subscriptions SET type = 'uploader' WHERE type = 'user'")
+            except Exception as ee:
+                print(f"规范化 subscriptions.type 值失败: {ee}")
 
         except Exception as e:
             print(f"数据库迁移失败: {e}")

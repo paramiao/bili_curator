@@ -2,6 +2,7 @@
 定时任务调度器 - 使用APScheduler替代Celery
 """
 import asyncio
+import os
 from datetime import datetime, timedelta
 import json
 import re
@@ -21,6 +22,7 @@ from .queue_manager import request_queue
 from .auto_import import auto_import_service
 from .cookie_manager import cookie_manager
 from .services.subscription_stats import recompute_all_subscriptions
+from .services.metrics_service import compute_subscription_metrics, compute_overview_metrics
 from .models import DownloadTask
 
 def _get_int_setting(db: Session, key: str, default: int) -> int:
@@ -163,6 +165,36 @@ class SimpleScheduler:
             max_instances=2
         )
         logger.info(f"注册周期任务 refresh_head_snapshots，间隔 {refresh_minutes} 分钟")
+
+        # 周期预热/刷新 Metrics 统计缓存：用于容量统计回退与前端展示加速
+        # 读取顺序：ENV(METRICS_REFRESH_INTERVAL_MINUTES) > DB(Settings.metrics_refresh_interval_minutes) > 默认
+        env_val = None
+        try:
+            env_raw = os.getenv('METRICS_REFRESH_INTERVAL_MINUTES')
+            if env_raw is not None and str(env_raw).strip() != '':
+                env_val = int(str(env_raw).strip())
+        except Exception:
+            env_val = None
+        if env_val is not None:
+            metrics_minutes = env_val
+        else:
+            try:
+                db = next(get_db())
+                try:
+                    metrics_minutes = _get_int_setting(db, 'metrics_refresh_interval_minutes', 30)
+                finally:
+                    db.close()
+            except Exception:
+                metrics_minutes = 30
+        metrics_minutes = max(5, min(12 * 60, metrics_minutes))
+        self.scheduler.add_job(
+            func=self.refresh_metrics_cache,
+            trigger=IntervalTrigger(minutes=metrics_minutes),
+            id='refresh_metrics_cache',
+            replace_existing=True,
+            max_instances=1
+        )
+        logger.info(f"注册周期任务 refresh_metrics_cache，间隔 {metrics_minutes} 分钟")
         
         logger.info("默认定时任务已添加")
 
@@ -287,6 +319,34 @@ class SimpleScheduler:
         finally:
             db.close()
 
+    async def refresh_metrics_cache(self):
+        """周期刷新统一统计指标缓存：
+        - 遍历启用订阅调用 compute_subscription_metrics（内部含多级容量回退与去抖）
+        - 最后调用 compute_overview_metrics 聚合
+        - 所有异常吞掉并记录，避免打断其他任务
+        """
+        logger.info("开始执行周期任务：refresh_metrics_cache")
+        db = next(get_db())
+        try:
+            subs = db.query(Subscription).filter(Subscription.is_active == True).all()
+            cnt = 0
+            for s in subs:
+                try:
+                    compute_subscription_metrics(db, s.id)
+                    cnt += 1
+                    # 轻微让出
+                    await asyncio.sleep(0.01)
+                except Exception as e:
+                    logger.debug(f"预热订阅指标失败 sid={s.id}: {e}")
+            try:
+                compute_overview_metrics(db)
+            except Exception as e:
+                logger.debug(f"预热全局指标失败: {e}")
+            logger.info(f"周期任务完成：refresh_metrics_cache，预热订阅 {cnt} 个")
+        except Exception as e:
+            logger.warning(f"refresh_metrics_cache 异常：{e}")
+        finally:
+            db.close()
     
     async def check_subscriptions(self):
         """检查所有活跃订阅的更新"""
@@ -466,7 +526,19 @@ class SimpleScheduler:
                             break
                     except Exception:
                         pass
-                    if sub.type != 'collection' or not sub.url:
+                    
+                    # 全局STRM模式检查：确保所有处理路径都能正确识别STRM订阅
+                    download_mode = getattr(sub, 'download_mode', 'local')
+                    logger.info(f"处理订阅 {sub.id} ({sub.name}), 模式: {download_mode}, 类型: {sub.type}")
+                    
+                    if download_mode == 'strm':
+                        # STRM模式：直接使用_process_subscription处理，跳过所有LOCAL逻辑
+                        logger.info(f"订阅 {sub.id} 进入STRM模式处理")
+                        await self._process_subscription(sub, db)
+                        continue
+                    
+                    # LOCAL模式处理：支持合集和UP主订阅
+                    if sub.type not in ['collection', 'uploader'] or not sub.url:
                         continue
                     # 1) 失败回补优先：从 retry 队列取少量入队
                     try:
@@ -554,6 +626,8 @@ class SimpleScheduler:
                             use_incremental = bool(s_glb and str(s_glb.value).strip() in ('1', 'true', 'True'))
                     except Exception:
                         use_incremental = False
+                    
+                    logger.info(f"订阅 {sub.id} 增量管线设置: {use_incremental}")
 
                     videos = []
                     incremental_ok = False
@@ -580,41 +654,19 @@ class SimpleScheduler:
                         db.rollback()
 
                     if use_incremental:
+                        # 检查STRM模式：STRM订阅不使用增量管线
+                        download_mode = getattr(sub, 'download_mode', 'local')
+                        if download_mode == 'strm':
+                            logger.info(f"订阅 {sub.id} ({sub.name}) 是STRM模式，跳过增量管线，使用STRM处理")
+                            await self._process_subscription(sub, db)
+                            continue
+                        
                         try:
                             # 读取每批增量入队限制（默认50）
                             try:
                                 batch_limit = _get_int_setting(db, 'sync:global:incremental_batch_limit', 50)
                             except Exception:
                                 batch_limit = 50
-                            inc = remote_sync_service.get_remote_incremental_ids(db, sub.id, limit=max(1, batch_limit))
-                            remote_ids = inc.get('ids', []) or []
-                            if remote_ids:
-                                local_idx = local_index_service.scan_local_index(db, sub.id)
-                                plan = download_plan_service.compute_plan_from_sets(db, sub.id, remote_ids, local_idx)
-                                # 过滤永久失败
-                                import json as _json
-                                ids_filtered = []
-                                for vid in plan.get('ids', []):
-                                    try:
-                                        fkey = f"fail:{vid}"
-                                        f = db.query(Settings).filter(Settings.key == fkey).first()
-                                        if f and f.value:
-                                            data = _json.loads(f.value)
-                                            if isinstance(data, dict) and (data.get('class') == 'permanent'):
-                                                logger.info(f"跳过增量入队（永久失败）: {vid}")
-                                                continue
-                                    except Exception:
-                                        pass
-                                    ids_filtered.append(vid)
-                                # 构造 candidates（与旧路径一致的轻量字段）
-                                for vid in ids_filtered:
-                                    url = SimpleScheduler._safe_bilibili_url(vid)
-                                    if not url:
-                                        logger.info(f"跳过增量候选（非法视频ID，非BVID）：{vid}")
-                                        continue
-                                    videos.append({'id': vid, 'title': vid, 'webpage_url': url, 'url': url, 'is_queued': False})
-                                incremental_ok = True
-                            # 写观测键（移除旧的 pending_estimated 缓存，已统一到 compute_subscription_metrics）
                             try:
                                 ts_key = f"agg:{sub.id}:last_incremental_at"
                                 s2 = db.query(Settings).filter(Settings.key == ts_key).first()
@@ -631,36 +683,55 @@ class SimpleScheduler:
                             logger.warning(f"订阅 {sub.id} 增量管线异常，回退旧路径：{iex}")
 
                     if not incremental_ok:
-                        # 回退：compute_pending_list
+                        # 回退：根据模式选择处理方式
                         try:
-                            pending_info = await downloader.compute_pending_list(sub.id, db)
-                            videos = pending_info.get('videos', []) or []
-                        except asyncio.CancelledError:
-                            logger.info(f"订阅 {sub.id} 任务被取消，跳过处理")
-                            return
-                        except Exception as e:
-                            logger.warning(f"订阅 {sub.id} compute_pending_list 失败: {e}")
-                            continue
-                        # 写观测：last_full_refresh_at
-                        try:
-                            ts_key = f"agg:{sub.id}:last_full_refresh_at"
-                            s2 = db.query(Settings).filter(Settings.key == ts_key).first()
-                            now_iso = datetime.now().isoformat()
-                            if not s2:
-                                db.add(Settings(key=ts_key, value=now_iso))
+                            download_mode = getattr(sub, 'download_mode', 'local')
+                            if download_mode == 'strm':
+                                logger.info(f"订阅 {sub.id} ({sub.name}) 使用STRM模式处理")
+                                # 调用STRM处理逻辑
+                                await self._process_subscription(sub, db)
+                                continue  # 跳过后续LOCAL模式处理
                             else:
-                                s2.value = now_iso
-                            # 移除旧的 pending_estimated 缓存写入（已统一到 compute_subscription_metrics）
-                            db.commit()
+                                # LOCAL模式：使用传统下载器
+                                pending_info = await downloader.compute_pending_list(sub.id, db)
+                                # 诊断日志：订阅8/所有订阅的回退路径统计与样例
+                                try:
+                                    if sub.id == 8:
+                                        sample_ids = [v.get('id') for v in (pending_info.get('videos') or [])][:5]
+                                        logger.info(f"[诊断] 订阅 8 回退路径 pending: total={pending_info.get('pending')} remote_total={pending_info.get('remote_total')} sample={sample_ids}")
+                                except Exception:
+                                    pass
+                                videos = pending_info.get('videos', []) or []
+                                if not videos:
+                                    logger.info(f"订阅 {sub.id} 无待下载视频")
+                                    continue
+                                
+                                # 统一重算订阅统计（替代旧的 pending_estimated 缓存）
+                                try:
+                                    from .services.subscription_stats import compute_subscription_metrics
+                                    compute_subscription_metrics(db, sub.id)
+                                    # 移除旧的 pending_estimated 缓存写入（已统一到 compute_subscription_metrics）
+                                    db.commit()
+                                except Exception:
+                                    db.rollback()
+                                
+                                # 仅入队未在队列中的视频；考虑回补已占用配额
+                                candidates = [v for v in videos if not v.get('is_queued')]
+                                logger.info(f"订阅 {sub.id} 候选视频: {len(videos)} 总数, {len(candidates)} 未入队")
+                                if not candidates:
+                                    logger.info(f"订阅 {sub.id} 无候选视频，跳过处理")
+                                    continue
+                        except Exception as e:
+                            logger.error(f"订阅 {sub.id} 计算待下载列表失败: {e}")
+                            continue
+                        try:
+                            remaining = max(0, max_per_sub - (enq_retry if 'enq_retry' in locals() else 0))
                         except Exception:
-                            db.rollback()
-
-                    # 仅入队未在队列中的视频；考虑回补已占用配额
-                    candidates = [v for v in videos if not v.get('is_queued')]
-                    logger.info(f"订阅 {sub.id} 候选视频: {len(videos)} 总数, {len(candidates)} 未入队")
-                    if not candidates:
-                        logger.info(f"订阅 {sub.id} 无候选视频，跳过处理")
-                        continue
+                            remaining = max_per_sub
+                    else:
+                        # LOCAL模式：使用传统处理
+                        pending_info = await downloader.compute_pending_list(sub.id, db)
+                        videos = pending_info.get('videos', []) or []
                     try:
                         remaining = max(0, max_per_sub - (enq_retry if 'enq_retry' in locals() else 0))
                     except Exception:
@@ -705,6 +776,9 @@ class SimpleScheduler:
                         logger.info(f"订阅 {sub.id} 入队协调新增 {enq}/剩余{remaining} (总配额{max_per_sub}, 回补{enq_retry if 'enq_retry' in locals() else 0})")
                 except Exception as se:
                     logger.warning(f"订阅 {sub.id} 入队协调异常：{se}")
+                    if sub.id == 8:
+                        import traceback
+                        logger.error(f"订阅 8 详细异常信息：{traceback.format_exc()}")
 
             logger.info("入队协调任务完成")
         except asyncio.CancelledError:
@@ -725,23 +799,56 @@ class SimpleScheduler:
 
     async def _process_subscription(self, subscription: Subscription, db: Session):
         """处理单个订阅"""
-        logger.info(f"检查订阅: {subscription.name} ({subscription.type})")
+        download_mode = getattr(subscription, 'download_mode', 'local')
+        logger.info(f"检查订阅: {subscription.name} ({subscription.type}), 模式: {download_mode}")
         
         try:
-            if subscription.type == 'collection':
-                # 处理合集订阅
-                result = await downloader.download_collection(subscription.id, db)
-                logger.info(f"合集 {subscription.name} 检查完成: {result['new_videos']} 个新视频")
+            # 检查是否为STRM模式
+            if download_mode == 'strm':
+                logger.info(f"使用STRM模式处理订阅: {subscription.name}")
                 
-            elif subscription.type == 'uploader':
-                # 处理UP主订阅
-                result = await downloader.download_uploader(subscription.id, db)
-                logger.info(f"UP主 {subscription.name} 检查完成: {result['new_videos']} 个新视频")
+                # 初始化STRM服务组件
+                from .services.enhanced_downloader import EnhancedDownloader
+                from .services.strm_proxy_service import STRMProxyService
+                from .services.strm_file_manager import STRMFileManager
+                from .services.unified_cache_service import UnifiedCacheService
+                from .cookie_manager import cookie_manager
                 
-            elif subscription.type == 'keyword':
-                # 处理关键词订阅
-                result = await downloader.download_keyword(subscription.id, db)
-                logger.info(f"关键词 {subscription.name} 检查完成: {result['new_videos']} 个新视频")
+                # 创建STRM服务实例
+                strm_proxy = STRMProxyService(cookie_manager=cookie_manager)
+                strm_file_manager = STRMFileManager()
+                cache_service = UnifiedCacheService()
+                
+                # 创建增强下载器
+                enhanced_downloader = EnhancedDownloader(
+                    strm_proxy, strm_file_manager, cache_service
+                )
+        
+                # 使用增强下载器处理STRM订阅
+                try:
+                    logger.info(f"开始处理STRM订阅: {subscription.name}, 类型: {subscription.type}")
+                    result = await enhanced_downloader.compute_pending_list(subscription, db)
+                    logger.info(f"STRM订阅 {subscription.name}: 远端 {result.get('remote_total', 0)}, 已有 {result.get('existing', 0)}, 待处理 {result.get('pending', 0)}, 已创建 {result.get('created', 0)}")
+                except Exception as e:
+                    logger.error(f"STRM订阅 {subscription.name} 处理失败: {e}")
+                    import traceback
+                    logger.error(f"详细错误信息: {traceback.format_exc()}")
+            else:
+                # LOCAL模式：使用传统下载器
+                if subscription.type == 'collection':
+                    # 处理合集订阅
+                    result = await downloader.download_collection(subscription.id, db)
+                    logger.info(f"合集 {subscription.name} 检查完成: {result['new_videos']} 个新视频")
+                    
+                elif subscription.type == 'uploader':
+                    # 处理UP主订阅
+                    result = await downloader.download_uploader(subscription.id, db)
+                    logger.info(f"UP主 {subscription.name} 检查完成: {result['new_videos']} 个新视频")
+                    
+                elif subscription.type == 'keyword':
+                    # 处理关键词订阅
+                    result = await downloader.download_keyword(subscription.id, db)
+                    logger.info(f"关键词 {subscription.name} 检查完成: {result['new_videos']} 个新视频")
                 
         except Exception as e:
             logger.error(f"处理订阅 {subscription.name} 失败: {e}")
