@@ -146,6 +146,16 @@ class SimpleScheduler:
             max_instances=3
         )
         logger.info(f"注册周期任务 enqueue_coordinator，间隔 {enqueue_minutes} 分钟")
+        
+        # 容量统计回填任务 - 每天凌晨3点执行
+        self.scheduler.add_job(
+            func=self.refresh_media_sizes,
+            trigger=CronTrigger(hour=3, minute=0),
+            id='refresh_media_sizes',
+            replace_existing=True,
+            max_instances=1
+        )
+        logger.info("注册定时任务 refresh_media_sizes，每天凌晨3点执行")
 
         # 周期刷新远端头部快照（M2）：用于驱动增量管线（仅合集订阅）
         try:
@@ -972,6 +982,56 @@ class SimpleScheduler:
             trigger=IntervalTrigger(minutes=minutes)
         )
         logger.info(f"订阅检查间隔已更新为 {minutes} 分钟")
+    
+    async def refresh_media_sizes(self):
+        """定时任务：回填视频文件大小到数据库"""
+        try:
+            logger.info("开始执行容量统计回填任务")
+            db = next(get_db())
+            try:
+                from .models import Video
+                import os
+                
+                # 查询所有有文件路径但缺少大小信息的视频
+                videos = db.query(Video).filter(
+                    Video.video_path.isnot(None),
+                    (Video.file_size.is_(None)) | (Video.total_size.is_(None))
+                ).all()
+                
+                updated_count = 0
+                for video in videos:
+                    try:
+                        if video.video_path and os.path.exists(video.video_path):
+                            file_size = os.path.getsize(video.video_path)
+                            
+                            # 更新file_size
+                            if video.file_size is None:
+                                video.file_size = file_size
+                            
+                            # 更新total_size（视频+音频）
+                            if video.total_size is None:
+                                total_size = file_size
+                                # 尝试查找对应的音频文件
+                                if video.audio_path and os.path.exists(video.audio_path):
+                                    total_size += os.path.getsize(video.audio_path)
+                                video.total_size = total_size
+                            
+                            updated_count += 1
+                            
+                    except Exception as e:
+                        logger.warning(f"回填视频 {video.id} 大小失败: {e}")
+                
+                if updated_count > 0:
+                    db.commit()
+                    logger.info(f"容量统计回填完成，更新了 {updated_count} 个视频记录")
+                else:
+                    logger.info("容量统计回填完成，无需更新")
+                    
+            finally:
+                db.close()
+                
+        except Exception as e:
+            logger.error(f"容量统计回填任务失败: {e}")
 
 # 全局调度器实例
 scheduler = SimpleScheduler()
@@ -1078,6 +1138,7 @@ class TaskManager:
             tasks[task_id] = task_copy
         
         return tasks
+
 
 # 全局任务管理器实例
 task_manager = TaskManager()

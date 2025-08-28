@@ -4,9 +4,9 @@ set -euo pipefail
 # One-click manager for bili_curator (Docker Compose)
 # Usage:
 #   ./scripts/manage.sh up|down|restart|rebuild|logs|ps|health|strm|backup
-#   VERSION=v7 ./scripts/manage.sh up    # 部署V7版本
+#   VERSION=v7 ./scripts/manage.sh up    # 部署V7版本 (推荐，双模式功能完整)
 # Env:
-#   VERSION (optional): v6 or v7. Default: v7 (STRM支持)
+#   VERSION (optional): v6 or v7. Default: v7 (双模式支持，生产就绪)
 #   COMPOSE_FILE (optional): path to compose file. Default: docker-compose.yml
 #   CONFIG_DIR (optional): host config dir. Default: ~/bilibili_config
 
@@ -199,10 +199,11 @@ Environment:
   COMPOSE_FILE   Path to docker-compose file (default: $COMPOSE_FILE_DEFAULT)
   CONFIG_DIR     Host config dir for DB/logs (default: $HOME/bilibili_config)
 
-V7 STRM Features:
+V7 STRM Features (Production Ready):
   - STRM management UI: http://localhost:8080/static/strm_management.html
   - Dual mode support: LOCAL (download) + STRM (streaming)
   - 99% storage savings with STRM mode
+  - Full-stack implementation verified and production-ready
 EOF
 }
 

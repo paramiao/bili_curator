@@ -1,3 +1,9 @@
 # V7 STRM扩展版额外依赖
 redis==5.0.1
-# 其余依赖（aiohttp、psutil、pydantic-settings）已在基础 requirements 中固定到补丁版本，避免重复声明以减少冲突。
+
+# V7新增依赖（设置版本上限约束）
+aiohttp>=3.9.5,<4.0.0
+psutil>=5.9.8,<6.0.0
+pydantic-settings>=2.4.0,<3.0.0
+
+# 其余依赖已在基础 requirements.txt 中声明

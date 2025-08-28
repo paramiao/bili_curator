@@ -10,7 +10,7 @@ apscheduler==3.10.4
 
 # HTTP请求
 httpx==0.27.2
-aiohttp==3.9.5
+aiohttp>=3.9.5,<4.0.0
 aiofiles==23.2.1
 
 # 视频下载
@@ -18,14 +18,14 @@ yt-dlp==2025.8.20
 
 # 工具库和配置
 pydantic==2.8.2
-pydantic-settings==2.4.0
+pydantic-settings>=2.4.0,<3.0.0
 python-multipart==0.0.9
 
 # 日志和配置
 loguru==0.7.2
 
 # 系统监控和性能
-psutil==5.9.8
+psutil>=5.9.8,<6.0.0
 
 # 媒体处理
 ffmpeg-python==0.2.0

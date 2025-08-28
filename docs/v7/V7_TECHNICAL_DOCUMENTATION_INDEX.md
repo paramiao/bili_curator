@@ -18,9 +18,9 @@
 - **[Docker配置](../../docker-compose.yml)** - 容器化部署配置
 
 ### 📊 项目管理
-- **[项目状态回顾](./PROJECT_STATUS_REVIEW.md)** - 项目完成状态和成果
+- **[项目状态回顾](./PROJECT_STATUS_REVIEW.md)** - 项目完成状态和最新进展
+- **[STRM项目完成报告](./STRM_PROJECT_COMPLETION_REPORT.md)** - STRM功能开发完成总结
 - **[全局代码审查](./GLOBAL_CODE_REVIEW_REPORT.md)** - 代码质量审查报告
-- **[版本管理策略](../VERSION_MANAGEMENT_STRATEGY.md)** - 版本控制和发布策略
 
 ### 🔍 技术细节
 - **[API规范](./API_SPECIFICATION.md)** - 完整API接口文档
@@ -41,9 +41,9 @@
 3. [故障排除](./STRM_DEPLOYMENT_GUIDE.md#故障排除) - 常见问题解决
 
 ### 📋 项目管理
-1. [项目状态](./PROJECT_STATUS_REVIEW.md) - 项目完成情况
-2. [发布说明](./V7_RELEASE_NOTES.md) - 版本发布信息
-3. [版本策略](../VERSION_MANAGEMENT_STRATEGY.md) - 版本管理规范
+1. [项目状态](./PROJECT_STATUS_REVIEW.md) - 项目完成情况和最新进展
+2. [STRM完成报告](./STRM_PROJECT_COMPLETION_REPORT.md) - STRM功能开发总结
+3. [发布说明](./V7_RELEASE_NOTES.md) - 版本发布信息
 
 ### 👥 最终用户
 1. [README快速开始](../../README.md#快速开始) - 基础使用指南

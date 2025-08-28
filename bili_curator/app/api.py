@@ -127,9 +127,9 @@ app.include_router(strm_router, prefix="/api")
 BASE_DIR = Path(__file__).resolve().parents[1]
 SPA_DIST = BASE_DIR / "web" / "dist"
 
-# 挂载静态文件
+# 静态文件挂载：功能模块页面（管理工具，非主SPA）
 app.mount("/static", StaticFiles(directory="static"), name="static")
-# 挂载前端打包资源目录（SPA 资源）
+# SPA资源挂载：主应用打包资源
 try:
     spa_assets_dir = SPA_DIST / "assets"
     if spa_assets_dir.exists():
@@ -137,9 +137,18 @@ try:
 except Exception:
     pass
 
-# 首页：优先返回 static/index.html，不存在则返回简易欢迎页
+# 主应用入口：统一SPA架构
+# 架构：主SPA (/) + 功能模块页面 (/static/*) 混合设计
 @app.get("/", response_class=HTMLResponse)
 async def read_root():
+    """
+    主应用路由 - 返回统一SPA应用
+    
+    架构说明：
+    - 主SPA：web/dist/index.html (216KB打包文件，统一导航)
+    - 功能页面：static/*.html (独立管理工具)
+    - 优先级：SPA > 静态文件 > 回退页面
+    """
     # 1) 优先返回打包后的 SPA 首页
     try:
         spa_index = SPA_DIST / "index.html"
