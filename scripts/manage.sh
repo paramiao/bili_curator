@@ -3,7 +3,7 @@ set -euo pipefail
 
 # One-click manager for bili_curator (Docker Compose)
 # Usage:
-#   ./scripts/manage.sh up|down|restart|rebuild|logs|ps|health|strm
+#   ./scripts/manage.sh up|down|restart|rebuild|logs|ps|health|strm|backup
 #   VERSION=v7 ./scripts/manage.sh up    # 部署V7版本
 # Env:
 #   VERSION (optional): v6 or v7. Default: v7 (STRM支持)
@@ -17,6 +17,16 @@ COMPOSE_FILE_PATH="${COMPOSE_FILE:-$COMPOSE_FILE_DEFAULT}"
 CONFIG_DIR_PATH="${CONFIG_DIR:-$HOME/bilibili_config}"
 # Ensure CONFIG_HOST_PATH is exported for docker-compose.yml defaults
 export CONFIG_HOST_PATH="${CONFIG_HOST_PATH:-$CONFIG_DIR_PATH}"
+
+# Optional: load .env if present (non-intrusive)
+if [ -f "$REPO_ROOT/.env" ]; then
+  set +u
+  set -o allexport
+  # shellcheck disable=SC1090
+  . "$REPO_ROOT/.env"
+  set +o allexport
+  set -u
+fi
 
 ensure_prereqs() {
   command -v docker >/dev/null 2>&1 || { echo "[ERROR] docker not found"; exit 1; }
@@ -33,6 +43,20 @@ ensure_dirs() {
 cmd_up() {
   ensure_prereqs; ensure_dirs
   docker compose -f "$COMPOSE_FILE_PATH" up -d
+  echo "[INFO] Waiting for health (timeout 60s)..."
+  set +e
+  for i in {1..60}; do
+    if curl -fsS http://localhost:8080/health >/dev/null 2>&1; then
+      echo "[OK] Service healthy"
+      ok=1
+      break
+    fi
+    sleep 1
+  done
+  if [ -z "${ok:-}" ]; then
+    echo "[WARN] Health not ready within 60s. Check logs: ./scripts/manage.sh logs"
+  fi
+  set -e
   echo "[OK] Up/Restarted. See logs: ./scripts/manage.sh logs"
 }
 
@@ -84,6 +108,11 @@ cmd_strm() {
   ensure_prereqs
   echo "[INFO] STRM功能状态检查..."
   set +e
+  echo "# STRM前置检查"
+  echo "- ffmpeg 可用性（容器内）"
+  docker compose -f "$COMPOSE_FILE_PATH" exec -T bili-curator sh -lc 'command -v ffmpeg >/dev/null 2>&1 && ffmpeg -version | head -n1 || echo "ffmpeg not found"'
+  echo "- BILIBILI_SESSDATA 配置（容器内，仅检查是否设置）"
+  docker compose -f "$COMPOSE_FILE_PATH" exec -T bili-curator sh -lc '[ -n "$BILIBILI_SESSDATA" ] && echo "SESSDATA: set" || echo "SESSDATA: not set"'
   
   # 检查STRM健康状态
   echo "# STRM健康检查"
@@ -108,6 +137,28 @@ cmd_strm() {
   fi
   
   echo -e "\n[INFO] STRM管理界面: http://localhost:8080/static/strm_management.html"
+}
+
+cmd_backup() {
+  ensure_prereqs; ensure_dirs
+  local BK_DIR="$CONFIG_DIR_PATH/logs/backups"
+  mkdir -p "$BK_DIR"
+  local TS
+  TS="$(date +%Y%m%d_%H%M%S)"
+  # Detect DB_PATH inside container with fallback
+  local CONTAINER_DB
+  CONTAINER_DB=$(docker compose -f "$COMPOSE_FILE_PATH" exec -T bili-curator sh -lc 'printf "%s" "${DB_PATH:-/app/data/bilibili_curator.db}"' 2>/dev/null || true)
+  if [ -z "$CONTAINER_DB" ]; then
+    CONTAINER_DB="/app/data/bilibili_curator.db"
+  fi
+  local DEST="$BK_DIR/bilibili_curator.db.$TS"
+  echo "[INFO] Backing up DB from $CONTAINER_DB to $DEST"
+  if docker compose -f "$COMPOSE_FILE_PATH" cp bili-curator:"$CONTAINER_DB" "$DEST"; then
+    echo "[OK] Backup completed: $DEST"
+  else
+    echo "[ERROR] Backup failed. Ensure service is running and DB exists at $CONTAINER_DB" >&2
+    exit 1
+  fi
 }
 
 cmd_diag() {
@@ -139,6 +190,7 @@ Commands:
   ps         Show compose services status
   health     Call http://localhost:8080/health
   strm       Check STRM streaming feature status and stats
+  backup     Backup SQLite DB from container to host logs/backups/
   diag       Diagnose API consistency across endpoints (in container)
   dev        Start with docker-compose.dev.yml override for local development
 
@@ -165,6 +217,7 @@ main() {
     ps) cmd_ps ;;
     health) cmd_health ;;
     strm) cmd_strm ;;
+    backup) cmd_backup ;;
     diag) cmd_diag ;;
     dev) cmd_dev ;;
     -h|--help|help|"") usage ;;

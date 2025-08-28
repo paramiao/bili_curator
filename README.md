@@ -53,20 +53,23 @@
 - Docker & Docker Compose (推荐)
 
 ### 一键部署
-使用管理脚本 `scripts/manage.sh`：
+使用管理脚本 `scripts/manage.sh`（自动加载项目根目录 `.env`，若存在）：
 
 ```bash
-# 启动V7版本（默认，支持STRM功能）
+# 启动V7版本（默认，支持STRM功能；启动后自动等待健康检查就绪≤60s）
 ./scripts/manage.sh up
 
 # 查看服务状态
 ./scripts/manage.sh ps
 
-# 检查STRM功能状态
+# 检查STRM功能状态（含轻量前置自检：ffmpeg/SESSDATA是否配置）
 ./scripts/manage.sh strm
 
 # 查看日志
 ./scripts/manage.sh logs
+
+# 备份数据库（导出容器内DB到宿主 logs/backups/，带时间戳）
+./scripts/manage.sh backup
 ```
 
 ### 手动部署
