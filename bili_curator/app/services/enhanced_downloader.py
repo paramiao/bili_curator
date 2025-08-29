@@ -389,8 +389,28 @@ class EnhancedDownloader:
             with open(strm_path, 'w', encoding='utf-8') as f:
                 f.write(stream_url)
             
+            # 下载缩略图
+            thumb_path = None
+            if thumbnail:
+                try:
+                    import aiohttp
+                    thumb_path = video_dir / f"{safe_title}.jpg"
+                    
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(thumbnail) as response:
+                            if response.status == 200:
+                                with open(thumb_path, 'wb') as f:
+                                    f.write(await response.read())
+                                logger.debug(f"下载缩略图: {thumb_path}")
+                            else:
+                                thumb_path = None
+                except Exception as e:
+                    logger.warning(f"下载缩略图失败: {bvid}, {e}")
+                    thumb_path = None
+            
             # 创建NFO文件
             nfo_path = video_dir / f"{safe_title}.nfo"
+            thumb_ref = f"{safe_title}.jpg" if thumb_path and thumb_path.exists() else (thumbnail or '')
             nfo_content = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <movie>
     <title>{title}</title>
@@ -401,8 +421,8 @@ class EnhancedDownloader:
     <tag>Bilibili</tag>
     <tag>STRM</tag>
     <uniqueid type="bilibili">{bvid}</uniqueid>
-    <thumb>{thumbnail or ''}</thumb>
-    <fanart>{thumbnail or ''}</fanart>
+    <thumb>{thumb_ref}</thumb>
+    <fanart>{thumb_ref}</fanart>
 </movie>"""
             
             with open(nfo_path, 'w', encoding='utf-8') as f:
@@ -548,7 +568,8 @@ class EnhancedDownloader:
                                     'uploader': video_info.get('uploader', ''),
                                     'duration': video_info.get('duration', 0),
                                     'upload_date': video_info.get('upload_date', ''),
-                                    'view_count': video_info.get('view_count', 0)
+                                    'view_count': video_info.get('view_count', 0),
+                                    'thumbnail': video_info.get('thumbnail', '')
                                 })
                                 logger.info(f"获取视频详情 {i+1}/{len(sample_ids)}: {video_info.get('title', video_id)[:50]}...")
                             else:

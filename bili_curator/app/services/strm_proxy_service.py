@@ -98,12 +98,12 @@ class STRMProxyService:
             # 获取B站视频信息
             video_info = await self._get_bilibili_video_info(bilibili_id)
             if not video_info:
-                raise ExternalAPIError(f"无法获取视频信息: {bilibili_id}")
+                raise ExternalAPIError("Bilibili", f"无法获取视频信息: {bilibili_id}")
             
             # 获取播放URL
             play_url = await self._get_bilibili_play_url(bilibili_id, quality)
             if not play_url:
-                raise ExternalAPIError(f"无法获取播放URL: {bilibili_id}")
+                raise ExternalAPIError("Bilibili", f"无法获取播放URL: {bilibili_id}")
             
             # 创建HLS代理流
             proxy_url = await self._create_hls_proxy_stream(
@@ -126,20 +126,24 @@ class STRMProxyService:
             
         except Exception as e:
             logger.error(f"获取视频流URL失败: {bilibili_id}, {e}")
-            raise DownloadError(f"获取视频流失败: {str(e)}")
+            raise DownloadError(bilibili_id, f"获取视频流失败: {str(e)}")
     
     async def _get_bilibili_video_info(self, bilibili_id: str) -> Optional[Dict]:
         """获取B站视频基本信息"""
         try:
             cookies = await self.cookie_manager.get_valid_cookies()
             if not cookies:
-                raise ExternalAPIError("没有可用的Cookie")
+                raise ExternalAPIError("Bilibili", "没有可用的Cookie")
+            
+            # 使用第一个有效Cookie
+            cookie = cookies[0]
+            cookie_str = f"SESSDATA={cookie.sessdata}; bili_jct={cookie.bili_jct}; DedeUserID={cookie.dedeuserid}"
             
             url = f"https://api.bilibili.com/x/web-interface/view?bvid={bilibili_id}"
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 "Referer": "https://www.bilibili.com/",
-                "Cookie": "; ".join([f"{k}={v}" for k, v in cookies.items()])
+                "Cookie": cookie_str
             }
             
             async with self.session.get(url, headers=headers) as response:
@@ -161,9 +165,21 @@ class STRMProxyService:
     async def _get_bilibili_play_url(self, bilibili_id: str, quality: str) -> Optional[str]:
         """获取B站视频播放URL"""
         try:
+            # 首先获取视频信息以获得cid
+            video_info = await self._get_bilibili_video_info(bilibili_id)
+            if not video_info or not video_info.get("pages"):
+                logger.error(f"无法获取视频页面信息: {bilibili_id}")
+                return None
+            
+            cid = video_info["pages"][0]["cid"]
+            
             cookies = await self.cookie_manager.get_valid_cookies()
             if not cookies:
-                raise ExternalAPIError("没有可用的Cookie")
+                raise ExternalAPIError("Bilibili", "没有可用的Cookie")
+            
+            # 使用第一个有效Cookie
+            cookie = cookies[0]
+            cookie_str = f"SESSDATA={cookie.sessdata}; bili_jct={cookie.bili_jct}; DedeUserID={cookie.dedeuserid}"
             
             # 质量映射
             quality_map = {
@@ -174,11 +190,11 @@ class STRMProxyService:
             }
             qn = quality_map.get(quality, 64)
             
-            url = f"https://api.bilibili.com/x/player/playurl?bvid={bilibili_id}&qn={qn}&type=&otype=json&fourk=1&fnver=0&fnval=16"
+            url = f"https://api.bilibili.com/x/player/playurl?bvid={bilibili_id}&cid={cid}&qn={qn}&type=&otype=json&fourk=1&fnver=0&fnval=0"
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 "Referer": f"https://www.bilibili.com/video/{bilibili_id}",
-                "Cookie": "; ".join([f"{k}={v}" for k, v in cookies.items()])
+                "Cookie": cookie_str
             }
             
             async with self.session.get(url, headers=headers) as response:
@@ -251,7 +267,9 @@ class STRMProxyService:
             
         except Exception as e:
             logger.error(f"创建HLS代理流失败: {stream_key}, {e}")
-            raise DownloadError(f"创建HLS流失败: {str(e)}")
+            # 从stream_key中提取bilibili_id
+            bilibili_id = stream_key.split('_')[0] if '_' in stream_key else stream_key
+            raise DownloadError(bilibili_id, f"创建HLS流失败: {str(e)}")
     
     async def get_hls_playlist(self, stream_key: str) -> Optional[str]:
         """获取HLS播放列表"""

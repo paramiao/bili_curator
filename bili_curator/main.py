@@ -95,6 +95,17 @@ async def lifespan(app):
     except Exception as e:
         logger.error(f"❌ 视频检测服务启动失败: {e}")
     
+    # 启动STRM代理服务 (V7)
+    if version == 'v7':
+        logger.info("🎯 启动STRM代理服务...")
+        try:
+            from app.core.dependencies import get_strm_proxy_service
+            strm_proxy = get_strm_proxy_service()
+            await strm_proxy.start()
+            logger.info("✅ STRM代理服务启动成功")
+        except Exception as e:
+            logger.error(f"❌ STRM代理服务启动失败: {e}")
+    
     # 启动调度器
     logger.info("⏰ 启动定时任务调度器...")
     scheduler.start()

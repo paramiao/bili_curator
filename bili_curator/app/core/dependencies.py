@@ -76,22 +76,31 @@ def get_cookie_manager():
 
 
 def get_strm_proxy_service() -> STRMProxyService:
-    """获取STRM代理服务"""
-    cookie_manager = get_cookie_manager()
-    return STRMProxyService(cookie_manager)
+    """获取STRM代理服务（单例模式）"""
+    global _strm_proxy_service
+    if _strm_proxy_service is None:
+        cookie_manager = get_cookie_manager()
+        _strm_proxy_service = STRMProxyService(cookie_manager)
+    return _strm_proxy_service
 
 
 def get_strm_file_manager() -> STRMFileManager:
-    """获取STRM文件管理器"""
-    return STRMFileManager()
+    """获取STRM文件管理器（单例模式）"""
+    global _strm_file_manager
+    if _strm_file_manager is None:
+        _strm_file_manager = STRMFileManager()
+    return _strm_file_manager
 
 
 def get_enhanced_downloader() -> EnhancedDownloader:
-    """获取增强下载器"""
-    strm_proxy = get_strm_proxy_service()
-    strm_file_manager = get_strm_file_manager()
-    cache_service = get_cache_service()
-    return EnhancedDownloader(strm_proxy, strm_file_manager, cache_service)
+    """获取增强下载器（单例模式）"""
+    global _enhanced_downloader
+    if _enhanced_downloader is None:
+        strm_proxy = get_strm_proxy_service()
+        strm_file_manager = get_strm_file_manager()
+        cache_service = get_cache_service()
+        _enhanced_downloader = EnhancedDownloader(strm_proxy, strm_file_manager, cache_service)
+    return _enhanced_downloader
 
 
 # 常用依赖组合
@@ -176,6 +185,11 @@ container.register_singleton(Settings, get_settings())
 container.register_factory(UnifiedCacheService, lambda: UnifiedCacheService())
 container.register_factory(CacheInvalidationService, lambda: CacheInvalidationService())
 container.register_factory(CacheMigrationService, lambda: CacheMigrationService())
+
+# 注册STRM相关服务为单例
+_strm_proxy_service = None
+_strm_file_manager = None
+_enhanced_downloader = None
 
 
 def get_service(service_type: type):

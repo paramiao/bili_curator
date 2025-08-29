@@ -85,7 +85,7 @@ class STRMDownloader:
             subscription_info = await self._get_subscription_info(task.subscription_id, db)
             
             if not video_info or not subscription_info:
-                raise DownloadError("获取视频或订阅信息失败")
+                raise DownloadError(task.bilibili_id, "获取视频或订阅信息失败")
             
             # 创建STRM流
             stream_url = await self.strm_proxy.get_video_stream_url(

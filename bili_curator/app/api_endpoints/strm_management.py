@@ -34,6 +34,40 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/strm", tags=["STRM管理"])
 
 
+@router.get("/stream/{bilibili_id}")
+async def get_strm_stream(
+    bilibili_id: str,
+    quality: str = "720p",
+    strm_proxy: STRMProxyService = Depends(get_strm_proxy_service)
+) -> StreamingResponse:
+    """
+    获取STRM流媒体内容 - 直接播放端点
+    
+    Args:
+        bilibili_id: B站视频ID
+        quality: 视频质量 (1080p, 720p, 480p, 360p)
+    """
+    try:
+        # 获取流URL并重定向
+        stream_url = await strm_proxy.get_video_stream_url(bilibili_id, quality)
+        
+        # 返回重定向到实际流URL
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url=stream_url, status_code=302)
+        
+    except ExternalAPIError as e:
+        logger.error(f"获取STRM流失败 - 外部API错误: {bilibili_id}, {e}")
+        raise HTTPException(status_code=502, detail=f"外部API错误: {str(e)}")
+    
+    except DownloadError as e:
+        logger.error(f"获取STRM流失败 - 下载错误: {bilibili_id}, {e}")
+        raise HTTPException(status_code=500, detail=f"下载错误: {str(e)}")
+    
+    except Exception as e:
+        logger.error(f"获取STRM流失败 - 未知错误: {bilibili_id}, {e}")
+        raise HTTPException(status_code=500, detail=f"获取STRM流失败: {str(e)}")
+
+
 @router.post("/stream/create/{bilibili_id}")
 async def create_strm_stream(
     bilibili_id: str,

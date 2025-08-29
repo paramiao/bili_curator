@@ -76,7 +76,7 @@ class STRMFileManager:
             
         except Exception as e:
             logger.error(f"创建STRM文件失败: {video.bilibili_id}, {e}")
-            raise DownloadError(f"创建STRM文件失败: {str(e)}")
+            raise DownloadError(video.bilibili_id, f"创建STRM文件失败: {str(e)}")
     
     async def _create_video_directory(
         self, 
@@ -117,7 +117,7 @@ class STRMFileManager:
             
         except Exception as e:
             logger.error(f"创建视频目录失败: {video.bilibili_id}, {e}")
-            raise DownloadError(f"创建视频目录失败: {str(e)}")
+            raise DownloadError(video.bilibili_id, f"创建视频目录失败: {str(e)}")
     
     def _sanitize_filename(self, filename: str) -> str:
         """清理文件名，移除非法字符"""

@@ -1,17 +1,19 @@
 """
 简化版Cookie管理器
 """
-import random
-import time
-from datetime import datetime, timedelta
-from typing import Optional, Dict, Any
-from sqlalchemy.orm import Session
-from .models import Cookie, get_db
-import httpx
-import asyncio
-from loguru import logger
-from .services.http_utils import get_user_agent
 import os
+import time
+from datetime import datetime
+from typing import Optional, Dict, List
+from sqlalchemy.orm import Session
+from loguru import logger
+
+from .services.http_utils import get_user_agent
+
+# 延迟导入避免循环依赖
+def _get_cookie_model():
+    from .models import Cookie
+    return Cookie
 
 class SimpleCookieManager:
     def __init__(self):
@@ -37,8 +39,9 @@ class SimpleCookieManager:
         finally:
             self._checked_schema = True
     
-    def get_available_cookie(self, db: Session) -> Optional[Cookie]:
+    def get_available_cookie(self, db: Session) -> Optional:
         """获取可用的Cookie"""
+        Cookie = _get_cookie_model()
         # 获取所有活跃的Cookie
         active_cookies = db.query(Cookie).filter(Cookie.is_active == True).all()
         
@@ -59,6 +62,7 @@ class SimpleCookieManager:
             return cookie
         
         # 返回当前Cookie
+        Cookie = _get_cookie_model()
         current_cookie = db.query(Cookie).filter(Cookie.id == self.current_cookie_id).first()
         if current_cookie and current_cookie.is_active:
             return current_cookie
@@ -67,7 +71,20 @@ class SimpleCookieManager:
         self.current_cookie_id = None
         return self.get_available_cookie(db)
     
-    async def get_valid_cookies(self) -> Dict[str, str]:
+    async def get_valid_cookies(self) -> List:
+        """为STRM代理服务提供可用的Cookie对象列表"""
+        try:
+            from .models import db
+            with db.get_session() as session:
+                cookie = self.get_available_cookie(session)
+                if cookie:
+                    return [cookie]
+                return []
+        except Exception as e:
+            logger.error(f"获取可用Cookie失败: {e}")
+            return []
+
+    async def get_valid_cookies_dict(self) -> Dict[str, str]:
         """为外部服务提供可用的Cookie字典。
         优先读取环境变量(BILIBILI_SESSDATA/BILIBILI_BILI_JCT/BILIBILI_BUVID3)，
         否则从数据库选择一个活跃Cookie。
@@ -85,21 +102,23 @@ class SimpleCookieManager:
 
         # 2) 回退到数据库
         try:
-            db = next(get_db())
-            cookie = self.get_available_cookie(db)
-            if cookie:
-                return {
-                    "SESSDATA": cookie.sessdata,
-                    "bili_jct": cookie.bili_jct,
-                    "DedeUserID": cookie.dedeuserid,
-                }
-            return {}
+            from .models import db
+            with db.get_session() as session:
+                cookie = self.get_available_cookie(session)
+                if cookie:
+                    return {
+                        "SESSDATA": cookie.sessdata,
+                        "bili_jct": cookie.bili_jct,
+                        "DedeUserID": cookie.dedeuserid,
+                    }
+                return {}
         except Exception as e:
             logger.error(f"获取可用Cookie失败: {e}")
             return {}
 
     def update_cookie_usage(self, db: Session, cookie_id: int):
         """更新Cookie使用统计"""
+        Cookie = _get_cookie_model()
         cookie = db.query(Cookie).filter(Cookie.id == cookie_id).first()
         if cookie:
             cookie.usage_count += 1
@@ -108,6 +127,7 @@ class SimpleCookieManager:
     
     def mark_cookie_banned(self, db: Session, cookie_id: int, reason: str = ""):
         """标记Cookie为被封禁"""
+        Cookie = _get_cookie_model()
         cookie = db.query(Cookie).filter(Cookie.id == cookie_id).first()
         if cookie:
             cookie.is_active = False
@@ -122,6 +142,7 @@ class SimpleCookieManager:
         self._ensure_failure_columns(db)
         if not self._has_failure_columns:
             return
+        Cookie = _get_cookie_model()
         cookie = db.query(Cookie).filter(Cookie.id == cookie_id).first()
         if cookie:
             cookie.failure_count = 0
@@ -131,6 +152,7 @@ class SimpleCookieManager:
     def record_failure(self, db: Session, cookie_id: int, reason: str = ""):
         """记录一次失败，若在窗口内达到阈值则禁用"""
         self._ensure_failure_columns(db)
+        Cookie = _get_cookie_model()
         cookie = db.query(Cookie).filter(Cookie.id == cookie_id).first()
         if not cookie:
             return
@@ -152,7 +174,7 @@ class SimpleCookieManager:
         if cookie.failure_count >= self.failure_threshold:
             self.mark_cookie_banned(db, cookie_id, f"达到失败阈值({self.failure_threshold})，原因: {reason}")
     
-    async def validate_cookie(self, cookie: Cookie) -> bool:
+    async def validate_cookie(self, cookie) -> bool:
         """验证Cookie是否有效"""
         try:
             headers = {
@@ -184,7 +206,7 @@ class SimpleCookieManager:
             logger.error(f"Cookie {cookie.name} 验证异常: {e}")
             return False
     
-    def get_cookie_headers(self, cookie: Cookie) -> Dict[str, str]:
+    def get_cookie_headers(self, cookie) -> Dict[str, str]:
         """获取Cookie请求头"""
         return {
             'User-Agent': get_user_agent(True),
@@ -194,6 +216,7 @@ class SimpleCookieManager:
     
     async def batch_validate_cookies(self, db: Session):
         """批量验证所有Cookie"""
+        Cookie = _get_cookie_model()
         cookies = db.query(Cookie).filter(Cookie.is_active == True).all()
         
         for cookie in cookies:
