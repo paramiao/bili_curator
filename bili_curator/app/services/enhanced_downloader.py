@@ -280,8 +280,8 @@ class EnhancedDownloader:
                     uploader = video_data.get('uploader', '')
                     thumbnail = video_data.get('thumbnail', '')
                     
-                    # 生成流媒体URL
-                    stream_url = f"http://localhost:8080/api/strm/stream/{bvid}"
+                    # 生成流媒体URL - 使用内网绝对URL，供Emby Docker容器访问
+                    stream_url = f"http://192.168.31.2:8080/api/strm/stream/{bvid}"
                     
                     # 创建STRM文件和目录
                     strm_path = await self._create_strm_file_direct(
@@ -366,18 +366,15 @@ class EnhancedDownloader:
                     filename = filename[:97] + "..."
                 return filename.strip(' .') or "未命名"
             
-            # 根据订阅类型创建目录结构
+            # 根据订阅类型创建目录结构 - 与LOCAL模式保持一致，不为每个视频创建子目录
             if subscription.type == "uploader":
                 uploader_name = sanitize_filename(uploader or "未知UP主")
-                video_title = sanitize_filename(title)
-                video_dir = strm_base_path / uploader_name / video_title
+                video_dir = strm_base_path / uploader_name
             elif subscription.type == "collection":
                 collection_name = sanitize_filename(subscription.name)
-                video_title = sanitize_filename(title)
-                video_dir = strm_base_path / collection_name / video_title
+                video_dir = strm_base_path / collection_name
             else:
-                video_title = sanitize_filename(title)
-                video_dir = strm_base_path / "其他" / video_title
+                video_dir = strm_base_path / "其他"
             
             # 创建目录
             video_dir.mkdir(parents=True, exist_ok=True)

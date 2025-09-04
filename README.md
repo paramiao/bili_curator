@@ -276,6 +276,10 @@ VERSION=v7 ./scripts/manage.sh up    # 流媒体模式
 - [V7实现方案](docs/v7/STRM_IMPLEMENTATION_PLAN.md) - 详细实现计划
 - [V7开发清单](docs/v7/STRM_DEVELOPMENT_CHECKLIST.md) - 开发任务和验收标准
 
+### 故障排除
+- [STRM播放问题排查](docs/v7/STRM_TROUBLESHOOTING.md) - 播放器兼容性和网络问题
+- [部署验证指南](docs/v7/DEPLOYMENT_VERIFICATION.md) - 容器健康检查和API测试
+
 ### 其他文档
 - [版本管理策略](docs/VERSION_MANAGEMENT_STRATEGY.md) - 版本控制和发布流程
 

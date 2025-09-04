@@ -3,10 +3,14 @@
 """
 import os
 import time
+import random
+import asyncio
 from datetime import datetime
 from typing import Optional, Dict, List
+from urllib.parse import unquote
 from sqlalchemy.orm import Session
 from loguru import logger
+import httpx
 
 from .services.http_utils import get_user_agent
 
@@ -74,12 +78,16 @@ class SimpleCookieManager:
     async def get_valid_cookies(self) -> List:
         """为STRM代理服务提供可用的Cookie对象列表"""
         try:
-            from .models import db
-            with db.get_session() as session:
-                cookie = self.get_available_cookie(session)
+            from .core.dependencies import get_database_session
+            db_gen = get_database_session()
+            db = next(db_gen)
+            try:
+                cookie = self.get_available_cookie(db)
                 if cookie:
                     return [cookie]
                 return []
+            finally:
+                db.close()
         except Exception as e:
             logger.error(f"获取可用Cookie失败: {e}")
             return []
@@ -177,9 +185,12 @@ class SimpleCookieManager:
     async def validate_cookie(self, cookie) -> bool:
         """验证Cookie是否有效"""
         try:
+            # URL解码SESSDATA
+            sessdata = unquote(cookie.sessdata) if cookie.sessdata else ''
+            
             headers = {
                 'User-Agent': get_user_agent(True),
-                'Cookie': f'SESSDATA={cookie.sessdata}; bili_jct={cookie.bili_jct}; DedeUserID={cookie.dedeuserid}'
+                'Cookie': f'SESSDATA={sessdata}; bili_jct={cookie.bili_jct}; DedeUserID={cookie.dedeuserid}'
             }
             
             # 测试访问用户信息接口
@@ -208,9 +219,12 @@ class SimpleCookieManager:
     
     def get_cookie_headers(self, cookie) -> Dict[str, str]:
         """获取Cookie请求头"""
+        # URL解码SESSDATA
+        sessdata = unquote(cookie.sessdata) if cookie.sessdata else ''
+        
         return {
             'User-Agent': get_user_agent(True),
-            'Cookie': f'SESSDATA={cookie.sessdata}; bili_jct={cookie.bili_jct}; DedeUserID={cookie.dedeuserid}',
+            'Cookie': f'SESSDATA={sessdata}; bili_jct={cookie.bili_jct}; DedeUserID={cookie.dedeuserid}',
             'Referer': 'https://www.bilibili.com/'
         }
     

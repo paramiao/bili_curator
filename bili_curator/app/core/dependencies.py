@@ -81,6 +81,12 @@ def get_strm_proxy_service() -> STRMProxyService:
     if _strm_proxy_service is None:
         cookie_manager = get_cookie_manager()
         _strm_proxy_service = STRMProxyService(cookie_manager)
+        # 延迟初始化session，在第一次使用时启动
+        if _strm_proxy_service.session is None:
+            import asyncio
+            import aiohttp
+            timeout = aiohttp.ClientTimeout(total=30)
+            _strm_proxy_service.session = aiohttp.ClientSession(timeout=timeout)
     return _strm_proxy_service
 
 

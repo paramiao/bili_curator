@@ -83,32 +83,27 @@ class STRMFileManager:
         video: VideoResponse, 
         subscription: SubscriptionResponse
     ) -> Path:
-        """创建视频目录结构"""
+        """创建视频目录结构 - 扁平化结构与LOCAL模式保持一致"""
         try:
-            # 根据订阅类型创建不同的目录结构
+            # 使用扁平化目录结构，与LOCAL模式一致
             if subscription.type == "uploader":
-                # UP主订阅: /strm/UP主名称/视频标题/
+                # UP主订阅: /strm/UP主名称/
                 uploader_name = self._sanitize_filename(video.uploader or "未知UP主")
-                video_title = self._sanitize_filename(video.title)
-                video_dir = self.strm_base_path / uploader_name / video_title
+                video_dir = self.strm_base_path / uploader_name
                 
             elif subscription.type == "collection":
-                # 合集订阅: /strm/合集名称/视频标题/
+                # 合集订阅: /strm/合集名称/
                 collection_name = self._sanitize_filename(subscription.name)
-                video_title = self._sanitize_filename(video.title)
-                video_dir = self.strm_base_path / collection_name / video_title
+                video_dir = self.strm_base_path / collection_name
                 
             elif subscription.type == "keyword":
-                # 关键词订阅: /strm/关键词/UP主名称/视频标题/
+                # 关键词订阅: /strm/关键词/
                 keyword = self._sanitize_filename(subscription.keyword or subscription.name)
-                uploader_name = self._sanitize_filename(video.uploader or "未知UP主")
-                video_title = self._sanitize_filename(video.title)
-                video_dir = self.strm_base_path / keyword / uploader_name / video_title
+                video_dir = self.strm_base_path / keyword
                 
             else:  # specific_video
-                # 特定视频: /strm/特定视频/视频标题/
-                video_title = self._sanitize_filename(video.title)
-                video_dir = self.strm_base_path / "特定视频" / video_title
+                # 特定视频: /strm/特定视频/
+                video_dir = self.strm_base_path / "特定视频"
             
             # 创建目录
             video_dir.mkdir(parents=True, exist_ok=True)

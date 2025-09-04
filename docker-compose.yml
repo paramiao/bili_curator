@@ -1,5 +1,9 @@
 version: '3.8'
 
+networks:
+  media_net:
+    driver: bridge
+
 services:
   bili-curator:
     build: 
@@ -8,6 +12,8 @@ services:
         VERSION: ${VERSION:-v7}
     image: bili_curator:${VERSION:-v7}
     container_name: bili_curator_${VERSION:-v7}
+    networks:
+      - media_net
     ports:
       - "8080:8080"
     volumes:

@@ -40,6 +40,11 @@ class DownloadConfig(BaseSettings):
         env="STRM_PATH",
         description="STRM文件目录"
     )
+    strm_cache_dir: str = Field(
+        default="/app/cache/strm",
+        env="STRM_CACHE_DIR",
+        description="STRM视频缓存目录"
+    )
     max_concurrent_downloads: int = Field(
         default=3,
         env="MAX_CONCURRENT_DOWNLOADS",
@@ -154,6 +159,11 @@ class WebServerConfig(BaseSettings):
         ge=1,
         le=65535,
         description="服务器监听端口"
+    )
+    external_url: Optional[str] = Field(
+        default=None,
+        env="EXTERNAL_URL",
+        description="外部访问URL，用于STRM文件生成（如：https://your-domain.com:8080）"
     )
     workers: int = Field(
         default=1,

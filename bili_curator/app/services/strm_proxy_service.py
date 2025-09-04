@@ -83,46 +83,38 @@ class STRMProxyService:
             quality: 视频质量 (1080p, 720p, 480p, 360p)
             
         Returns:
-            代理流URL
+            B站直播URL
         """
         try:
-            # 检查是否已有活跃流
+            # 确保session已初始化
+            if self.session is None:
+                await self.start()
+            
+            # 检查缓存
             stream_key = f"{bilibili_id}_{quality}"
             if stream_key in self.active_streams:
                 stream_info = self.active_streams[stream_key]
-                if time.time() - stream_info["created_at"] < 3600:  # 1小时有效期
-                    return stream_info["proxy_url"]
+                if time.time() - stream_info["created_at"] < 1800:  # 30分钟有效期
+                    return stream_info["play_url"]
                 else:
-                    await self._cleanup_stream(stream_key)
-            
-            # 获取B站视频信息
-            video_info = await self._get_bilibili_video_info(bilibili_id)
-            if not video_info:
-                raise ExternalAPIError("Bilibili", f"无法获取视频信息: {bilibili_id}")
+                    del self.active_streams[stream_key]
             
             # 获取播放URL
             play_url = await self._get_bilibili_play_url(bilibili_id, quality)
             if not play_url:
                 raise ExternalAPIError("Bilibili", f"无法获取播放URL: {bilibili_id}")
             
-            # 创建HLS代理流
-            proxy_url = await self._create_hls_proxy_stream(
-                stream_key, play_url, video_info
-            )
-            
-            # 缓存流信息
+            # 缓存播放URL
             self.active_streams[stream_key] = {
                 "bilibili_id": bilibili_id,
                 "quality": quality,
-                "proxy_url": proxy_url,
                 "play_url": play_url,
-                "video_info": video_info,
                 "created_at": time.time(),
                 "access_count": 0
             }
             
-            logger.info(f"创建STRM代理流: {bilibili_id} -> {proxy_url}")
-            return proxy_url
+            logger.info(f"获取STRM播放URL: {bilibili_id} -> {play_url[:100]}...")
+            return play_url
             
         except Exception as e:
             logger.error(f"获取视频流URL失败: {bilibili_id}, {e}")
@@ -135,16 +127,14 @@ class STRMProxyService:
             if not cookies:
                 raise ExternalAPIError("Bilibili", "没有可用的Cookie")
             
-            # 使用第一个有效Cookie
+            # 使用第一个有效Cookie，并使用cookie_manager的headers方法
             cookie = cookies[0]
-            cookie_str = f"SESSDATA={cookie.sessdata}; bili_jct={cookie.bili_jct}; DedeUserID={cookie.dedeuserid}"
+            headers = self.cookie_manager.get_cookie_headers(cookie)
+            headers.update({
+                "Referer": "https://www.bilibili.com/"
+            })
             
             url = f"https://api.bilibili.com/x/web-interface/view?bvid={bilibili_id}"
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Referer": "https://www.bilibili.com/",
-                "Cookie": cookie_str
-            }
             
             async with self.session.get(url, headers=headers) as response:
                 if response.status == 200:
@@ -177,9 +167,12 @@ class STRMProxyService:
             if not cookies:
                 raise ExternalAPIError("Bilibili", "没有可用的Cookie")
             
-            # 使用第一个有效Cookie
+            # 使用第一个有效Cookie，并使用cookie_manager的headers方法
             cookie = cookies[0]
-            cookie_str = f"SESSDATA={cookie.sessdata}; bili_jct={cookie.bili_jct}; DedeUserID={cookie.dedeuserid}"
+            headers = self.cookie_manager.get_cookie_headers(cookie)
+            headers.update({
+                "Referer": f"https://www.bilibili.com/video/{bilibili_id}"
+            })
             
             # 质量映射
             quality_map = {
@@ -191,11 +184,6 @@ class STRMProxyService:
             qn = quality_map.get(quality, 64)
             
             url = f"https://api.bilibili.com/x/player/playurl?bvid={bilibili_id}&cid={cid}&qn={qn}&type=&otype=json&fourk=1&fnver=0&fnval=0"
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Referer": f"https://www.bilibili.com/video/{bilibili_id}",
-                "Cookie": cookie_str
-            }
             
             async with self.session.get(url, headers=headers) as response:
                 if response.status == 200:
