@@ -161,10 +161,28 @@ class RequestQueueManager:
 
     def get(self, job_id: str) -> Optional[Dict[str, Any]]:
         job = self._jobs.get(job_id)
-        return asdict(job) if job else None
+        if not job:
+            return None
+        
+        # 手动序列化，确保datetime对象转换为ISO字符串
+        job_dict = asdict(job)
+        for key, value in job_dict.items():
+            if isinstance(value, datetime):
+                job_dict[key] = value.isoformat() if value else None
+        return job_dict
 
     def list(self) -> List[Dict[str, Any]]:
-        return [asdict(self._jobs[j]) for j in list(self._order)]
+        result = []
+        for job_id in list(self._order):
+            job = self._jobs.get(job_id)
+            if job:
+                # 手动序列化，确保datetime对象转换为ISO字符串
+                job_dict = asdict(job)
+                for key, value in job_dict.items():
+                    if isinstance(value, datetime):
+                        job_dict[key] = value.isoformat() if value else None
+                result.append(job_dict)
+        return result
 
     async def mark_running(self, job_id: str):
         """切换为 RUNNING，并根据暂停标志与分级并发控制进行等待与信号量获取。"""

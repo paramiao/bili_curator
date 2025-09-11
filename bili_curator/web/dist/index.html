@@ -1238,7 +1238,7 @@
                     startTasksPolling();
                     break;
                 case 'queue':
-                    startQueuePolling();
+                    loadQueueData();
                     break;
                 case 'strm':
                     loadStrmOverview();
@@ -2450,13 +2450,13 @@
         }
 
         async function refreshTasks() {
-            const data = await apiRequest('/api/tasks');
+            const data = await apiRequest('/api/requests');
             if (data.error) {
                 document.getElementById('task-list').innerHTML = `<p class="error">加载失败: ${data.error}</p>`;
                 return;
             }
             // 兼容后端返回对象（以 task_id 为键）或数组
-            const tasksArr = Array.isArray(data) ? data : Object.values(data || {});
+            const tasksArr = data.items || data || [];
             renderTasks(tasksArr);
         }
 
@@ -2511,23 +2511,23 @@
         }
 
         async function pauseTask(taskId) {
-            const res = await apiRequest(`/api/tasks/${taskId}/pause`, { method: 'POST' });
+            const res = await apiRequest(`/api/requests/${taskId}/pause`, { method: 'POST' });
             if (res.error) return alert('暂停失败: ' + res.error);
             refreshTasks();
         }
         async function resumeTask(taskId) {
-            const res = await apiRequest(`/api/tasks/${taskId}/resume`, { method: 'POST' });
+            const res = await apiRequest(`/api/requests/${taskId}/resume`, { method: 'POST' });
             if (res.error) return alert('恢复失败: ' + res.error);
             refreshTasks();
         }
         async function cancelTask(taskId) {
-            const res = await apiRequest(`/api/tasks/${taskId}/cancel`, { method: 'POST' });
+            const res = await apiRequest(`/api/requests/${taskId}/cancel`, { method: 'POST' });
             if (res.error) return alert('取消失败: ' + res.error);
             refreshTasks();
         }
 
         async function clearCompletedTasks() {
-            const res = await apiRequest('/api/tasks/clear-completed', { method: 'POST' });
+            const res = await apiRequest('/api/requests/clear-completed', { method: 'POST' });
             if (res.error) return alert('清理失败: ' + res.error);
             refreshTasks();
         }

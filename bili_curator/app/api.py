@@ -2629,9 +2629,38 @@ async def get_all_tasks():
 
 # —— 全局请求队列只读接口 ——
 @app.get("/api/requests")
-async def list_requests():
+async def list_requests(limit: int = 100, active_only: bool = True):
+    """获取请求队列列表
+    Args:
+        limit: 返回记录数限制，默认100
+        active_only: 是否只返回活跃任务（queued/running），默认True
+    """
     items = request_queue.list()
-    return {"count": len(items), "items": items}
+    
+    if active_only:
+        # 只返回活跃任务（排队中、运行中）和最近失败的任务
+        active_items = [
+            item for item in items 
+            if item.get('status') in ['queued', 'running', 'failed']
+        ]
+        # 如果活跃任务少于limit，补充最近完成的任务
+        if len(active_items) < limit:
+            done_items = [
+                item for item in items 
+                if item.get('status') == 'done'
+            ]
+            # 按完成时间倒序排列，取最新的
+            done_items.sort(key=lambda x: x.get('finished_at') or '', reverse=True)
+            remaining_slots = limit - len(active_items)
+            active_items.extend(done_items[:remaining_slots])
+        
+        items = active_items
+    else:
+        # 全量返回时也要限制数量，按创建时间倒序
+        items.sort(key=lambda x: x.get('created_at') or '', reverse=True)
+        items = items[:limit]
+    
+    return {"count": len(items), "items": items, "total_in_queue": len(request_queue.list())}
 
 @app.get("/api/requests/{job_id}")
 async def get_request(job_id: str):
